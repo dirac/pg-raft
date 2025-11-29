@@ -50,3 +50,10 @@ CMD ["/usr/sbin/sshd", "-D"]
 # Login
 # $ ssh venkat@localhost -p 2222
 
+# Create ssh key for git
+# $ ssh-keygen -t ed25519 -C "venkat.murty@gmail.com"
+# $ eval "$(ssh-agent -s)"
+# $ ssh-add ~/.ssh/id_ed25519
+# $  cat ~/.ssh/id_ed25519.pub
+# $  git clone git@github.com:dirac/pg-raft.git
+
