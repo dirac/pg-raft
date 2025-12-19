@@ -29,6 +29,14 @@ RUN chmod ugo+x bazelisk-linux-arm64
 RUN mv bazelisk-linux-arm64 bazelisk
 RUN mv bazelisk /usr/local/bin/.
 
+# postgresql installation (https://wiki.postgresql.org/wiki/Apt)
+RUN apt-get install -y postgresql-common ca-certificates
+RUN /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+RUN apt-get update
+
+# Install postgresql (/usr/lib/postgresql/18/)
+RUN apt-get install postgresql-18
+
 # Allow password authentication for SSH (optional, for development/testing)
 # In production, consider disabling password authentication and using SSH keys.
 RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
