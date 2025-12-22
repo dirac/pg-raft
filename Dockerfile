@@ -20,9 +20,9 @@ RUN addgroup fuse
 
 # Create a non-root user and set a password (replace 'youruser' and 'yourpassword')
 # For production, consider using SSH keys instead of passwords.
-RUN useradd -g fuse -ms /bin/bash venkat && \
-    echo "venkat:venkat" | chpasswd && \
-    adduser venkat sudo
+RUN useradd -g fuse -ms /bin/bash postgres && \
+    echo "postgres:postgres" | chpasswd && \
+    adduser postgres sudo
 
 RUN wget https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-arm64
 RUN chmod ugo+x bazelisk-linux-arm64
@@ -56,7 +56,7 @@ CMD ["/usr/sbin/sshd", "-D"]
 # $ docker run -d -p 2222:22 --name dev ubuntu
 
 # Login
-# $ ssh venkat@localhost -p 2222
+# $ ssh postgres@localhost -p 2222
 
 # Create ssh key for git
 # $ ssh-keygen -t ed25519 -C "venkat.murty@gmail.com"
