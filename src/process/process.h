@@ -8,7 +8,7 @@
 
 // Manages the lifecycle of a child process.
 //
-// Start() forks and execs the process. Stop() sends SIGTERM and waits up to a
+// start() forks and execs the process. stop() sends SIGTERM and waits up to a
 // timeout before sending SIGKILL. The destructor kills and reaps the child if
 // it is still running.
 class Process {
@@ -23,30 +23,30 @@ class Process {
 
   // Forks and execs the process. Returns false if already running or exec
   // fails.
-  bool Start();
+  bool start();
 
   // Sends SIGTERM; if the process has not exited within timeout_ms, sends
   // SIGKILL and waits.
-  void Stop(int timeout_ms = 5000);
+  void stop(int timeout_ms = 5000);
 
   // Sends SIGKILL without waiting.
-  void Kill();
+  void kill();
 
   // Blocks until the process exits and returns its exit code. Negative values
   // indicate termination by signal (-SIGNUM).
-  int Wait();
+  int wait();
 
   // Non-blocking check. Returns the exit code if the process has exited,
   // otherwise std::nullopt.
-  std::optional<int> TryWait();
+  std::optional<int> try_wait();
 
   // True when the process has been started and not yet fully reaped.
-  bool IsRunning() const;
+  bool is_running() const;
 
   pid_t pid() const { return pid_; }
 
  private:
-  static int DecodeStatus(int status);
+  static int decode_status(int status);
 
   std::string executable_;
   std::vector<std::string> args_;

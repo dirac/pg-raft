@@ -11,9 +11,9 @@ Process::Process(std::string executable, std::vector<std::string> args)
     : executable_(std::move(executable)), args_(std::move(args)) {}
 
 Process::~Process() {
-  if (IsRunning()) {
-    Kill();
-    Wait();
+  if (is_running()) {
+    kill();
+    wait();
   }
 }
 
@@ -26,9 +26,9 @@ Process::Process(Process&& other) noexcept
 
 Process& Process::operator=(Process&& other) noexcept {
   if (this != &other) {
-    if (IsRunning()) {
-      Kill();
-      Wait();
+    if (is_running()) {
+      kill();
+      wait();
     }
     executable_ = std::move(other.executable_);
     args_ = std::move(other.args_);
@@ -38,8 +38,8 @@ Process& Process::operator=(Process&& other) noexcept {
   return *this;
 }
 
-bool Process::Start() {
-  if (IsRunning()) return false;
+bool Process::start() {
+  if (is_running()) return false;
 
   pid_ = fork();
   if (pid_ < 0) {
@@ -61,38 +61,38 @@ bool Process::Start() {
   return true;
 }
 
-void Process::Kill() {
+void Process::kill() {
   if (pid_ > 0) {
-    kill(pid_, SIGKILL);
+    ::kill(pid_, SIGKILL);
   }
 }
 
-void Process::Stop(int timeout_ms) {
+void Process::stop(int timeout_ms) {
   if (pid_ <= 0) return;
 
-  kill(pid_, SIGTERM);
+  ::kill(pid_, SIGTERM);
 
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (TryWait().has_value()) return;
+    if (try_wait().has_value()) return;
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 
-  Kill();
-  Wait();
+  kill();
+  wait();
 }
 
-int Process::Wait() {
+int Process::wait() {
   if (pid_ <= 0) return -1;
 
   int status = 0;
   waitpid(pid_, &status, 0);
   pid_ = -1;
-  return DecodeStatus(status);
+  return decode_status(status);
 }
 
-std::optional<int> Process::TryWait() {
+std::optional<int> Process::try_wait() {
   if (pid_ <= 0) return std::nullopt;
 
   int status = 0;
@@ -100,14 +100,14 @@ std::optional<int> Process::TryWait() {
   if (result == 0) return std::nullopt;
 
   pid_ = -1;
-  return DecodeStatus(status);
+  return decode_status(status);
 }
 
-bool Process::IsRunning() const {
+bool Process::is_running() const {
   return pid_ > 0;
 }
 
-int Process::DecodeStatus(int status) {
+int Process::decode_status(int status) {
   if (WIFEXITED(status)) return WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return -WTERMSIG(status);
   return -1;

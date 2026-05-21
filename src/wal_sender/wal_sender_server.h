@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -13,8 +12,8 @@
 //
 // For each accepted connection, on_sender is called in a dedicated thread with
 // a reference to the newly created WalSender.  The callback must call
-// sender.Run() (possibly after starting a producer thread that feeds
-// sender.Send()).  Run() blocks until the connection closes; the thread exits
+// sender.run() (possibly after starting a producer thread that feeds
+// sender.send()).  run() blocks until the connection closes; the thread exits
 // when on_sender returns.
 class WalSenderServer {
  public:
@@ -30,18 +29,18 @@ class WalSenderServer {
   WalSenderServer& operator=(const WalSenderServer&) = delete;
 
   // Bind, listen, and start the accept loop thread. Returns false on error.
-  bool Start();
+  bool start();
 
   // Stop accepting new connections. Existing connections continue until they
-  // finish naturally (call Shutdown() on individual senders to force them out).
-  void Stop();
+  // finish naturally (call shutdown() on individual senders to force them out).
+  void stop();
 
   // Port that the server is actually listening on (useful when port 0 was
   // requested).
   uint16_t bound_port() const { return bound_port_; }
 
  private:
-  void AcceptLoop();
+  void accept_loop();
 
   uint16_t port_;
   uint64_t system_id_;

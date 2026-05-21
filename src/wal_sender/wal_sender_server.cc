@@ -20,10 +20,10 @@ WalSenderServer::WalSenderServer(uint16_t port, uint64_t system_id,
       status_cb_(std::move(status_cb)) {}
 
 WalSenderServer::~WalSenderServer() {
-  Stop();
+  stop();
 }
 
-bool WalSenderServer::Start() {
+bool WalSenderServer::start() {
   listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ < 0) return false;
 
@@ -63,11 +63,11 @@ bool WalSenderServer::Start() {
   fcntl(wakeup_[0], F_SETFL, O_NONBLOCK);
   fcntl(wakeup_[1], F_SETFL, O_NONBLOCK);
 
-  accept_thread_ = std::thread(&WalSenderServer::AcceptLoop, this);
+  accept_thread_ = std::thread(&WalSenderServer::accept_loop, this);
   return true;
 }
 
-void WalSenderServer::Stop() {
+void WalSenderServer::stop() {
   if (wakeup_[1] >= 0) {
     char b = 1;
     write(wakeup_[1], &b, 1);
@@ -89,14 +89,14 @@ void WalSenderServer::Stop() {
   if (wakeup_[1] >= 0) { close(wakeup_[1]); wakeup_[1] = -1; }
 }
 
-void WalSenderServer::AcceptLoop() {
+void WalSenderServer::accept_loop() {
   while (true) {
     struct pollfd fds[2];
     fds[0].fd = listen_fd_; fds[0].events = POLLIN;
     fds[1].fd = wakeup_[0]; fds[1].events = POLLIN;
 
     if (poll(fds, 2, -1) < 0) break;
-    if (fds[1].revents & POLLIN) break;  // Stop() signal
+    if (fds[1].revents & POLLIN) break;  // stop() signal
     if (!(fds[0].revents & POLLIN)) continue;
 
     struct sockaddr_in client{};
