@@ -1,0 +1,10 @@
+
+lib process
+    : process.cc
+    ;
+
+unit-test process_test
+    : process_test.cc
+      process
+      ../..//external
+    ;

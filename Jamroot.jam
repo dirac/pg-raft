@@ -1,0 +1,64 @@
+
+path-constant TOP_DIR : . ;
+
+project pg_raft
+    : requirements
+      <include>.
+      <link>static
+      <cxxstd>latest
+      <debug-symbols>on
+      <cxxflags>-DBOOST_STACKTRACE_USE_BACKTRACE=1
+      <cxxflags>-DBOOST_ASIO_NO_DEPRECATED=1
+      <cxxflags>-DTOP_DIR="$(TOP_DIR)"
+      <variant>debug:<cxxflags>-Wextra
+      <variant>debug:<cxxflags>-Wconversion
+      <variant>debug:<cxxflags>-Wuninitialized
+      <variant>debug:<cxxflags>-Wno-non-virtual-dtor
+      <variant>debug:<cxxflags>-ftemplate-backtrace-limit=0
+      <cxxflags>-Wall
+      <cxxflags>-Werror
+      <cxxflags>-isystem/opt/sparrow/include
+      <warnings>all
+      <visibility>hidden
+      <address-sanitizer>norecover:<cxxflags>-DUSE_ASAN=1
+      <thread-sanitizer>norecover:<cxxflags>-DUSE_TSAN=1
+      <thread-sanitizer>norecover:<cxxflags>-Wno-tsan
+    ;
+
+
+using testing ;
+
+lib boost_log             : : <name>boost_log             <search>/opt/sparrow/lib/ ;
+lib boost_json            : : <name>boost_json            <search>/opt/sparrow/lib/ ;
+lib boost_filesystem      : : <name>boost_filesystem      <search>/opt/sparrow/lib/ ;
+lib boost_thread          : : <name>boost_thread          <search>/opt/sparrow/lib/ ;
+lib boost_serialization   : : <name>boost_serialization   <search>/opt/sparrow/lib/ ;
+
+lib boost_unit_test_framework  : : <name>boost_unit_test_framework <search>/opt/sparrow/lib/ ;
+
+
+lib lmdb    : : <name>lmdb    <search>/opt/sparrow/lib/ ;
+lib sqlite3   : : <name>sqlite3  <search>/opt/sparrow/lib/ ;
+
+lib pg_query : : <name>pg_query <search>/opt/sparrow/lib/ ;
+lib pq       : : <name>pq <search>/opt/sparrow/lib/ ;
+lib pgport   : : <name>pgport <search>/opt/sparrow/lib/ ;
+lib pgcommon : : <name>pgcommon <search>/opt/sparrow/lib/ ;
+lib pgcommon_shlib : : <name>pgcommon_shlib <search>/opt/sparrow/lib/ ;
+
+alias external :
+    boost_log
+    boost_json
+    boost_filesystem
+    boost_serialization
+    lmdb
+    sqlite3
+    pq
+    pgport
+    pgcommon
+    pgcommon_shlib
+  ;
+
+
+build-project src ;
+
