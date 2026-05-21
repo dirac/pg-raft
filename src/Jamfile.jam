@@ -1,1 +1,2 @@
 build-project process ;
+build-project wal_sender ;
