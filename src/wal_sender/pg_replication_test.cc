@@ -47,7 +47,6 @@ struct WalCapture {
   std::mutex              mu;
   std::deque<WalSegment>  buffer;   // segments buffered before standby connects
   WalSender*              sender = nullptr;
-  std::map<std::string, off_t> file_pos;  // backing path → bytes sent so far
 };
 static WalCapture g_capture;
 
@@ -76,31 +75,67 @@ static bool is_wal_segment(const char* fuse_path) {
   return true;
 }
 
-// Read bytes written to |backing_path| since the last capture and deliver them
-// as a WalSegment.  Holds g_capture.mu for the duration so it is safe to call
-// from concurrent FUSE threads.
-static void capture_wal(const std::string& backing_path) {
-  std::lock_guard<std::mutex> lk(g_capture.mu);
+// Called from the FUSE write hook with the exact bytes and file offset being
+// written.  Validates WAL page headers (magic + xlp_pageaddr) and enqueues
+// valid bytes for delivery to the standby.
+//
+// Using write rather than fsync means we work regardless of the WAL sync
+// method (including macOS F_FULLFSYNC which FUSE does not intercept).
+static void capture_wal_write(const char* fuse_path, const char* buf,
+                               size_t size, off_t offset,
+                               const char* bdir) {
+  static constexpr uint16_t kXlogMagic = 0xD116;
+  static constexpr uint32_t kPageSize  = 8192;
 
-  off_t& pos = g_capture.file_pos[backing_path];
-
-  int fd = open(backing_path.c_str(), O_RDONLY);
-  if (fd < 0) return;
-
-  off_t end = lseek(fd, 0, SEEK_END);
-  if (end <= pos) { close(fd); return; }
-
-  size_t sz = static_cast<size_t>(end - pos);
-  std::vector<uint8_t> data(sz);
-  ssize_t n = pread(fd, data.data(), sz, pos);
-  close(fd);
-  if (n <= 0) return;
-  data.resize(static_cast<size_t>(n));
-
+  std::string backing_path = std::string(bdir) + fuse_path;
   uint64_t seg_lsn = lsn_from_backing_path(backing_path);
-  WalSegment seg{seg_lsn + static_cast<uint64_t>(pos), std::move(data)};
-  pos += static_cast<off_t>(n);
 
+  // Walk the written bytes page by page.  Stop at the first page whose
+  // magic is wrong (pre-zeroing) or whose xlp_pageaddr doesn't match the
+  // expected segment LSN (recycled-segment stale content).
+  size_t valid_bytes = 0;
+  for (size_t off = 0; off < size; ) {
+    uint32_t file_off = static_cast<uint32_t>(offset) + static_cast<uint32_t>(off);
+    bool at_page_start = (file_off % kPageSize == 0);
+
+    if (at_page_start) {
+      if (off + 16 > size) break;
+
+      uint16_t magic = static_cast<uint16_t>(
+          static_cast<uint16_t>(static_cast<uint8_t>(buf[off])) |
+          static_cast<uint16_t>(
+              static_cast<uint16_t>(static_cast<uint8_t>(buf[off + 1])) << 8));
+      if (magic != kXlogMagic) break;
+
+      uint64_t pageaddr = 0;
+      for (int b = 0; b < 8; ++b)
+        pageaddr |= static_cast<uint64_t>(
+                        static_cast<uint8_t>(buf[off + 8 + static_cast<size_t>(b)]))
+                    << static_cast<unsigned>(b * 8);
+      if (pageaddr != seg_lsn + static_cast<uint64_t>(file_off)) break;
+    }
+
+    uint32_t page_off          = file_off % kPageSize;
+    uint32_t remaining_in_page = kPageSize - page_off;
+    size_t   chunk = std::min(static_cast<size_t>(remaining_in_page), size - off);
+    valid_bytes += chunk;
+    off         += chunk;
+  }
+
+  std::cerr << "[capture_write] valid=" << valid_bytes
+            << " seg_lsn=0x" << std::hex << seg_lsn
+            << " off=0x" << offset << std::dec << "\n";
+  if (valid_bytes == 0) return;
+
+  uint64_t start_lsn = seg_lsn + static_cast<uint64_t>(offset);
+  std::vector<uint8_t> data(reinterpret_cast<const uint8_t*>(buf),
+                             reinterpret_cast<const uint8_t*>(buf) + valid_bytes);
+  WalSegment seg{start_lsn, std::move(data)};
+
+  std::lock_guard<std::mutex> lk(g_capture.mu);
+  std::cerr << "[capture_write] queued lsn=0x" << std::hex << start_lsn
+            << " bytes=" << std::dec << valid_bytes
+            << " sender=" << (g_capture.sender ? "yes" : "no") << "\n";
   if (g_capture.sender)
     g_capture.sender->send(std::move(seg));
   else
@@ -116,21 +151,23 @@ class WalSendingOps {
  public:
   static struct fuse_operations make_ops() {
     struct fuse_operations ops = WalFuseOpBase::make_ops();
-    ops.fsync = op_fsync;
+    ops.write = op_write;
     return ops;
   }
 
  private:
-  static int op_fsync(const char* path, int datasync,
-                      struct fuse_file_info* fi) {
-    (void)datasync;
-    if (fsync(static_cast<int>(fi->fh)) == -1) return -errno;
+  static int op_write(const char* path, const char* buf, size_t size,
+                      off_t offset, struct fuse_file_info* fi) {
+    ssize_t res = pwrite(static_cast<int>(fi->fh), buf, size, offset);
+    if (res == -1) return -errno;
     if (is_wal_segment(path)) {
+      std::cerr << "[write] " << path << " off=" << offset
+                << " size=" << size << "\n";
       const char* bdir =
           static_cast<const char*>(fuse_get_context()->private_data);
-      capture_wal(std::string(bdir) + path);
+      capture_wal_write(path, buf, static_cast<size_t>(res), offset, bdir);
     }
-    return 0;
+    return static_cast<int>(res);
   }
 };
 
@@ -267,7 +304,7 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   {
     Process p(kPgBin + "/pg_basebackup",
               {"-h", "127.0.0.1", "-p", std::to_string(kPrimaryPort),
-               "-D", standby_dir, "-P", "-X", "none"});
+               "-D", standby_dir, "-P", "-X", "stream"});
     BOOST_REQUIRE(p.start());
     BOOST_TEST_MESSAGE(p.to_string());
     if (p.wait() != 0) {
@@ -315,6 +352,8 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
           }
           g_capture.buffer.clear();
           g_capture.sender = &sender;
+          std::cerr << "[start_cb] sender registered, start_lsn="
+                    << std::hex << start_lsn << std::dec << "\n";
         });
 
         sender.run();
@@ -367,13 +406,19 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   uint64_t target_lsn =
       parse_lsn(pg_query_str(primary_conn, "SELECT pg_current_wal_flush_lsn()"));
 
+  std::cerr << "[check] target_lsn=0x" << std::hex << target_lsn << std::dec << "\n";
   bool caught_up = false;
   auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (std::chrono::steady_clock::now() < deadline) {
     uint64_t sb_lsn = parse_lsn(pg_query_str(
         standby_conn, "SELECT COALESCE(pg_last_wal_replay_lsn(), '0/0')"));
+    std::string rcv_status = pg_query_str(standby_conn,
+        "SELECT status||' '||received_lsn||' '||last_msg_receipt_time"
+        " FROM pg_stat_wal_receiver");
+    std::cerr << "[check] sb_replay=0x" << std::hex << sb_lsn << std::dec
+              << " walrcv=" << rcv_status << "\n";
     if (sb_lsn >= target_lsn) { caught_up = true; break; }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
   }
   BOOST_CHECK(caught_up);
 
