@@ -2,7 +2,6 @@
 lib wal_sender
     : wal_sender.cc
       wal_sender_server.cc
-      wal_file_reader.cc
     ;
 
 unit-test wal_sender_test
@@ -11,9 +10,10 @@ unit-test wal_sender_test
       ../..//external
     ;
 
-exe pg_replication_test
+unit-test pg_replication_test
     : pg_replication_test.cc
       wal_sender
       ../process//process
+      ../wal_fuse//wal_fuse
       ../..//external
     ;
