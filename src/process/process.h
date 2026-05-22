@@ -3,6 +3,8 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <numeric>
+#include <format>
 
 #include <sys/types.h>
 
@@ -12,14 +14,14 @@
 // timeout before sending SIGKILL. The destructor kills and reaps the child if
 // it is still running.
 class Process {
- public:
+public:
   Process(std::string executable, std::vector<std::string> args);
   ~Process();
 
-  Process(const Process&) = delete;
-  Process& operator=(const Process&) = delete;
-  Process(Process&&) noexcept;
-  Process& operator=(Process&&) noexcept;
+  Process(const Process &) = delete;
+  Process &operator=(const Process &) = delete;
+  Process(Process &&) noexcept;
+  Process &operator=(Process &&) noexcept;
 
   // Forks and execs the process. Returns false if already running or exec
   // fails.
@@ -45,7 +47,14 @@ class Process {
 
   pid_t pid() const { return pid_; }
 
- private:
+  std::string to_string() const {
+    std::string result = std::format("[{0}] {1}", pid_, executable_);
+    return std::accumulate(
+        std::begin(args_), std::end(args_), std::move(result),
+        [](auto result, const auto &arg) { return result + " " + arg; });
+  }
+
+private:
   static int decode_status(int status);
 
   std::string executable_;

@@ -32,8 +32,10 @@ class WalSender {
   // |system_id|  – value from pg_control's system identifier.
   // |timeline|   – current timeline ID.
   // |end_lsn|    – initial end-of-WAL LSN (updated as segments are sent).
+  // |wal_segment_size| must match the primary's wal_segment_size (bytes).
   WalSender(int fd, uint64_t system_id, uint32_t timeline, uint64_t end_lsn,
-            StatusCallback status_cb = {});
+            StatusCallback status_cb = {},
+            uint32_t wal_segment_size = 16 * 1024 * 1024);
   ~WalSender();
 
   WalSender(const WalSender&) = delete;
@@ -47,6 +49,14 @@ class WalSender {
 
   // Signal that no more WAL will follow. run() returns after draining.
   void shutdown();
+
+  // Called once, from inside run(), when START_REPLICATION is received and
+  // before the streaming loop begins.  The callback may call send() from any
+  // thread.  Set this before calling run().
+  using ReplicationStartCallback = std::function<void(uint64_t start_lsn)>;
+  void set_replication_start_cb(ReplicationStartCallback cb) {
+    replication_start_cb_ = std::move(cb);
+  }
 
  private:
   bool do_handshake();
@@ -91,7 +101,9 @@ class WalSender {
   uint64_t system_id_;
   uint32_t timeline_;
   uint64_t end_lsn_;
+  uint32_t wal_segment_size_;
   StatusCallback status_cb_;
+  ReplicationStartCallback replication_start_cb_;
 
   // Write a byte to wakeup_[1] from send() to unblock the streaming poll.
   int wakeup_[2] = {-1, -1};

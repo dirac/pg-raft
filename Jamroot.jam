@@ -18,6 +18,7 @@ project pg_raft
       <cxxflags>-Wall
       <cxxflags>-Werror
       <cxxflags>-isystem/opt/sparrow/include
+      <cxxflags>-isystem/usr/local/include
       <warnings>all
       <visibility>hidden
       <address-sanitizer>norecover:<cxxflags>-DUSE_ASAN=1
@@ -36,6 +37,8 @@ lib boost_serialization   : : <name>boost_serialization   <search>/opt/sparrow/l
 
 lib boost_unit_test_framework  : : <name>boost_unit_test_framework <search>/opt/sparrow/lib/ ;
 
+lib ssl    : : <name>ssl    <search>/opt/sparrow/lib/ <search>/opt/sparrow/lib64 ;
+lib crypto : : <name>crypto <search>/opt/sparrow/lib/ <search>/opt/sparrow/lib64 ;
 
 lib lmdb    : : <name>lmdb    <search>/opt/sparrow/lib/ ;
 lib sqlite3   : : <name>sqlite3  <search>/opt/sparrow/lib/ ;
@@ -46,6 +49,8 @@ lib pgport   : : <name>pgport <search>/opt/sparrow/lib/ ;
 lib pgcommon : : <name>pgcommon <search>/opt/sparrow/lib/ ;
 lib pgcommon_shlib : : <name>pgcommon_shlib <search>/opt/sparrow/lib/ ;
 
+lib fuse : : <name>fuse <search>/usr/local/lib ;
+
 alias external :
     boost_log
     boost_json
@@ -53,10 +58,13 @@ alias external :
     boost_serialization
     lmdb
     sqlite3
+    fuse
     pq
     pgport
     pgcommon
     pgcommon_shlib
+    ssl
+    crypto
   ;
 
 

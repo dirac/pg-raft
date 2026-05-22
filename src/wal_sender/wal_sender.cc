@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <iostream>
 
 // Microseconds between the Unix epoch (1970) and the PostgreSQL epoch (2000).
 static constexpr int64_t kPgEpochOffsetUs = 946684800LL * 1000000LL;
@@ -18,11 +19,13 @@ static constexpr int64_t kPgEpochOffsetUs = 946684800LL * 1000000LL;
 // ── construction / destruction ────────────────────────────────────────────────
 
 WalSender::WalSender(int fd, uint64_t system_id, uint32_t timeline,
-                     uint64_t end_lsn, StatusCallback status_cb)
+                     uint64_t end_lsn, StatusCallback status_cb,
+                     uint32_t wal_segment_size)
     : fd_(fd),
       system_id_(system_id),
       timeline_(timeline),
       end_lsn_(end_lsn),
+      wal_segment_size_(wal_segment_size),
       status_cb_(std::move(status_cb)) {
   pipe(wakeup_);
   fcntl(wakeup_[0], F_SETFL, O_NONBLOCK);
@@ -92,6 +95,7 @@ bool WalSender::do_handshake() {
     std::string query(reinterpret_cast<const char*>(payload.data()),
                       payload.size());
     while (!query.empty() && query.back() == '\0') query.pop_back();
+    std::cerr << "Query " << query << std::endl;
 
     // Case-insensitive prefix match on the command keyword.
     std::string upper = query;
@@ -102,11 +106,36 @@ bool WalSender::do_handshake() {
     } else if (upper.find("START_REPLICATION") != std::string::npos) {
       return handle_start_replication(query);
     } else if (upper.find("TIMELINE_HISTORY") != std::string::npos) {
-      // Return an empty result set; we only have one timeline.
       std::vector<std::pair<std::string, int32_t>> cols = {
           {"filename", 25}, {"content", 25}};
       if (!send_row_description(cols)) return false;
       if (!send_command_complete("TIMELINE_HISTORY 1")) return false;
+      if (!send_ready_for_query()) return false;
+    } else if (upper.rfind("SET ", 0) == 0) {
+      // SET command – accept and ignore.
+      if (!send_command_complete("SET")) return false;
+      if (!send_ready_for_query()) return false;
+    } else if (upper.rfind("SHOW ", 0) == 0) {
+      // SHOW param – return value as a single-column result.
+      std::string param = query.substr(5);
+      while (!param.empty() && (isspace((unsigned char)param.back()) ||
+                                 param.back() == ';'))
+        param.pop_back();
+      std::string value;
+      if (param == "wal_segment_size") {
+        value = std::to_string(wal_segment_size_);
+      }
+      std::vector<std::pair<std::string, int32_t>> cols = {{param, 25}};
+      if (!send_row_description(cols)) return false;
+      if (!send_data_row({{value}})) return false;
+      if (!send_command_complete("SHOW")) return false;
+      if (!send_ready_for_query()) return false;
+    } else if (upper.rfind("SELECT ", 0) == 0) {
+      // Generic SELECT (e.g. set_config) – return one row with empty string.
+      std::vector<std::pair<std::string, int32_t>> cols = {{"?column?", 25}};
+      if (!send_row_description(cols)) return false;
+      if (!send_data_row({{std::string("")}})) return false;
+      if (!send_command_complete("SELECT 1")) return false;
       if (!send_ready_for_query()) return false;
     } else {
       if (!send_error_response("unrecognized replication command")) return false;
@@ -160,6 +189,7 @@ bool WalSender::handle_start_replication(const std::string& cmd) {
   }
 
   if (!send_copy_both_response()) return false;
+  if (replication_start_cb_) replication_start_cb_(start_lsn);
   return streaming_loop(start_lsn);
 }
 

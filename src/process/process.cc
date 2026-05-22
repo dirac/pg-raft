@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <thread>
+#include <iostream>
 
 Process::Process(std::string executable, std::vector<std::string> args)
     : executable_(std::move(executable)), args_(std::move(args)) {}
@@ -40,6 +41,8 @@ Process& Process::operator=(Process&& other) noexcept {
 
 bool Process::start() {
   if (is_running()) return false;
+
+  std::cerr << to_string() << std::endl;
 
   pid_ = fork();
   if (pid_ < 0) {
