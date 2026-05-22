@@ -6,3 +6,9 @@ lib wal_fuse
       ../process//process
       ../..//fuse
     ;
+
+unit-test wal_fuse_test
+    : wal_fuse_test.cc
+      wal_fuse
+      ../..//external
+    ;
