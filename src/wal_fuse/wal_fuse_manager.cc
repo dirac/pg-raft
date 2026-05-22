@@ -1,4 +1,5 @@
 #include "src/wal_fuse/wal_fuse_manager.h"
+#include "src/wal_fuse/wal_fuse_ops.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -18,7 +19,7 @@ WalFuseManager::WalFuseManager(std::string pg_bin, std::string data_dir,
     : pg_bin_(std::move(pg_bin)),
       data_dir_(std::move(data_dir)),
       extra_args_(std::move(extra_args)),
-      fuse_(data_dir_ + "/pg_wal", data_dir_ + "/pg_raft_wal"),
+      fuse_(data_dir_ + "/pg_wal", data_dir_ + "/pg_raft_wal", WalFuseOpBase{}),
       postgres_(pg_bin_, build_pg_args(data_dir_, extra_args_)) {}
 
 WalFuseManager::~WalFuseManager() {

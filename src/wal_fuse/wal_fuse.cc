@@ -1,27 +1,12 @@
-#ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 26
-#endif
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
-#endif
-#include <fuse/fuse.h>
+#include "src/wal_fuse/wal_fuse.h"
+
 #include <fuse/fuse_opt.h>
 
-#include "src/wal_fuse/wal_fuse.h"
-#include "src/wal_fuse/wal_fuse_ops.h"
-
-template <typename Ops>
-WalFuse<Ops>::WalFuse(std::string mount_point, std::string backing_dir)
-    : mount_point_(std::move(mount_point)),
-      backing_dir_(std::move(backing_dir)) {}
-
-template <typename Ops>
-WalFuse<Ops>::~WalFuse() {
+WalFuse::~WalFuse() {
   if (mounted_.load()) stop();
 }
 
-template <typename Ops>
-bool WalFuse<Ops>::start() {
+bool WalFuse::start() {
   struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
   fuse_opt_add_arg(&args, "wal_fuse");
   // noappledouble: suppress ._ resource-fork files in pg_wal.
@@ -33,8 +18,7 @@ bool WalFuse<Ops>::start() {
     return false;
   }
 
-  static const struct fuse_operations kOps = Ops::make_ops();
-  fuse_ = fuse_new(chan_, &args, &kOps, sizeof(kOps),
+  fuse_ = fuse_new(chan_, &args, &ops_, sizeof(ops_),
                    const_cast<char*>(backing_dir_.c_str()));
   fuse_opt_free_args(&args);
   if (!fuse_) {
@@ -48,8 +32,7 @@ bool WalFuse<Ops>::start() {
   return true;
 }
 
-template <typename Ops>
-void WalFuse<Ops>::stop() {
+void WalFuse::stop() {
   if (!mounted_.load()) return;
   // Unmounting causes the blocking fuse_loop() in the loop thread to return.
   fuse_unmount(mount_point_.c_str(), chan_);
@@ -60,9 +43,7 @@ void WalFuse<Ops>::stop() {
   mounted_.store(false);
 }
 
-template <typename Ops>
-void WalFuse<Ops>::run_loop() {
+void WalFuse::run_loop() {
   fuse_loop(fuse_);
 }
 
-template class WalFuse<WalFuseOpBase>;
