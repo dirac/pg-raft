@@ -5,6 +5,7 @@
 
 #include "src/process/process.h"
 #include "src/wal_fuse/wal_fuse.h"
+#include "src/wal_fuse/wal_fuse_ops.h"
 
 // Mounts a passthrough FUSE filesystem over the pg_wal directory in a
 // PostgreSQL data directory, then starts PostgreSQL.
@@ -43,6 +44,6 @@ class WalFuseManager {
 
   // Declared after the string/vector members so their values are ready when
   // these are constructed in the initializer list.
-  WalFuse fuse_;
+  WalFuse<WalFuseOpBase> fuse_;
   Process postgres_;
 };

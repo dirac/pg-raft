@@ -10,8 +10,11 @@ struct fuse_chan;
 // Passthrough FUSE filesystem that mounts at |mount_point| and redirects all
 // file operations to |backing_dir|.
 //
+// Ops must provide a static make_ops() returning a fuse_operations struct.
+//
 // Call start() to mount and launch the FUSE event loop in a background thread.
 // Call stop() to unmount and join the thread.
+template <typename Ops>
 class WalFuse {
  public:
   WalFuse(std::string mount_point, std::string backing_dir);
@@ -20,12 +23,8 @@ class WalFuse {
   WalFuse(const WalFuse&) = delete;
   WalFuse& operator=(const WalFuse&) = delete;
 
-  // Mount and start the FUSE event loop in a background thread.
   bool start();
-
-  // Unmount and wait for the event loop thread to exit.
   void stop();
-
   bool is_mounted() const { return mounted_.load(); }
 
  private:
@@ -40,3 +39,7 @@ class WalFuse {
   std::thread loop_thread_;
   std::atomic<bool> mounted_{false};
 };
+
+// Suppress implicit instantiation in all other translation units.
+class WalFuseOpBase;
+extern template class WalFuse<WalFuseOpBase>;
