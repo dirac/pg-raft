@@ -47,6 +47,10 @@ struct WalCapture {
   std::mutex              mu;
   std::deque<WalSegment>  buffer;
   WalSender*              sender = nullptr;
+  // Only capture WAL after the primary has been restarted.  Before restart the
+  // standby has all WAL in its local pg_wal (from the backup); re-sending it
+  // would delay delivery of the critical post-restart records.
+  std::atomic<bool>       enabled{false};
 };
 static WalCapture g_capture;
 
@@ -84,6 +88,7 @@ static bool is_wal_segment(const char* fuse_path) {
 static void capture_wal_write(const char* fuse_path, const char* buf,
                                size_t size, off_t offset,
                                const char* bdir) {
+  if (!g_capture.enabled.load(std::memory_order_relaxed)) return;
   static constexpr uint16_t kXlogMagic = 0xD116;
   static constexpr uint32_t kPageSize  = 8192;
 
@@ -309,10 +314,14 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
                            std::to_string(kWalSenderPort) +
                            " application_name=standby'"},
       {"hot_standby",      "on"},
-      {"log_min_messages", "warning"},
+      {"log_min_messages", "debug1"},
   });
 
   // ── restart primary ──────────────────────────────────────────────────────────
+  // Enable WAL capture now.  The standby already has all pre-restart WAL in its
+  // local pg_wal (from the backup); only post-restart records need streaming.
+  g_capture.enabled = true;
+
   if (!primary.start()) {
     fuse.stop(); cleanup(); BOOST_FAIL("primary restart failed");
   }
@@ -343,6 +352,7 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   WalSenderServer wal_server(
       kWalSenderPort, system_id, /*timeline=*/1, primary_flush_lsn,
       [](WalSender& sender) {
+        std::cerr << "[connection] new WAL sender connection\n";
         sender.set_replication_start_cb([&sender](uint64_t start_lsn) {
           std::lock_guard<std::mutex> lk(g_capture.mu);
           // Iterate buffer by const-ref: copy-send each relevant segment.

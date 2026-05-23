@@ -24,6 +24,7 @@ b2 test
 
 # Build only a module
 b2 src/process
+b2 src/postgres
 b2 src/wal_sender
 b2 src/wal_fuse
 
@@ -52,6 +53,8 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 ### Modules
 
 **`src/process/`** — `Process` class wrapping `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`. Used by tests to spawn real PostgreSQL processes.
+
+**`src/postgres/`** — `PgInstance` class, a higher-level wrapper around `Process` for a full PostgreSQL instance. Provides: `init()` (runs `initdb`), `write_config()` / `write_hba()` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready()` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive `cp -Rp`). Used by `pg_replication_test` to manage both primary and standby instances.
 
 **`src/wal_sender/`** — Two cooperating classes:
 
@@ -115,5 +118,5 @@ All integration tests require PostgreSQL 17 binaries at `/opt/pg_raft/pgsql/v17/
 
 - **`process_test`** — unit tests for `Process`.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
-- **`pg_replication_test`** — end-to-end integration test. Initializes a primary with `PgInitializer`, mounts `WalFuse` with a custom `WalSendingOps` policy that captures WAL bytes on every `write` call, starts a `WalSenderServer`, runs `pg_basebackup` to seed a standby, runs pgbench, then verifies the standby catches up via LSN comparison and row count equality.
+- **`pg_replication_test`** — end-to-end integration test. Uses `PgInitializer` to set up the WAL directories, `PgInstance` to manage primary and standby processes, mounts `WalFuse` with a custom `WalSendingOps` policy that captures WAL bytes on every `write` call, starts a `WalSenderServer`, runs `pg_basebackup` to seed a standby, runs pgbench, then verifies the standby catches up via LSN comparison and row count equality.
 - **`wal_fuse_test`** — integration test. Uses `PgInitializer` + `WalFuseManager` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
