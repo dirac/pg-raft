@@ -54,6 +54,21 @@ struct WalCapture {
 };
 static WalCapture g_capture;
 
+// ── per-file WAL accumulator ──────────────────────────────────────────────────
+//
+// Writes to the same WAL segment are collected between flush calls.
+// op_flush assembles them into a single WalSegment rather than sending one
+// per write.
+
+struct WalFileAccum {
+  uint64_t             seg_lsn;
+  off_t                base_offset;
+  std::vector<uint8_t> data;
+};
+
+static std::mutex                          g_accum_mu;
+static std::map<std::string, WalFileAccum> g_accum;  // keyed by FUSE path
+
 // Derive the start LSN of a WAL segment from its backing-directory path.
 // Filename format: TLI(8hex) HIGH(8hex) LOW(8hex)
 // start_lsn = (HIGH << 32) | (LOW * kWalSegSize)
@@ -79,23 +94,54 @@ static bool is_wal_segment(const char* fuse_path) {
   return true;
 }
 
-// Called from the FUSE write hook with the exact bytes and file offset being
-// written.  Validates WAL page headers (magic + xlp_pageaddr) and enqueues
-// valid bytes for delivery to the standby.
-//
-// Using write rather than fsync means we work regardless of the WAL sync
-// method (including macOS F_FULLFSYNC which FUSE does not intercept).
-static void capture_wal_write(const char* fuse_path, const char* buf,
-                               size_t size, off_t offset,
-                               const char* bdir) {
+// Append the bytes from one FUSE write call into the per-file accumulator.
+// The WalSegment is not built here; that happens in flush_wal_accum.
+static void accum_wal_write(const char* fuse_path, const char* buf,
+                             size_t size, off_t offset, const char* bdir) {
   if (!g_capture.enabled.load(std::memory_order_relaxed)) return;
+  if (!is_wal_segment(fuse_path)) return;
+
+  uint64_t seg_lsn = lsn_from_backing_path(std::string(bdir) + fuse_path);
+
+  std::lock_guard lock{g_accum_mu};
+  auto& accum = g_accum[fuse_path];
+  if (accum.data.empty()) {
+    accum.seg_lsn     = seg_lsn;
+    accum.base_offset = offset;
+  } else if (offset > accum.base_offset + static_cast<off_t>(accum.data.size())) {
+    // gap between previous write and this one: zero-fill
+    accum.data.resize(static_cast<size_t>(offset - accum.base_offset), 0u);
+  }
+  accum.data.insert(accum.data.end(),
+                    reinterpret_cast<const uint8_t*>(buf),
+                    reinterpret_cast<const uint8_t*>(buf) + size);
+}
+
+// Validate the bytes accumulated since the last flush, build one WalSegment,
+// and deliver it to the capture buffer and any live sender.
+static void flush_wal_accum(const char* fuse_path) {
+  if (!g_capture.enabled.load(std::memory_order_relaxed)) return;
+  if (!is_wal_segment(fuse_path)) return;
+
+  // Move the accumulator out under its lock, then release before acquiring
+  // g_capture.mu to maintain consistent lock ordering.
+  WalFileAccum accum;
+  {
+    std::lock_guard lock{g_accum_mu};
+    auto it = g_accum.find(fuse_path);
+    if (it == g_accum.end() || it->second.data.empty()) return;
+    accum = std::move(it->second);
+    g_accum.erase(it);
+  }
+
   static constexpr uint16_t kXlogMagic = 0xD116;
   static constexpr uint32_t kPageSize  = 8192;
 
-  std::string backing_path = std::string(bdir) + fuse_path;
-  uint64_t seg_lsn = lsn_from_backing_path(backing_path);
+  const char* buf    = reinterpret_cast<const char*>(accum.data.data());
+  size_t      size   = accum.data.size();
+  off_t       offset = accum.base_offset;
 
-  // Walk the written bytes page by page.  Stop at the first page whose
+  // Walk the accumulated bytes page by page.  Stop at the first page whose
   // magic is wrong (pre-zeroing) or whose xlp_pageaddr doesn't match the
   // expected segment LSN (recycled-segment stale content).
   size_t valid_bytes = 0;
@@ -117,7 +163,7 @@ static void capture_wal_write(const char* fuse_path, const char* buf,
         pageaddr |= static_cast<uint64_t>(
                         static_cast<uint8_t>(buf[off + 8 + static_cast<size_t>(b)]))
                     << static_cast<unsigned>(b * 8);
-      if (pageaddr != seg_lsn + static_cast<uint64_t>(file_off)) break;
+      if (pageaddr != accum.seg_lsn + static_cast<uint64_t>(file_off)) break;
     }
 
     uint32_t page_off          = file_off % kPageSize;
@@ -127,18 +173,20 @@ static void capture_wal_write(const char* fuse_path, const char* buf,
     off         += chunk;
   }
 
-  std::cerr << "[capture_write] valid=" << valid_bytes
-            << " seg_lsn=0x" << std::hex << seg_lsn
+  std::cerr << "[flush] " << fuse_path << " accumulated=" << size
+            << " valid=" << valid_bytes
+            << " seg_lsn=0x" << std::hex << accum.seg_lsn
             << " off=0x" << offset << std::dec << "\n";
   if (valid_bytes == 0) return;
 
-  uint64_t start_lsn = seg_lsn + static_cast<uint64_t>(offset);
-  std::vector<uint8_t> data(reinterpret_cast<const uint8_t*>(buf),
-                             reinterpret_cast<const uint8_t*>(buf) + valid_bytes);
-  WalSegment seg{start_lsn, std::move(data)};
+  uint64_t start_lsn = accum.seg_lsn + static_cast<uint64_t>(offset);
+  WalSegment seg{start_lsn,
+                 std::vector<uint8_t>(accum.data.begin(),
+                                      accum.data.begin() +
+                                          static_cast<ptrdiff_t>(valid_bytes))};
 
   std::lock_guard<std::mutex> lk(g_capture.mu);
-  std::cerr << "[capture_write] queued lsn=0x" << std::hex << start_lsn
+  std::cerr << "[flush] queued lsn=0x" << std::hex << start_lsn
             << " bytes=" << std::dec << valid_bytes
             << " sender=" << (g_capture.sender ? "yes" : "no") << "\n";
   // Always buffer (append-only) so reconnecting standbys can get historical WAL.
@@ -149,14 +197,15 @@ static void capture_wal_write(const char* fuse_path, const char* buf,
 
 // ── custom FUSE ops ───────────────────────────────────────────────────────────
 //
-// Identical to WalFuseOpBase for every op except write, which also captures
-// the newly written WAL bytes.
+// Identical to WalFuseOpBase for every op except write (accumulates WAL bytes)
+// and fsync (validates the accumulated bytes and emits one WalSegment).
 
 class WalSendingOps {
  public:
   static struct fuse_operations make_ops() {
     struct fuse_operations ops = WalFuseOpBase::make_ops();
     ops.write = op_write;
+    ops.fsync = op_fsync;
     return ops;
   }
 
@@ -170,9 +219,16 @@ class WalSendingOps {
                 << " size=" << size << "\n";
       const char* bdir =
           static_cast<const char*>(fuse_get_context()->private_data);
-      capture_wal_write(path, buf, static_cast<size_t>(res), offset, bdir);
+      accum_wal_write(path, buf, static_cast<size_t>(res), offset, bdir);
     }
     return static_cast<int>(res);
+  }
+
+  static int op_fsync(const char* path, int datasync, struct fuse_file_info* fi) {
+    (void)datasync;
+    (void)fi;
+    flush_wal_accum(path);
+    return 0;
   }
 };
 
