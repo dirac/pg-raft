@@ -6,6 +6,7 @@
 #endif
 #include <fuse/fuse.h>
 
+#include "src/postgres/pg_instance.h"
 #include "src/wal_fuse/pg_initializer.h"
 #include "src/wal_fuse/wal_fuse.h"
 #include "src/wal_fuse/wal_fuse_ops.h"
@@ -38,14 +39,13 @@ static const uint32_t    kWalSegSize   = 16u * 1024u * 1024u;
 
 // ── WAL capture state ─────────────────────────────────────────────────────────
 //
-// All WAL written by the primary passes through the FUSE layer.  op_fsync
-// calls capture_wal(), which reads bytes newly written since the last fsync
-// and either sends them immediately (if a standby is connected) or buffers
-// them until one connects.
+// All WAL written by the primary passes through the FUSE layer.  op_write
+// calls capture_wal_write(), which validates WAL page headers and either
+// sends bytes immediately (if a standby is connected) or buffers them.
 
 struct WalCapture {
   std::mutex              mu;
-  std::deque<WalSegment>  buffer;   // segments buffered before standby connects
+  std::deque<WalSegment>  buffer;
   WalSender*              sender = nullptr;
 };
 static WalCapture g_capture;
@@ -136,15 +136,15 @@ static void capture_wal_write(const char* fuse_path, const char* buf,
   std::cerr << "[capture_write] queued lsn=0x" << std::hex << start_lsn
             << " bytes=" << std::dec << valid_bytes
             << " sender=" << (g_capture.sender ? "yes" : "no") << "\n";
+  // Always buffer (append-only) so reconnecting standbys can get historical WAL.
+  g_capture.buffer.push_back(seg);  // copy into buffer
   if (g_capture.sender)
-    g_capture.sender->send(std::move(seg));
-  else
-    g_capture.buffer.push_back(std::move(seg));
+    g_capture.sender->send(std::move(seg));  // also deliver live
 }
 
 // ── custom FUSE ops ───────────────────────────────────────────────────────────
 //
-// Identical to WalFuseOpBase for every op except fsync, which also captures
+// Identical to WalFuseOpBase for every op except write, which also captures
 // the newly written WAL bytes.
 
 class WalSendingOps {
@@ -173,19 +173,6 @@ class WalSendingOps {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-static bool wait_for_pg(const std::string& host, int port, int timeout_s) {
-  auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::seconds(timeout_s);
-  while (std::chrono::steady_clock::now() < deadline) {
-    Process p(kPgBin + "/pg_isready",
-              {"-h", host, "-p", std::to_string(port), "-d", "postgres", "-q"});
-    p.start();
-    if (p.wait() == 0) return true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-  }
-  return false;
-}
-
 static bool wait_for_fuse_mount(const std::string& mount_point,
                                 const std::string& parent, int timeout_ms) {
   auto deadline = std::chrono::steady_clock::now() +
@@ -199,11 +186,6 @@ static bool wait_for_fuse_mount(const std::string& mount_point,
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   return false;
-}
-
-static void append_conf(const std::string& path, const std::string& content) {
-  std::ofstream f(path, std::ios::app);
-  f << content;
 }
 
 static uint64_t read_system_id(const std::string& data_dir) {
@@ -268,15 +250,19 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
                      {"-E", "UTF8", "-A", "trust", "--no-sync"});
   if (!init.run()) { cleanup(); BOOST_FAIL("PgInitializer failed"); }
 
-  append_conf(primary_dir + "/postgresql.conf",
-              "\nlisten_addresses = '127.0.0.1'\n"
-              "port = " + std::to_string(kPrimaryPort) + "\n"
-              "wal_level = replica\n"
-              "max_wal_senders = 3\n"
-              "log_min_messages = warning\n");
-  append_conf(primary_dir + "/pg_hba.conf",
-              "host  all         all  127.0.0.1/32  trust\n"
-              "host  replication all  127.0.0.1/32  trust\n");
+  PgInstance primary(kPgBin, primary_dir);
+  primary.write_config({
+      {"listen_addresses", "'127.0.0.1'"},
+      {"port",             std::to_string(kPrimaryPort)},
+      {"wal_level",        "replica"},
+      {"max_wal_senders",  "3"},
+      {"log_min_messages", "warning"},
+      {"wal_recycle",      "off"},
+  });
+  primary.write_hba({
+      "host  all         all  127.0.0.1/32  trust",
+      "host  replication all  127.0.0.1/32  trust",
+  });
 
   // ── mount FUSE over pg_wal with WAL-capturing ops ───────────────────────────
   WalFuse fuse(primary_dir + "/pg_wal", primary_dir + "/pg_raft_wal",
@@ -287,70 +273,96 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   }
 
   // ── start primary ───────────────────────────────────────────────────────────
-  Process primary(kPgBin + "/postgres", {"-D", primary_dir});
-  BOOST_REQUIRE(primary.start());
-  BOOST_TEST_MESSAGE(primary.to_string());
-
-  if (!wait_for_pg("127.0.0.1", kPrimaryPort, 30)) {
+  if (!primary.start()) {
+    fuse.stop(); cleanup(); BOOST_FAIL("primary start() failed");
+  }
+  if (!primary.wait_ready("127.0.0.1", kPrimaryPort)) {
     primary.stop(); fuse.stop(); cleanup();
-    BOOST_FAIL("primary did not start");
+    BOOST_FAIL("primary did not become ready");
   }
 
   const std::string primary_conn =
       "host=127.0.0.1 port=" + std::to_string(kPrimaryPort) +
       " dbname=postgres user=" + std::string(getenv("USER") ?: "venkat");
 
-  // ── pg_basebackup to seed the standby ───────────────────────────────────────
-  {
-    Process p(kPgBin + "/pg_basebackup",
-              {"-h", "127.0.0.1", "-p", std::to_string(kPrimaryPort),
-               "-D", standby_dir, "-P", "-X", "stream"});
-    BOOST_REQUIRE(p.start());
-    BOOST_TEST_MESSAGE(p.to_string());
-    if (p.wait() != 0) {
-      primary.stop(); fuse.stop(); cleanup();
-      BOOST_FAIL("pg_basebackup failed");
-    }
+  // ── cold backup: stop primary, copy data dir, restart primary ───────────────
+  // A clean shutdown ensures pg_control has a valid checkpoint that the standby
+  // can use as its starting LSN without needing WAL replay.
+  const std::string backup_dir = base_dir + "/backup";
+  if (!primary.backup(backup_dir)) {
+    fuse.stop(); cleanup(); BOOST_FAIL("primary backup failed");
   }
 
   uint64_t system_id = read_system_id(primary_dir);
   BOOST_REQUIRE(system_id != 0);
 
-  // ── configure standby to replicate from WalSenderServer ─────────────────────
+  // ── restore backup as standby, then configure ────────────────────────────────
+  PgInstance standby(kPgBin, standby_dir);
+  if (!standby.restore(backup_dir)) {
+    fuse.stop(); cleanup(); BOOST_FAIL("standby restore failed");
+  }
   std::ofstream(standby_dir + "/standby.signal").close();
-  append_conf(standby_dir + "/postgresql.conf",
-              "\nlisten_addresses = '127.0.0.1'\n"
-              "port = " + std::to_string(kStandbyPort) + "\n"
-              "primary_conninfo = 'host=127.0.0.1 port=" +
-              std::to_string(kWalSenderPort) + " application_name=standby'\n"
-              "hot_standby = on\n"
-              "log_min_messages = warning\n");
+  standby.write_config({
+      {"listen_addresses", "'127.0.0.1'"},
+      {"port",             std::to_string(kStandbyPort)},
+      {"primary_conninfo", "'host=127.0.0.1 port=" +
+                           std::to_string(kWalSenderPort) +
+                           " application_name=standby'"},
+      {"hot_standby",      "on"},
+      {"log_min_messages", "warning"},
+  });
+
+  // ── restart primary ──────────────────────────────────────────────────────────
+  if (!primary.start()) {
+    fuse.stop(); cleanup(); BOOST_FAIL("primary restart failed");
+  }
+  if (!primary.wait_ready("127.0.0.1", kPrimaryPort)) {
+    primary.stop(); fuse.stop(); cleanup();
+    BOOST_FAIL("primary did not become ready after restart");
+  }
+
+  // After a clean-shutdown restart postgres writes no WAL until the first
+  // transaction.  Force a checkpoint so the FUSE buffer gets a valid WAL
+  // record at the position immediately following the backup's shutdown
+  // checkpoint — without it the standby can't advance past that point.
+  pg_query_str(primary_conn, "CHECKPOINT");
 
   // ── start WalSenderServer ───────────────────────────────────────────────────
   //
   // When the standby sends START_REPLICATION(start_lsn):
   //   1. Drain any WAL captured before the standby connected, trimming
   //      segments that precede start_lsn.
-  //   2. Register the sender so future fsync callbacks deliver WAL directly.
+  //   2. Register the sender so future write callbacks deliver WAL directly.
+  // Query the primary's current flush LSN so IDENTIFY_SYSTEM returns a
+  // realistic walEnd rather than 0/0 (which confuses some standby versions).
+  uint64_t primary_flush_lsn = parse_lsn(
+      pg_query_str(primary_conn, "SELECT pg_current_wal_flush_lsn()"));
+  std::cerr << "[setup] primary_flush_lsn=0x" << std::hex << primary_flush_lsn
+            << std::dec << "\n";
+
   WalSenderServer wal_server(
-      kWalSenderPort, system_id, /*timeline=*/1, /*end_lsn=*/0,
+      kWalSenderPort, system_id, /*timeline=*/1, primary_flush_lsn,
       [](WalSender& sender) {
         sender.set_replication_start_cb([&sender](uint64_t start_lsn) {
           std::lock_guard<std::mutex> lk(g_capture.mu);
-          for (auto& seg : g_capture.buffer) {
+          // Iterate buffer by const-ref: copy-send each relevant segment.
+          // Buffer is kept intact for reconnection resilience.
+          for (const auto& seg : g_capture.buffer) {
             uint64_t seg_end =
                 seg.start_lsn + static_cast<uint64_t>(seg.data.size());
             if (seg_end <= start_lsn) continue;
-            if (seg.start_lsn < start_lsn) {
+            WalSegment to_send = seg;  // copy
+            if (to_send.start_lsn < start_lsn) {
               size_t trim =
-                  static_cast<size_t>(start_lsn - seg.start_lsn);
-              seg.data.erase(seg.data.begin(),
-                             seg.data.begin() + static_cast<ptrdiff_t>(trim));
-              seg.start_lsn = start_lsn;
+                  static_cast<size_t>(start_lsn - to_send.start_lsn);
+              to_send.data.erase(to_send.data.begin(),
+                                 to_send.data.begin() +
+                                     static_cast<ptrdiff_t>(trim));
+              to_send.start_lsn = start_lsn;
             }
-            sender.send(std::move(seg));
+            sender.send(std::move(to_send));
           }
-          g_capture.buffer.clear();
+          // Do NOT clear g_capture.buffer: keep it for reconnections.
           g_capture.sender = &sender;
           std::cerr << "[start_cb] sender registered, start_lsn="
                     << std::hex << start_lsn << std::dec << "\n";
@@ -365,13 +377,13 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   BOOST_REQUIRE(wal_server.start());
 
   // ── start standby ───────────────────────────────────────────────────────────
-  Process standby(kPgBin + "/postgres", {"-D", standby_dir});
-  BOOST_REQUIRE(standby.start());
-  BOOST_TEST_MESSAGE(standby.to_string());
-
-  if (!wait_for_pg("127.0.0.1", kStandbyPort, 30)) {
+  if (!standby.start()) {
+    wal_server.stop(); primary.stop(); fuse.stop(); cleanup();
+    BOOST_FAIL("standby start() failed");
+  }
+  if (!standby.wait_ready("127.0.0.1", kStandbyPort)) {
     standby.stop(); wal_server.stop(); primary.stop(); fuse.stop(); cleanup();
-    BOOST_FAIL("standby did not start");
+    BOOST_FAIL("standby did not become ready");
   }
 
   const std::string standby_conn =

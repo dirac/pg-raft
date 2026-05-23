@@ -199,6 +199,7 @@ bool WalSender::streaming_loop(uint64_t /*start_lsn*/) {
   using clock = std::chrono::steady_clock;
   constexpr auto kKeepaliveInterval = std::chrono::seconds(5);
 
+  std::cerr << "[streaming_loop] started\n";
   auto last_ka = clock::now();
 
   while (true) {
@@ -209,14 +210,20 @@ bool WalSender::streaming_loop(uint64_t /*start_lsn*/) {
       std::swap(pending, queue_);
     }
     while (!pending.empty()) {
-      if (!send_xlog_data(pending.front())) return false;
+      if (!send_xlog_data(pending.front())) {
+        std::cerr << "[streaming_loop] send_xlog_data failed\n";
+        return false;
+      }
       pending.pop();
     }
 
     // Check shutdown after queue is drained.
     {
       std::lock_guard<std::mutex> lk(mu_);
-      if (shutdown_ && queue_.empty()) return true;
+      if (shutdown_ && queue_.empty()) {
+        std::cerr << "[streaming_loop] shutdown requested, exiting\n";
+        return true;
+      }
     }
 
     // How long until we must send the next keepalive?
@@ -231,11 +238,17 @@ bool WalSender::streaming_loop(uint64_t /*start_lsn*/) {
     fds[1].fd = wakeup_[0]; fds[1].events = POLLIN;
 
     int nready = poll(fds, 2, static_cast<int>(ms));
-    if (nready < 0) return false;
+    if (nready < 0) {
+      std::cerr << "[streaming_loop] poll error: " << strerror(errno) << "\n";
+      return false;
+    }
 
     // Keepalive timer fired.
     if (clock::now() >= next_ka) {
-      if (!send_keepalive(false)) return false;
+      if (!send_keepalive(false)) {
+        std::cerr << "[streaming_loop] send_keepalive failed\n";
+        return false;
+      }
       last_ka = clock::now();
     }
 
@@ -249,19 +262,31 @@ bool WalSender::streaming_loop(uint64_t /*start_lsn*/) {
     if (fds[0].revents & POLLIN) {
       char type;
       std::vector<uint8_t> payload;
-      if (!recv_message(&type, &payload)) return false;
+      if (!recv_message(&type, &payload)) {
+        std::cerr << "[streaming_loop] recv_message failed (connection closed)\n";
+        return false;
+      }
 
       if (type == 'd') {
         // CopyData
-        if (!process_copy_data(payload)) return false;
+        if (!process_copy_data(payload)) {
+          std::cerr << "[streaming_loop] process_copy_data failed\n";
+          return false;
+        }
       } else if (type == 'c') {
         // CopyDone – standby ended streaming
+        std::cerr << "[streaming_loop] received CopyDone from standby\n";
         return true;
       } else if (type == 'f') {
         // CopyFail
+        std::cerr << "[streaming_loop] received CopyFail from standby\n";
         return false;
       } else if (type == 'X') {
+        std::cerr << "[streaming_loop] received Terminate from standby\n";
         return true;
+      } else {
+        std::cerr << "[streaming_loop] unexpected message type: "
+                  << static_cast<int>(type) << "\n";
       }
     }
   }

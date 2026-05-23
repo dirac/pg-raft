@@ -14,6 +14,7 @@ unit-test pg_replication_test
     : pg_replication_test.cc
       wal_sender
       ../process//process
+      ../postgres//pg_instance
       ../wal_fuse//wal_fuse
       ../..//external
     ;
