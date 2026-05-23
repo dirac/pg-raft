@@ -5,6 +5,7 @@ lib wal_fuse
       wal_fuse_manager.cc
       pg_initializer.cc
       ../process//process
+      ../base//base
       ../..//fuse
     ;
 
