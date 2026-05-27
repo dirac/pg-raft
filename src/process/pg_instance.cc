@@ -1,11 +1,44 @@
 #include "src/process/pg_instance.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <signal.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <fstream>
 #include <thread>
+
+#include "src/base/logger.h"
+
+void PgInstance::PostgresProcess::on_stderr_line(std::string_view line) {
+  // Find the first all-uppercase word immediately followed by ':'. In a
+  // PostgreSQL log line the severity label (LOG, ERROR, FATAL, …) is always
+  // the first such token, appearing before the message body.
+  for (std::size_t colon = line.find(':');
+       colon != std::string_view::npos;
+       colon = line.find(':', colon + 1)) {
+    std::size_t end = colon, start = end;
+    while (start > 0 && (std::isupper(static_cast<unsigned char>(line[start - 1])) ||
+                         std::isdigit(static_cast<unsigned char>(line[end - 1]))))
+      --start;
+    if (start == end || !std::isupper(static_cast<unsigned char>(line[start]))) continue;
+    std::string_view word = line.substr(start, end - start);
+    if (word == "PANIC" || word == "FATAL" || word == "ERROR")
+      logger::error("{}", line);
+    else if (word == "WARNING")
+      logger::warn("{}", line);
+    else if (word == "NOTICE" || word == "INFO" || word == "LOG")
+      logger::info("{}", line);
+    else
+      logger::debug("{}", line);
+    return;
+  }
+
+  logger::debug("{}", line);
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -31,6 +64,28 @@ PgInstance::~PgInstance() {
 }
 
 // ── initialisation ────────────────────────────────────────────────────────────
+
+bool PgInstance::create_raft_wal() {
+  const std::string pg_raft_wal = data_dir_ + "/pg_raft_wal";
+  if (mkdir(pg_raft_wal.c_str(), 0700) != 0 && errno != EEXIST)
+    return false;
+
+  const std::string pg_wal = data_dir_ + "/pg_wal";
+  DIR* dp = opendir(pg_wal.c_str());
+  if (!dp) return false;
+
+  bool ok = true;
+  struct dirent* de;
+  while ((de = readdir(dp)) != nullptr) {
+    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+      continue;
+    std::string src = pg_wal + "/" + de->d_name;
+    std::string dst = pg_raft_wal + "/" + de->d_name;
+    if (rename(src.c_str(), dst.c_str()) != 0) { ok = false; break; }
+  }
+  closedir(dp);
+  return ok;
+}
 
 bool PgInstance::init(std::vector<std::string> initdb_args) {
   std::vector<std::string> args = {"-D", data_dir_};
@@ -115,7 +170,8 @@ bool PgInstance::wait_ready(const std::string& host, uint16_t port,
 
 bool PgInstance::backup(const std::string& dest_dir, StopMode mode) {
   if (is_running()) stop(mode);
-  return copy_dir(data_dir_, dest_dir);
+  Process p("/usr/bin/rsync", {"-a", "--exclude=pg_raft_wal", data_dir_ + "/", dest_dir});
+  return p.start() && p.wait() == 0;
 }
 
 bool PgInstance::restore(const std::string& backup_dir) {

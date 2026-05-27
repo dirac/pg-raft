@@ -2,6 +2,7 @@
 lib process
     : process.cc
       pg_instance.cc
+      ../base//base
     ;
 
 unit-test process_test

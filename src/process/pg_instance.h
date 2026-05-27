@@ -17,12 +17,11 @@ class PgInstance {
   // |pg_bin|    – directory containing postgres, initdb, pg_isready, etc.
   // |data_dir|  – PGDATA path (need not exist yet; created by init()).
   // |extra_args| – extra arguments forwarded to the postgres process.
-  PgInstance(std::string pg_bin, std::string data_dir,
-             std::vector<std::string> extra_args = {});
+  PgInstance(std::string pg_bin, std::string data_dir, std::vector<std::string> extra_args = {});
   ~PgInstance();
 
-  PgInstance(const PgInstance&) = delete;
-  PgInstance& operator=(const PgInstance&) = delete;
+  PgInstance(PgInstance const&)            = delete;
+  PgInstance& operator=(PgInstance const&) = delete;
 
   // ── initialisation ────────────────────────────────────────────────────────
 
@@ -33,10 +32,10 @@ class PgInstance {
   // ── configuration ─────────────────────────────────────────────────────────
 
   // Append key = value pairs to postgresql.conf.
-  bool write_config(const std::map<std::string, std::string>& settings);
+  bool write_config(std::map<std::string, std::string> const& settings);
 
   // Append lines verbatim to pg_hba.conf.
-  bool write_hba(const std::vector<std::string>& lines);
+  bool write_hba(std::vector<std::string> const& lines);
 
   // ── process control ───────────────────────────────────────────────────────
 
@@ -55,32 +54,41 @@ class PgInstance {
   bool is_running() const;
 
   // Poll pg_isready on |host|:|port| until it returns OK or timeout elapses.
-  bool wait_ready(const std::string& host, uint16_t port,
-                  int timeout_s = 30) const;
+  bool wait_ready(std::string const& host, uint16_t port, int timeout_s = 30) const;
 
   // ── backup / restore ──────────────────────────────────────────────────────
 
   // Stop the instance (if running), then copy data_dir recursively to
   // |dest_dir|. |dest_dir| must not exist.
-  bool backup(const std::string& dest_dir, StopMode mode = StopMode::Fast);
+  bool backup(std::string const& dest_dir, StopMode mode = StopMode::Fast);
 
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
-  bool restore(const std::string& backup_dir);
+  bool restore(std::string const& backup_dir);
 
   // restore() then start().
-  bool restore_and_start(const std::string& backup_dir);
+  bool restore_and_start(std::string const& backup_dir);
+
+  // Create data_dir/pg_raft_wal and move the WAL segments out of
+  // data_dir/pg_wal into it, leaving pg_wal as an empty directory ready
+  // for a FUSE mount. Must be called after init() and before start().
+  bool create_raft_wal();
 
   // ── accessors ─────────────────────────────────────────────────────────────
 
-  const std::string& data_dir() const { return data_dir_; }
-  const std::string& pg_bin()   const { return pg_bin_; }
+  std::string const& data_dir() const { return data_dir_; }
+  std::string const& pg_bin() const { return pg_bin_; }
 
  private:
-  static bool copy_dir(const std::string& src, const std::string& dst);
-  static bool append_file(const std::string& path, const std::string& content);
+  static bool copy_dir(std::string const& src, std::string const& dst);
+  static bool append_file(std::string const& path, std::string const& content);
 
-  std::string pg_bin_;
-  std::string data_dir_;
+  std::string              pg_bin_;
+  std::string              data_dir_;
   std::vector<std::string> extra_args_;
-  Process postgres_;
+
+  struct PostgresProcess : public Process {
+    using Process::Process;
+    void on_stderr_line(std::string_view line) override;
+  };
+  PostgresProcess postgres_;
 };

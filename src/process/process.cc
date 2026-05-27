@@ -8,6 +8,8 @@
 #include <iostream>
 #include <thread>
 
+#include "src/base/logger.h"
+
 Process::Process(std::string executable, std::vector<std::string> args)
     : executable_(std::move(executable)), args_(std::move(args)) {}
 
@@ -141,11 +143,11 @@ bool Process::is_running() const {
 }
 
 void Process::on_stdout_line(std::string_view line) {
-  std::cerr << line << '\n';
+  logger::info("{}", line);
 }
 
 void Process::on_stderr_line(std::string_view line) {
-  std::cerr << line << '\n';
+  logger::error("{}", line);
 }
 
 // ── private ───────────────────────────────────────────────────────────────────
