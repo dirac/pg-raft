@@ -1,5 +1,4 @@
 build-project base ;
 build-project process ;
-build-project postgres ;
-build-project wal_sender ;
 build-project wal_fuse ;
+build-project wal_sender ;

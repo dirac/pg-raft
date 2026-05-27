@@ -1,4 +1,4 @@
-#include "src/postgres/pg_instance.h"
+#include "src/process/pg_instance.h"
 
 #include <signal.h>
 #include <unistd.h>

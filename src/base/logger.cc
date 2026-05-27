@@ -9,7 +9,7 @@
 
 namespace logger {
 
-static std::atomic<Level> g_level{Level::Info};
+static std::atomic<Level> g_level{Level::Debug};
 static std::mutex          g_mu;
 
 void set_level(Level level) {

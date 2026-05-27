@@ -10,9 +10,10 @@ unit-test wal_sender_test
       ../..//external
     ;
 
-unit-test pg_replication_test
+exe pg_replication_test
     : pg_replication_test.cc
       wal_sender
+      ../base//base
       ../process//process
       ../postgres//pg_instance
       ../wal_fuse//wal_fuse

@@ -1,12 +1,34 @@
 #include "src/process/process.h"
 
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <signal.h>
 
 #define BOOST_TEST_MODULE ProcessTest
 #include <boost/test/included/unit_test.hpp>
+
+// Helper that captures stdout/stderr lines instead of forwarding to stderr.
+class LineCapture : public Process {
+ public:
+  using Process::Process;
+  std::vector<std::string> out, err;
+
+ protected:
+  void on_stdout_line(std::string_view line) override {
+    std::lock_guard lock{mu_};
+    out.emplace_back(line);
+  }
+  void on_stderr_line(std::string_view line) override {
+    std::lock_guard lock{mu_};
+    err.emplace_back(line);
+  }
+
+ private:
+  std::mutex mu_;
+};
 
 BOOST_AUTO_TEST_CASE(StartAndWait) {
   Process p("/bin/echo", {"hello"});
@@ -56,6 +78,34 @@ BOOST_AUTO_TEST_CASE(DestructorKillsRunningProcess) {
     pid = p.pid();
   }
   BOOST_TEST(kill(pid, 0) != 0);
+}
+
+BOOST_AUTO_TEST_CASE(CaptureStdout) {
+  LineCapture p("/bin/echo", {"hello world"});
+  BOOST_TEST(p.start());
+  p.wait();
+  BOOST_REQUIRE_EQUAL(p.out.size(), 1u);
+  BOOST_TEST(p.out[0] == "hello world");
+  BOOST_TEST(p.err.empty());
+}
+
+BOOST_AUTO_TEST_CASE(CaptureStderr) {
+  LineCapture p("/bin/sh", {"-c", "echo err >&2"});
+  BOOST_TEST(p.start());
+  p.wait();
+  BOOST_REQUIRE_EQUAL(p.err.size(), 1u);
+  BOOST_TEST(p.err[0] == "err");
+  BOOST_TEST(p.out.empty());
+}
+
+BOOST_AUTO_TEST_CASE(CaptureMultipleLines) {
+  LineCapture p("/bin/sh", {"-c", "printf 'line1\\nline2\\nline3\\n'"});
+  BOOST_TEST(p.start());
+  p.wait();
+  BOOST_REQUIRE_EQUAL(p.out.size(), 3u);
+  BOOST_TEST(p.out[0] == "line1");
+  BOOST_TEST(p.out[1] == "line2");
+  BOOST_TEST(p.out[2] == "line3");
 }
 
 BOOST_AUTO_TEST_CASE(MoveTransfersOwnership) {

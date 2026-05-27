@@ -12,6 +12,7 @@
 #include "src/wal_fuse/wal_fuse_ops.h"
 #include "src/wal_sender/wal_sender_server.h"
 #include "src/process/process.h"
+#include "src/base/logger.h"
 
 #include <libpq-fe.h>
 #include <fcntl.h>
@@ -212,11 +213,11 @@ class WalSendingOps {
  private:
   static int op_write(const char* path, const char* buf, size_t size,
                       off_t offset, struct fuse_file_info* fi) {
+    logger::debug("write {} size={} off={} fd={}", path, size, offset, fi->fh);
+
     ssize_t res = pwrite(static_cast<int>(fi->fh), buf, size, offset);
     if (res == -1) return -errno;
     if (is_wal_segment(path)) {
-      std::cerr << "[write] " << path << " off=" << offset
-                << " size=" << size << "\n";
       const char* bdir =
           static_cast<const char*>(fuse_get_context()->private_data);
       accum_wal_write(path, buf, static_cast<size_t>(res), offset, bdir);
@@ -225,6 +226,7 @@ class WalSendingOps {
   }
 
   static int op_fsync(const char* path, int datasync, struct fuse_file_info* fi) {
+    logger::debug("fsync {} fd={}", path, fi->fh);
     (void)datasync;
     (void)fi;
     flush_wal_accum(path);
@@ -317,6 +319,7 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
       {"port",             std::to_string(kPrimaryPort)},
       {"wal_level",        "replica"},
       {"max_wal_senders",  "3"},
+      {"wal_sync_method",  "fsync"},
       {"log_min_messages", "warning"},
       {"wal_recycle",      "off"},
   });
@@ -491,7 +494,7 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
     uint64_t sb_lsn = parse_lsn(pg_query_str(
         standby_conn, "SELECT COALESCE(pg_last_wal_replay_lsn(), '0/0')"));
     std::string rcv_status = pg_query_str(standby_conn,
-        "SELECT status||' '||received_lsn||' '||last_msg_receipt_time"
+        "SELECT status||' '||written_lsn||' '||last_msg_receipt_time"
         " FROM pg_stat_wal_receiver");
     std::cerr << "[check] sb_replay=0x" << std::hex << sb_lsn << std::dec
               << " walrcv=" << rcv_status << "\n";

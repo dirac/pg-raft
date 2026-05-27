@@ -1,4 +1,0 @@
-lib pg_instance
-    : pg_instance.cc
-      ../process//process
-    ;

@@ -294,6 +294,7 @@ bool WalSender::streaming_loop(uint64_t /*start_lsn*/) {
 
 bool WalSender::send_xlog_data(const WalSegment& seg) {
   uint64_t seg_end = seg.start_lsn + seg.data.size();
+  if (seg_end > end_lsn_) end_lsn_ = seg_end;
 
   std::vector<uint8_t> payload;
   payload.reserve(1 + 8 + 8 + 8 + seg.data.size());
@@ -303,10 +304,7 @@ bool WalSender::send_xlog_data(const WalSegment& seg) {
   put_i64be(payload, now_pg_timestamp());
   payload.insert(payload.end(), seg.data.begin(), seg.data.end());
 
-  if (!send_message('d', payload)) return false;
-
-  if (seg_end > end_lsn_) end_lsn_ = seg_end;
-  return true;
+  return send_message('d', payload);
 }
 
 bool WalSender::send_keepalive(bool reply_requested) {

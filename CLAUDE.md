@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/sparrow/bin/b2`. All external dependencies (Boost, libpq, PostgreSQL internals, lmdb, sqlite3, fuse) are installed under `/opt/sparrow/` and `/usr/local/`.
 
-All `b2` commands must be run from the repo root (`/Users/venkat/pg-raft`), which contains `Jamroot.jam`.
+All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
 ```bash
 # Build everything
@@ -24,7 +24,6 @@ b2 test
 
 # Build only a module
 b2 src/process
-b2 src/postgres
 b2 src/wal_sender
 b2 src/wal_fuse
 
@@ -52,9 +51,12 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 ### Modules
 
-**`src/process/`** — `Process` class wrapping `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`. Used by tests to spawn real PostgreSQL processes.
+**`src/base/`** — `logger` namespace. Thread-safe, `std::format`-based logging to stderr. Levels: `Debug`, `Info`, `Warn`, `Error`. Default level is `Debug`. Call `logger::set_level()` to suppress noise in tests.
 
-**`src/postgres/`** — `PgInstance` class, a higher-level wrapper around `Process` for a full PostgreSQL instance. Provides: `init()` (runs `initdb`), `write_config()` / `write_hba()` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready()` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive `cp -Rp`). Used by `pg_replication_test` to manage both primary and standby instances.
+**`src/process/`** — Two classes:
+
+- **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Provides: `init()` (runs `initdb`), `write_config()` / `write_hba()` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready()` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive `cp -Rp`). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
 
 **`src/wal_sender/`** — Two cooperating classes:
 
@@ -64,7 +66,7 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 **`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Four cooperating classes:
 
-- **`WalFuse`** — Passthrough FUSE filesystem. Mounts at a given `mount_point` and redirects all file operations to a `backing_dir`. Templated on an `Ops` policy that provides a static `make_ops()` returning a `struct fuse_operations`. Pass an `Ops{}` instance as the third constructor argument; it is used only to deduce the template parameter. Runs the FUSE event loop in its own thread.
+- **`WalFuse`** — Passthrough FUSE filesystem. Mounts at a given `mount_point` and redirects all file operations to a `backing_dir`. The constructor is templated on an `Ops` policy that provides a static `make_ops()` returning a `struct fuse_operations`; pass an `Ops{}` instance as the third argument for type deduction only. The resulting `fuse_operations` is stored by value. Runs the FUSE event loop in its own thread.
 
 - **`WalFuseOpBase`** — Concrete FUSE operations policy for `WalFuse`. Every FUSE op (open, read, write, readdir, …) is forwarded to the backing directory stored in `fuse_get_context()->private_data`. Tests supply a derived policy (e.g. `WalSendingOps`) that wraps `WalFuseOpBase::make_ops()` and overrides specific ops.
 
@@ -81,16 +83,20 @@ initdb
              WalFuse (FUSE)  ◀──(backs)────────┘
                 │  mounted at pg_wal
                 ▼
-           postgres write(WAL) ──▶ FUSE write hook (WalSendingOps::op_write)
+           postgres write(WAL) ──▶ FUSE op_write (WalSendingOps)
+                                         │  accumulates bytes in WalFileAccum
+                                         │  (per WAL segment file, keyed by FUSE path)
+                                         ▼
+                                   postgres fsync ──▶ FUSE op_fsync → flush_wal_accum()
                                          │  validates XLog page header magic (0xD116)
-                                         │  and xlp_pageaddr before enqueuing
+                                         │  and xlp_pageaddr before building WalSegment
                                          ▼
                                    WalSender.send(WalSegment)
                                          │
                                    WalSenderServer  ──(wire protocol TCP)──▶  PostgreSQL standby
 ```
 
-WAL is captured from FUSE `write` calls rather than fsync, because macOS `F_FULLFSYNC` is not intercepted by FUSE. Each write validates WAL page headers (magic + `xlp_pageaddr` must match the expected segment LSN + file offset) before enqueuing bytes.
+WAL bytes are accumulated per-file in `WalFileAccum` on each FUSE `write`, then validated and delivered as a single `WalSegment` on `fsync`. Validation walks pages checking magic (`0xD116`) and `xlp_pageaddr`; it stops at the first stale or pre-zeroed page. macOS `F_FULLFSYNC` is not intercepted by FUSE, but regular `fsync` is — which is sufficient for PostgreSQL's WAL flush path.
 
 The integration tests wire these components together with real PostgreSQL processes.
 
@@ -118,5 +124,5 @@ All integration tests require PostgreSQL 17 binaries at `/opt/pg_raft/pgsql/v17/
 
 - **`process_test`** — unit tests for `Process`.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
-- **`pg_replication_test`** — end-to-end integration test. Uses `PgInitializer` to set up the WAL directories, `PgInstance` to manage primary and standby processes, mounts `WalFuse` with a custom `WalSendingOps` policy that captures WAL bytes on every `write` call, starts a `WalSenderServer`, runs `pg_basebackup` to seed a standby, runs pgbench, then verifies the standby catches up via LSN comparison and row count equality.
+- **`pg_replication_test`** — end-to-end integration test. Uses `PgInitializer` to set up the WAL directories, `PgInstance` to manage primary and standby processes, mounts `WalFuse` with a custom `WalSendingOps` policy that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`PgInstance::backup()`/`restore()`, i.e. `cp -Rp`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
 - **`wal_fuse_test`** — integration test. Uses `PgInitializer` + `WalFuseManager` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
