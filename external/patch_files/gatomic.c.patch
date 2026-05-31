@@ -1,0 +1,38 @@
+--- gatomic.c.orig	2024-04-19 16:03:25
++++ gatomic.c	2024-04-19 16:06:48
+@@ -389,7 +389,7 @@
+ (g_atomic_pointer_add) (volatile void *atomic,
+                         gssize         val)
+ {
+-  return g_atomic_pointer_add ((volatile gpointer *) atomic, val);
++  return g_atomic_pointer_add ((volatile gpointer *) atomic, (gpointer) val);
+ }
+ 
+ /**
+@@ -413,7 +413,7 @@
+ (g_atomic_pointer_and) (volatile void *atomic,
+                         gsize          val)
+ {
+-  return g_atomic_pointer_and ((volatile gpointer *) atomic, val);
++  return g_atomic_pointer_and ((volatile gpointer *) atomic, (gpointer) val);
+ }
+ 
+ /**
+@@ -437,7 +437,7 @@
+ (g_atomic_pointer_or) (volatile void *atomic,
+                        gsize          val)
+ {
+-  return g_atomic_pointer_or ((volatile gpointer *) atomic, val);
++  return g_atomic_pointer_or ((volatile gpointer *) atomic, (gpointer) val);
+ }
+ 
+ /**
+@@ -461,7 +461,7 @@
+ (g_atomic_pointer_xor) (volatile void *atomic,
+                         gsize          val)
+ {
+-  return g_atomic_pointer_xor ((volatile gpointer *) atomic, val);
++  return g_atomic_pointer_xor ((volatile gpointer *) atomic, (gpointer) val);
+ }
+ 
+ #elif defined (G_PLATFORM_WIN32)

@@ -1,0 +1,38 @@
+
+alias deps
+ : ../base//libs
+ ;
+
+lib net
+  : data.cc
+    async_connect.cc
+    connection.cc
+    server.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    net
+  ;
+
+unit-test async_connect_test
+  : async_connect_test.cc
+    libs
+    ../base//testing
+  ;
+
+unit-test data_test
+  : data_test.cc
+    data.cc
+    deps
+    ../base//libs
+    ../base//testing
+  ;
+
+unit-test connection_test
+  : connection_test.cc
+    libs
+    ../base//testing
+  ;
+

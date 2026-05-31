@@ -1,3 +1,27 @@
+import pch ;
+
+cpp-pch pch : pch.h ;
+
+alias deps
+  : ../..//external
+    pch
+  ;
+
 lib base
-    : logger.cc
-    ;
+  : logger.cc
+    config.cc
+    io_threads.cc
+    logger.cc
+    deps
+  ;
+
+lib testing
+  : testing.cc
+    base
+    deps
+  ;
+
+alias libs
+  : deps
+    base
+  ;

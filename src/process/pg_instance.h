@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "src/base/logger.h"
 #include "src/process/process.h"
 
 // Manages the lifecycle of a single PostgreSQL data directory: initialisation,
@@ -17,7 +18,10 @@ class PgInstance {
   // |pg_bin|    – directory containing postgres, initdb, pg_isready, etc.
   // |data_dir|  – PGDATA path (need not exist yet; created by init()).
   // |extra_args| – extra arguments forwarded to the postgres process.
-  PgInstance(std::string pg_bin, std::string data_dir, std::vector<std::string> extra_args = {});
+  PgInstance(std::filesystem::path    pg_bin,
+             std::filesystem::path    data_dir,
+             std::filesystem::path    raft_dir,
+             std::vector<std::string> extra_args = {});
   ~PgInstance();
 
   PgInstance(PgInstance const&)            = delete;
@@ -82,13 +86,15 @@ class PgInstance {
   static bool copy_dir(std::string const& src, std::string const& dst);
   static bool append_file(std::string const& path, std::string const& content);
 
-  std::string              pg_bin_;
-  std::string              data_dir_;
+  std::filesystem::path    pg_bin_;
+  std::filesystem::path    data_dir_;
+  std::filesystem::path    raft_dir_;
   std::vector<std::string> extra_args_;
 
   struct PostgresProcess : public Process {
     using Process::Process;
-    void on_stderr_line(std::string_view line) override;
+    void on_stdout_line(std::string_view line) override { logger::pg_log(line); }
+    void on_stderr_line(std::string_view line) override { logger::pg_log(line); }
   };
   PostgresProcess postgres_;
 };

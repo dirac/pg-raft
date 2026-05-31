@@ -1,14 +1,14 @@
 #pragma once
 
+#include <sys/types.h>
+
+#include <format>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
-#include <numeric>
-#include <format>
-
-#include <sys/types.h>
 
 // Manages the lifecycle of a child process.
 //
@@ -23,14 +23,12 @@
 // dispatching on the moved-from object — safe as long as the moved-from object
 // outlives the subsequent wait().
 class Process {
-public:
-  Process(std::string executable, std::vector<std::string> args);
+ public:
+  Process(std::filesystem::path executable, std::vector<std::string> args);
   virtual ~Process();
 
-  Process(const Process &) = delete;
-  Process &operator=(const Process &) = delete;
-  Process(Process &&) noexcept;
-  Process &operator=(Process &&) noexcept;
+  Process(Process const&)            = delete;
+  Process& operator=(Process const&) = delete;
 
   // Forks and execs the process. Returns false if already running or exec
   // fails.
@@ -59,22 +57,23 @@ public:
   std::string to_string() const {
     std::string result = std::format("[{0}] {1}", pid_, executable_);
     return std::accumulate(
-        std::begin(args_), std::end(args_), std::move(result),
-        [](auto result, const auto &arg) { return result + " " + arg; });
+        std::begin(args_), std::end(args_), std::move(result), [](auto result, auto const& arg) {
+          return result + " " + arg;
+        });
   }
 
-protected:
+ protected:
   virtual void on_stdout_line(std::string_view line);
   virtual void on_stderr_line(std::string_view line);
 
-private:
+ private:
   static int decode_status(int status);
-  void read_lines(int fd, bool is_stdout);
-  void join_readers();
+  void       read_lines(int fd, bool is_stdout);
+  void       join_readers();
 
-  std::string executable_;
-  std::vector<std::string> args_;
-  pid_t pid_ = -1;
-  std::thread stdout_thread_;
-  std::thread stderr_thread_;
+  std::filesystem::path const    executable_;
+  std::vector<std::string> const args_;
+  pid_t                          pid_ = -1;
+  std::thread                    stdout_thread_;
+  std::thread                    stderr_thread_;
 };

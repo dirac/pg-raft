@@ -17,25 +17,29 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 
 ```bash
 # Build everything
-b2
+/opt/sparrow/bin/b2
 
 # Build + run all tests
-b2 test
+/opt/sparrow/bin/b2 test
 
 # Build only a module
-b2 src/process
-b2 src/wal_sender
-b2 src/wal_fuse
+/opt/sparrow/bin/b2 src/process
+/opt/sparrow/bin/b2 src/wal_sender
+/opt/sparrow/bin/b2 src/wal_fuse
+/opt/sparrow/bin/b2 src/net
 
 # Run a specific test target (specify by Jamfile target name)
-b2 src/process//process_test
-b2 src/wal_sender//wal_sender_test
-b2 src/wal_sender//pg_replication_test
-b2 src/wal_fuse//wal_fuse_test
+/opt/sparrow/bin/b2 src/process//process_test
+/opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
+/opt/sparrow/bin/b2 src/wal_sender//pg_replication_test
+/opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_test
+/opt/sparrow/bin/b2 src/net//async_connect_test
+/opt/sparrow/bin/b2 src/net//data_test
+/opt/sparrow/bin/b2 src/net//connection_test
 
 # Build with sanitizers
-b2 address-sanitizer=norecover
-b2 thread-sanitizer=norecover
+/opt/sparrow/bin/b2 address-sanitizer=norecover
+/opt/sparrow/bin/b2 thread-sanitizer=norecover
 ```
 
 Build artifacts land in `src/<module>/bin/clang-darwin-17/debug/cxxstd-latest-iso/`.
@@ -51,7 +55,24 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 ### Modules
 
-**`src/base/`** — `logger` namespace. Thread-safe, `std::format`-based logging to stderr. Levels: `Debug`, `Info`, `Warn`, `Error`. Default level is `Debug`. Call `logger::set_level()` to suppress noise in tests.
+**`src/base/`** — Foundational utilities used by all other modules:
+
+- **`logger`** — Thread-safe, `std::format`-based logging to stderr. Levels: `Debug`, `Info`, `Warn`, `Error`. Default level is `Debug`. Call `logger::set_level()` to suppress noise in tests. Free functions `debug()`, `info()`, `warn()`, `error()` are available globally via `using.h`.
+- **`Result<T>`** — `std::expected<T, std::error_code>` wrapper with implicit construction from both `std::error_code` and `boost::system::error_code`. Use `ok()` to return a successful `Result<void>`.
+- **`Config`** — TOML-based system configuration (`config.toml`). Fields: `wdir`, `install_dir`, `pg_major_version`, `servers[]` (hostname + pg_port + ha_port), `pg_config`, `proxy_pg_port`/`proxy_http_port`, `s3_endpoints[]`.
+- **`IoThreads`** — Manages a pool of threads running a shared `boost::asio::io_context`. Access the global context via `io_context()`; post work with `post(func)`.
+- **`Int<T, L>`** — Strongly-typed integer wrapper template. Defined aliases: `RaftTerm` (uint64_t), `RaftIndex` (uint64_t), `RaftNodeId` (uint16_t). Use `INT(x)` macro to extract the underlying value. `std::atomic<Int<T,L>>` is specialized.
+- **`convert.h`** — Checked narrowing casts: `u8()`, `u4()`, `u2()`, `u1()`, `i8()`, `i4()`, `i2()`, `i1()`, `i<U>(v)`. All assert that the value fits in the target type.
+- **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, etc.) and `asio` as an alias for `boost::asio`.
+- **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
+
+**`src/net/`** — Async networking layer built on Boost.Asio with optional TLS:
+
+- **`Connection`** — Async framed-message connection over TCP or SSL (`socket_type = std::variant<tcp_socket, ssl_socket>`). Messages are framed with a 4-word header. `read_data()` / `write_data()` are callback-based and safe to call from any thread; internal strand serializes all I/O. Status exchange (peer liveness) and read-timeout are managed automatically. Instantiate via `Connection::create<DerivedType>(...)`, which calls `start()` automatically. Override `on_shutdown()` to clean up.
+- **`Server`** — Abstract TCP accept loop. Subclass and implement `start()`, `new_connection()`, `on_shutdown()`. Instantiate via `Server::create<DerivedType>(...)`. `shutdown()` cancels the acceptor.
+- **`Data`** — Pool-backed scatter/gather I/O buffer (`kPageSize = 8192`). Implements `std::basic_streambuf` so it works with `std::ostream`/`std::istream`. Serialize with `to_data<T>(obj)` / deserialize with `from_data<T>(data)` using Boost.Serialization (binary by default).
+- **`HostAddress`** — Plain `{address, port}` struct with serialization support and `to_string()`.
+- **`async_connect`** / **`connect`** — Establish outbound TCP/SSL connections; both sync (`connect`) and async (`async_connect`) variants.
 
 **`src/process/`** — Two classes:
 

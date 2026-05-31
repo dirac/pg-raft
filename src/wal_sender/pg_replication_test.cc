@@ -6,8 +6,7 @@
 #endif
 #include <fuse/fuse.h>
 
-#include "src/postgres/pg_instance.h"
-#include "src/wal_fuse/pg_initializer.h"
+#include "src/process/pg_instance.h"
 #include "src/wal_fuse/wal_fuse.h"
 #include "src/wal_fuse/wal_fuse_ops.h"
 #include "src/wal_sender/wal_sender_server.h"
@@ -201,32 +200,21 @@ static void flush_wal_accum(const char* fuse_path) {
 // Identical to WalFuseOpBase for every op except write (accumulates WAL bytes)
 // and fsync (validates the accumulated bytes and emits one WalSegment).
 
-class WalSendingOps {
+class WalSendingOps : public WalFuseOpBase {
  public:
-  static struct fuse_operations make_ops() {
-    struct fuse_operations ops = WalFuseOpBase::make_ops();
-    ops.write = op_write;
-    ops.fsync = op_fsync;
-    return ops;
+  using WalFuseOpBase::WalFuseOpBase;
+
+  int op_write(const char* path, const char* buf, size_t size,
+               off_t offset, struct fuse_file_info* fi) override {
+    int res = WalFuseOpBase::op_write(path, buf, size, offset, fi);
+    if (res > 0 && is_wal_segment(path))
+      accum_wal_write(path, buf, static_cast<size_t>(res), offset,
+                      backing_dir().c_str());
+    return res;
   }
 
- private:
-  static int op_write(const char* path, const char* buf, size_t size,
-                      off_t offset, struct fuse_file_info* fi) {
-    logger::debug("write {} size={} off={} fd={}", path, size, offset, fi->fh);
-
-    ssize_t res = pwrite(static_cast<int>(fi->fh), buf, size, offset);
-    if (res == -1) return -errno;
-    if (is_wal_segment(path)) {
-      const char* bdir =
-          static_cast<const char*>(fuse_get_context()->private_data);
-      accum_wal_write(path, buf, static_cast<size_t>(res), offset, bdir);
-    }
-    return static_cast<int>(res);
-  }
-
-  static int op_fsync(const char* path, int datasync, struct fuse_file_info* fi) {
-    logger::debug("fsync {} fd={}", path, fi->fh);
+  int op_fsync(const char* path, int datasync,
+               struct fuse_file_info* fi) override {
     (void)datasync;
     (void)fi;
     flush_wal_accum(path);
@@ -309,19 +297,17 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   auto cleanup = [&]() { rmrf(base_dir); };
 
   // ── initialize primary (initdb + create pg_raft_wal) ────────────────────────
-  PgInitializer init(kPgBin, primary_dir,
-                     {"-E", "UTF8", "-A", "trust", "--no-sync"});
-  if (!init.run()) { cleanup(); BOOST_FAIL("PgInitializer failed"); }
-
   PgInstance primary(kPgBin, primary_dir);
+  if (!primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}))
+    { cleanup(); BOOST_FAIL("PgInstance::init() failed"); }
+  if (!primary.create_raft_wal())
+    { cleanup(); BOOST_FAIL("PgInstance::create_raft_wal() failed"); }
   primary.write_config({
       {"listen_addresses", "'127.0.0.1'"},
       {"port",             std::to_string(kPrimaryPort)},
       {"wal_level",        "replica"},
       {"max_wal_senders",  "3"},
-      {"wal_sync_method",  "fsync"},
       {"log_min_messages", "warning"},
-      {"wal_recycle",      "off"},
   });
   primary.write_hba({
       "host  all         all  127.0.0.1/32  trust",
@@ -329,8 +315,8 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   });
 
   // ── mount FUSE over pg_wal with WAL-capturing ops ───────────────────────────
-  WalFuse fuse(primary_dir + "/pg_wal", primary_dir + "/pg_raft_wal",
-               WalSendingOps{});
+  WalFuse fuse(primary_dir + "/pg_wal",
+               std::make_unique<WalSendingOps>(primary_dir + "/pg_raft_wal"));
   if (!fuse.start()) { cleanup(); BOOST_FAIL("WalFuse start failed"); }
   if (!wait_for_fuse_mount(primary_dir + "/pg_wal", primary_dir, 5000)) {
     fuse.stop(); cleanup(); BOOST_FAIL("FUSE mount timed out");

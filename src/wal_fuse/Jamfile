@@ -2,8 +2,6 @@
 lib wal_fuse
     : wal_fuse.cc
       wal_fuse_ops.cc
-      wal_fuse_manager.cc
-      pg_initializer.cc
       ../process//process
       ../base//base
       ../..//fuse

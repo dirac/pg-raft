@@ -8,50 +8,66 @@
 #endif
 #include <fuse/fuse.h>
 
+#include <filesystem>
 #include <string>
 
-// Passthrough FUSE operations: every call is forwarded to the backing
-// directory stored in fuse_get_context()->private_data.
+// Passthrough FUSE operations backed by a directory on the real filesystem.
 //
-// Pass as the Ops template argument to WalFuse<Ops>.
-class WalFuseOpBase {
+// Construct with a backing_dir path. Override virtual op_* methods in a
+// subclass to intercept specific operations; all others pass through to the
+// backing directory unchanged.
+//
+// Pass as the ops argument to WalFuse. The WalFuse instance stores this object
+// and passes it as fuse_get_context()->private_data so that the static
+// trampolines in make_ops() can dispatch to the correct virtual method.
+class WalFuseOps {
  public:
-  // Build and return the fuse_operations table for this policy.
+  explicit WalFuseOps(std::filesystem::path backing_dir);
+  virtual ~WalFuseOps() = default;
+
+  WalFuseOps(WalFuseOps const&)            = delete;
+  WalFuseOps& operator=(WalFuseOps const&) = delete;
+
+  // Returns a fuse_operations table whose entries are static trampolines.
+  // Each trampoline casts fuse_get_context()->private_data to WalFuseOps*
+  // and calls the corresponding virtual method.
   static struct fuse_operations make_ops();
 
- private:
-  static const char* backing_dir();
-  static std::string real_path(const char* path);
+  virtual int op_getattr(char const*, struct stat*);
+  virtual int op_fgetattr(char const*, struct stat*, struct fuse_file_info*);
+  virtual int op_access(char const*, int);
+  virtual int op_readlink(char const*, char*, size_t);
+  virtual int op_opendir(char const* path, struct fuse_file_info* fi);
+  virtual int op_readdir(char const*, void*, fuse_fill_dir_t, off_t, struct fuse_file_info*);
+  virtual int op_releasedir(char const* path, struct fuse_file_info* fi);
+  virtual int op_mkdir(char const*, mode_t);
+  virtual int op_unlink(char const*);
+  virtual int op_rmdir(char const*);
+  virtual int op_symlink(char const*, char const*);
+  virtual int op_rename(char const*, char const*);
+  virtual int op_link(char const*, char const*);
+  virtual int op_chmod(char const*, mode_t);
+  virtual int op_chown(char const*, uid_t, gid_t);
+  virtual int op_truncate(char const*, off_t);
+  virtual int op_ftruncate(char const*, off_t, struct fuse_file_info*);
+  virtual int op_utimens(char const*, const struct timespec[2]);
+  virtual int op_create(char const*, mode_t, struct fuse_file_info*);
+  virtual int op_open(char const*, struct fuse_file_info*);
+  virtual int op_read(char const*, char*, size_t, off_t, struct fuse_file_info*);
+  virtual int op_write(char const*, char const*, size_t, off_t, struct fuse_file_info*);
+  virtual int op_statfs(char const*, struct statvfs*);
+  virtual int op_flush(char const*, struct fuse_file_info*);
+  virtual int op_release(char const*, struct fuse_file_info*);
+  virtual int op_fsync(char const*, int, struct fuse_file_info*);
+  virtual int op_setxattr(char const*, char const*, char const*, size_t, int, uint32_t);
+  virtual int op_getxattr(char const*, char const*, char*, size_t, uint32_t);
+  virtual int op_listxattr(char const*, char*, size_t);
+  virtual int op_removexattr(char const*, char const*);
 
-  static int op_getattr(const char*, struct stat*);
-  static int op_fgetattr(const char*, struct stat*, struct fuse_file_info*);
-  static int op_access(const char*, int);
-  static int op_readlink(const char*, char*, size_t);
-  static int op_readdir(const char*, void*, fuse_fill_dir_t, off_t,
-                        struct fuse_file_info*);
-  static int op_mkdir(const char*, mode_t);
-  static int op_unlink(const char*);
-  static int op_rmdir(const char*);
-  static int op_symlink(const char*, const char*);
-  static int op_rename(const char*, const char*);
-  static int op_link(const char*, const char*);
-  static int op_chmod(const char*, mode_t);
-  static int op_chown(const char*, uid_t, gid_t);
-  static int op_truncate(const char*, off_t);
-  static int op_ftruncate(const char*, off_t, struct fuse_file_info*);
-  static int op_utimens(const char*, const struct timespec[2]);
-  static int op_create(const char*, mode_t, struct fuse_file_info*);
-  static int op_open(const char*, struct fuse_file_info*);
-  static int op_read(const char*, char*, size_t, off_t, struct fuse_file_info*);
-  static int op_write(const char*, const char*, size_t, off_t,
-                      struct fuse_file_info*);
-  static int op_statfs(const char*, struct statvfs*);
-  static int op_flush(const char*, struct fuse_file_info*);
-  static int op_release(const char*, struct fuse_file_info*);
-  static int op_fsync(const char*, int, struct fuse_file_info*);
-  static int op_setxattr(const char*, const char*, const char*, size_t, int,
-                         uint32_t);
-  static int op_getxattr(const char*, const char*, char*, size_t, uint32_t);
-  static int op_listxattr(const char*, char*, size_t);
-  static int op_removexattr(const char*, const char*);
+ protected:
+  std::filesystem::path const& backing_dir() const { return backing_dir_; }
+  std::filesystem::path        real_path(char const* path) const;
+
+ private:
+  std::filesystem::path backing_dir_;
 };

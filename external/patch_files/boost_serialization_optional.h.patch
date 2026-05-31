@@ -1,0 +1,11 @@
+--- boost/serialization/optional.hpp.orig	2025-06-08 09:18:16
++++ boost/serialization/optional.hpp	2025-06-08 09:18:38
+@@ -83,7 +83,7 @@
+     }
+     typename OT::value_type t;
+     ar >> boost::serialization::make_nvp("value",t);
+-    ot = t;
++    ot = std::move(t);
+ }
+ 
+ } // detail

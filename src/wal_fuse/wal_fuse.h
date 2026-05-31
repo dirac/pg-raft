@@ -9,41 +9,40 @@
 #include <fuse/fuse.h>
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <thread>
+#include <filesystem>
 
-// Passthrough FUSE filesystem that mounts at |mount_point| and redirects all
-// file operations to |backing_dir|.
+#include "src/wal_fuse/wal_fuse_ops.h"
+
+// Passthrough FUSE filesystem that mounts at |mount_point|.
 //
-// Ops must provide a static make_ops() returning struct fuse_operations.
-// Pass Ops{} as the third constructor argument — it is used only to deduce
-// the template parameter and call Ops::make_ops() at construction time.
+// The |ops| instance handles all file operations and owns the backing_dir path.
+// It is passed as fuse_get_context()->private_data so that virtual method
+// dispatch works inside the static FUSE callbacks.
 class WalFuse {
  public:
-  template <typename Ops>
-  WalFuse(std::string mount_point, std::string backing_dir, Ops)
-      : mount_point_(std::move(mount_point)),
-        backing_dir_(std::move(backing_dir)),
-        ops_(Ops::make_ops()) {}
-
+  WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOpBase> ops);
   ~WalFuse();
-  WalFuse(const WalFuse&) = delete;
-  WalFuse& operator=(const WalFuse&) = delete;
 
-  bool start();
+  WalFuse(WalFuse const&)            = delete;
+  WalFuse& operator=(WalFuse const&) = delete;
+
+  bool start(int timeout_ms = 5000);
   void stop();
   bool is_mounted() const { return mounted_.load(); }
 
  private:
   void run_loop();
 
-  std::string mount_point_;
-  std::string backing_dir_;
-  struct fuse_operations ops_;
+  std::filesystem::path          mount_point_;
+  std::unique_ptr<WalFuseOpBase> ops_instance_;
+  struct fuse_operations         ops_;
 
-  struct fuse* fuse_ = nullptr;
+  struct fuse*      fuse_ = nullptr;
   struct fuse_chan* chan_ = nullptr;
 
-  std::thread loop_thread_;
+  std::thread       loop_thread_;
   std::atomic<bool> mounted_{false};
 };

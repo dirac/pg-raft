@@ -1,0 +1,22 @@
+--- gdataset.c.orig	2024-04-19 16:07:05
++++ gdataset.c	2024-04-19 16:12:04
+@@ -1188,7 +1188,8 @@
+   g_return_if_fail (datalist != NULL);
+   g_return_if_fail ((flags & ~G_DATALIST_FLAGS_MASK) == 0);
+ 
+-  g_atomic_pointer_or (datalist, (gsize)flags);
++  gsize sflags = flags;
++  g_atomic_pointer_or (datalist, (GData*) sflags);
+ }
+ 
+ /**
+@@ -1211,7 +1212,8 @@
+   g_return_if_fail (datalist != NULL);
+   g_return_if_fail ((flags & ~G_DATALIST_FLAGS_MASK) == 0);
+ 
+-  g_atomic_pointer_and (datalist, ~(gsize)flags);
++  gsize nflags = ~(gsize)flags;
++  g_atomic_pointer_and (datalist, (GData*) nflags);
+ }
+ 
+ /**
