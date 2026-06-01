@@ -41,3 +41,19 @@ uint64_t gcounter(std::optional<uint64_t> g) {
     v.store(*g);
   return v.load(std::memory_order_relaxed);
 }
+
+std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t) {
+  static std::mutex            mtx;
+  static std::filesystem::path tmp{"/tmp/pg_raft"};
+
+  auto lk = std::unique_lock{mtx};
+  if (t)
+    tmp = *t;
+
+  std::filesystem::create_directories(tmp);
+  return tmp;
+}
+
+std::filesystem::path tmp_file(char const* ext) {
+  return tmp_dir() / format("{0}-{1}-{2}.{3}", gcounter(), pcounter(), epoch_msec(), ext);
+}

@@ -78,6 +78,43 @@ struct T {
   }
 };
 
+std::filesystem::path create_file(unsigned size) {
+  std::filesystem::path file = tmp_file();
+  std::ofstream         outFile(file);
+
+  for (unsigned i = 0; i < size; ++i)
+    outFile << (rand() % 100) << "\n";
+  outFile.close();
+  return file;
+}
+
+std::vector<char> read_file(std::filesystem::path const& filename) {
+  std::ifstream file(filename, std::ios::binary);
+
+  // Stop the stream from skipping whitespace (optional but safer for binary/raw data)
+  file.unsetf(std::ios::skipws);
+
+  // Initialize vector using stream iterators
+  auto result =
+      std::vector<char>{(std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()};
+  file.close();
+  return result;
+}
+
+std::vector<char> read_file(Result<std::filesystem::path> const& r) {
+  if (!r)
+    return {};
+
+  auto result = read_file(r.value());
+
+  std::error_code ec;
+  std::filesystem::remove(r.value(), ec);
+  if (ec)
+    ERROR_CODE_MSG(ec, "Removing {}", r.value().c_str());
+
+  return result;
+}
+
 }  // namespace
 
 struct TestSetup {
@@ -109,6 +146,7 @@ struct TestSetup {
 
   boost::asio::io_context io{};
   IoThreads               th{io, 4};
+  TmpDir                  dir{};
 
   shared_ptr<TestServer>     server;
   shared_ptr<TestConnection> client;
@@ -321,5 +359,122 @@ BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup) {
   BOOST_TEST(client->status_calls_size() > 5);
   BOOST_TEST(client->peer_status_calls_size() == 0);
 
+  conn->shutdown();
+}
+
+BOOST_FIXTURE_TEST_CASE(files, TestSetup) {
+  auto conn = connect();
+
+  BOOST_TEST(conn);
+  BOOST_TEST(client);
+
+  auto t1 = create_file(3 * kPageSize);
+  auto t2 = create_file(5 * kPageSize);
+
+  BOOST_TEST(read_file(t1) != read_file(t2));
+  BOOST_TEST(read_file(t1).size() >= 3 * kPageSize);
+  BOOST_TEST(read_file(t2).size() >= 5 * kPageSize);
+
+  auto c = std::atomic<unsigned>{0};
+
+  unsigned k;
+  unsigned p = 0;
+  for (k = 0; k < 2; ++k) {
+    std::swap(conn, client);
+
+    p++;
+    for (unsigned i = 0; i < 10; ++i) {
+      conn->write_file(t1, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+      conn->write_file(t2, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+      client->read_file([&t1, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t1) == read_file(r.value())));
+        c.fetch_add(1);
+      });
+      client->read_file([&t2, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t2) == read_file(r)));
+        c.fetch_add(1);
+      });
+    }
+
+    p++;
+    for (unsigned i = 0; i < 10; ++i) {
+      client->read_file([&t1, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t1) == read_file(r)));
+        c.fetch_add(1);
+      });
+      client->read_file([&t2, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t2) == read_file(r)));
+        c.fetch_add(1);
+      });
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+      conn->write_file(t1, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+      conn->write_file(t2, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+    }
+
+    p++;
+    for (unsigned i = 0; i < 10; ++i) {
+      conn->write_file(t1, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+      conn->write_file(t2, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+
+      client->read_file([&t1, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t1) == read_file(r)));
+        c.fetch_add(1);
+      });
+      client->read_file([&t2, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t2) == read_file(r)));
+        c.fetch_add(1);
+      });
+    }
+
+    p++;
+    for (unsigned i = 0; i < 10; ++i) {
+      client->read_file([&t1, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t1) == read_file(r)));
+        c.fetch_add(1);
+      });
+      client->read_file([&t2, &c](Result<std::filesystem::path> r) {
+        BOOST_TEST((read_file(t2) == read_file(r.value())));
+        c.fetch_add(1);
+      });
+
+      conn->write_file(t1, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+      conn->write_file(t2, [&c](Result<void> r) {
+        BOOST_TEST(!r.has_error());
+        c.fetch_add(1);
+      });
+    }
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  while (c != (p * 4 * 10)) {
+    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 10), c.load());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+  }
   conn->shutdown();
 }

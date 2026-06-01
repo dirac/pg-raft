@@ -40,6 +40,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
   virtual void    set_peer_status(uint8_t s);
 
   void read_data(std::function<void(Result<Data>)> handler);
+  void read_file(std::function<void(Result<std::filesystem::path>)> handler);
 
   void write_data(Data                              data,
                   boost::asio::const_buffer         buff,
@@ -47,6 +48,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
   void write_data(Data data, std::function<void(Result<void>)> handler) {
     write_data(std::move(data), boost::asio::const_buffer{}, std::move(handler));
   }
+  void write_file(std::filesystem::path file, std::function<void(Result<void>)> handler);
 
   void request_peer_status() { async_write_status(true); }
 
@@ -69,6 +71,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
   char const* log_prefix() const { return log_prefix_.load(std::memory_order_relaxed); }
 
  private:
+  /// File read and write.
+  Result<size_t> fwrite(int fd, void const* buf, size_t count);
+  Result<size_t> fread(int fd, void* buf, size_t count);
+
   void enqueue_status_req();
   void enqueue_timeout_check(unsigned curr = 0, unsigned last = 0);
 
@@ -79,7 +85,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
     std::deque<std::function<void(Result<M>)>> handlers;
   };
 
-  ReadQ<Data> read_data_q_;
+  ReadQ<Data>                  read_data_q_;
+  ReadQ<std::filesystem::path> read_file_q_;
 
   template <typename M>
   void async_read(std::function<void(Result<M>)> handler, ReadQ<M>& q);
@@ -100,14 +107,16 @@ class Connection : public std::enable_shared_from_this<Connection> {
     kStatusRequest,
     kStatusResponse,
     kData,
+    kFile,
   };
 
   /// Data and the subsequent buffer.
   using WriteData = std::tuple<Data, boost::asio::const_buffer>;
 
-  std::mutex             write_mtx_;
-  std::deque<WriteToken> write_queue_;
-  WriteQ<WriteData>      write_data_q_;
+  std::mutex                    write_mtx_;
+  std::deque<WriteToken>        write_queue_;
+  WriteQ<WriteData>             write_data_q_;
+  WriteQ<std::filesystem::path> write_file_q_;
 
   template <typename M>
   void async_write(M                                 elem,
@@ -132,6 +141,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
   void do_write_header(boost::asio::const_buffer buff, F h);
 
   void do_write_data(shared_ptr<Connection> self, Data data, boost::asio::const_buffer buff);
+  void do_write_file(shared_ptr<Connection>    self,
+                     int                       fd,
+                     size_t                    size,
+                     boost::asio::const_buffer buff);
 
   uint32_t recv_packet_ = 0;
   uint32_t sent_packet_ = 0;
@@ -147,6 +160,11 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   void do_read_data(shared_ptr<Connection> self, Data data);
   void do_read_data(uint32_t length);
+  void do_read_file(uint64_t length);
+  void do_read_file(shared_ptr<Connection> self,
+                    int                    fd,
+                    uint64_t               length,
+                    std::filesystem::path  file);
 
   void shutdown(shared_ptr<Connection> self);
   void async_shutdown(std::function<void()> invoke_on_shutdown);
@@ -264,6 +282,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   socket_type                     socket_;
   boost::asio::io_context::strand strand_;
+
+  // File transfers
+  unique_ptr<std::array<char, kPageSize>> read_file_buff_;
+  unique_ptr<std::array<char, kPageSize>> write_file_buff_;
 
   // The last epoch that we read a character.
   std::atomic<unsigned> last_epoch_;

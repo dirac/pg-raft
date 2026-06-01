@@ -18,6 +18,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <iomanip>
@@ -61,11 +62,11 @@
 #include <boost/asio/strand.hpp>
 
 /// Boost containers
-#include <boost/pool/singleton_pool.hpp>
 #include <boost/bimap.hpp>
 #include <boost/bimap/unordered_set_of.hpp>
 #include <boost/circular_buffer.hpp>
 #include <boost/container/static_vector.hpp>
+#include <boost/pool/singleton_pool.hpp>
 
 /// C++ serialization.
 #include <boost/archive/binary_iarchive.hpp>

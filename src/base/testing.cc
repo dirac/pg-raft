@@ -106,6 +106,10 @@ TmpDir::TmpDir(bool remove) : rm_(remove) {
   path_ = base_path.path() / file / name;
 
   std::filesystem::create_directories(path_);
+
+  // Set the temp directories for testcases.
+  tmp_dir(path_ / "tmp");
+
   if (!rm_)
     LOG_INFO("Created: {}", path_.c_str());
 }

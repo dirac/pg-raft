@@ -44,7 +44,10 @@ bool is_system_error_code(std::error_code const& ec);
 
 unsigned epoch_msec();
 uint64_t pcounter();
-uint64_t gcounter(std::optional<uint64_t> g);
+uint64_t gcounter(std::optional<uint64_t> g = std::nullopt);
+
+std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t = std::nullopt);
+std::filesystem::path tmp_file(char const* ext = "tmp");
 
 #include "src/base/convert.h"
 #include "src/base/int_type.h"

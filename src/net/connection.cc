@@ -136,6 +136,10 @@ void Connection::read_data(std::function<void(Result<Data>)> handler) {
   async_read<Data>(std::move(handler), read_data_q_);
 }
 
+void Connection::read_file(std::function<void(Result<std::filesystem::path>)> handler) {
+  async_read<std::filesystem::path>(std::move(handler), read_file_q_);
+}
+
 void Connection::process_header(unsigned idx) {
   if (idx == 0) {
     // We send and recv in network format.
@@ -170,6 +174,17 @@ void Connection::process_header(unsigned idx) {
       do_read_header(/*idx=*/3U, /*e=*/1U);
     else
       do_read_data(h);
+  } else {
+    assert(idx == 3U);
+
+    uint32_t h1 = ntoh(read_header_[2]);
+    uint32_t h2 = ntoh(read_header_[3]);
+
+    // Remove the High bit.
+    h1 = (h1 << 1) >> 1;
+
+    uint64_t length = static_cast<uint64_t>(h1) << 32 | static_cast<uint32_t>(h2);
+    do_read_file(length);
   }
 }
 
@@ -220,6 +235,73 @@ void Connection::do_read_data(shared_ptr<Connection> self, Data data) {
   };
 
   async_read_some(buff, std::move(handler));
+}
+
+void Connection::cleanup(std::error_code ec, int fd, std::filesystem::path file) {
+  if (fd != -1)
+    ::close(fd);
+  enqueue<std::filesystem::path>(ec, read_file_q_);
+
+  // Remove the file and ignore the error.
+  std::filesystem::remove(file, ec);
+}
+
+static mode_t file_mode() {
+  // S_IRUSR  00400 user has read permission
+  // S_IWUSR  00200 user has write permission
+  // S_IRGRP  00040 group has read permission
+  // S_IWGRP  00020 group has write permission
+  // S_IROTH  00004 others have read permission
+
+  return S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
+}
+
+void Connection::do_read_file(uint64_t length) {
+  if (!write_file_buff_)
+    write_file_buff_ = make_unique<std::array<char, kPageSize>>();
+
+  auto file = tmp_file();
+  LOG_DEBUG("Writing file from peer at {}", file.c_str());
+
+  int fd = ::open(file.c_str(), O_RDWR | O_CREAT | O_EXCL, file_mode());
+  if (fd == -1) {
+    auto ec = system_error_code(errno);
+
+    cleanup(ec, fd, file);
+    return shutdown(ec);
+  } else
+    do_read_file(self(), fd, length, std::move(file));
+}
+
+void Connection::do_read_file(shared_ptr<Connection> self,
+                              int                    fd,
+                              uint64_t               length,
+                              std::filesystem::path  file) {
+  if (length == 0) {
+    ::close(fd);
+    enqueue<std::filesystem::path>(std::move(file), read_file_q_);
+    return do_read_header();
+  }
+
+  auto handler = [this, s = std::move(self), fd, length, file](error_code const& ec,
+                                                               size_t            bytes) mutable {
+    set_last_epoch(outstanding_read_req_);
+
+    if (ec) {
+      cleanup(ec, fd, file);
+      return shutdown(ec);
+    }
+
+    if (auto r = fwrite(fd, write_file_buff_->data(), bytes); !r) {
+      cleanup(r.error(), fd, std::move(file));
+      return shutdown(r.error());
+    } else
+      return do_read_file(std::move(s), fd, length - bytes, std::move(file));
+  };
+
+  async_read_some(boost::asio::mutable_buffer(write_file_buff_->data(),
+                                              std::min<size_t>(length, write_file_buff_->size())),
+                  std::move(handler));
 }
 
 template <typename M>
@@ -306,6 +388,10 @@ void Connection::dequeue(Result<void> r, std::unique_lock<std::mutex> lk) {
       dequeue(write_data_q_, std::move(r));
       break;
 
+    case WriteToken::kFile:
+      dequeue(write_file_q_, std::move(r));
+      break;
+
     case WriteToken::kStatusRequest:
       break;
 
@@ -328,6 +414,15 @@ void Connection::write_data(Data                              data,
 
   async_write(
       std::make_tuple(std::move(data), buff), std::move(handler), write_data_q_, WriteToken::kData);
+}
+
+void Connection::write_file(std::filesystem::path file, std::function<void(Result<void>)> handler) {
+  if (closed()) {
+    error_code ec = boost::asio::error::connection_aborted;
+    handler(ec);
+  }
+
+  async_write(std::move(file), std::move(handler), write_file_q_, WriteToken::kFile);
 }
 
 template <typename F>
@@ -400,9 +495,41 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
       do_write_header(boost::asio::const_buffer(write_header_.data(), (3U) * sizeof(uint32_t)),
                       std::move(handler));
     } break;
-  }
 
-  (void)lk;
+    case WriteToken::kFile: {
+      if (!read_file_buff_)
+        read_file_buff_ = make_unique<std::array<char, kPageSize>>();
+
+      auto ec   = std::error_code{};
+      auto file = std::move(write_file_q_.queue.front());
+
+      auto fd = ::open(file.c_str(), O_RDONLY);
+      if (fd == -1) {
+        ec = system_error_code(errno);
+
+        dequeue(ec, std::move(lk));
+        return shutdown(ec);
+      }
+
+      auto size = std::filesystem::file_size(file, ec);
+      if (ec) {
+        ::close(fd);
+        dequeue(ec, std::move(lk));
+        return shutdown(ec);
+      }
+      assert(size < (static_cast<uint64_t>(0x1ULL) << 60));
+
+      // The high two bits are b10
+      write_header_[2] = hton(u4(size >> 32) | u4(0x1ULL << 31));
+      write_header_[3] = hton(u4(size & 0xFFFFFFFF));
+
+      auto handler = [this, s = self(), fd, size]() mutable {
+        do_write_file(std::move(s), fd, size, boost::asio::const_buffer(nullptr, 0));
+      };
+      do_write_header(boost::asio::const_buffer(write_header_.data(), (4U) * sizeof(uint32_t)),
+                      std::move(handler));
+    } break;
+  }
 }
 
 void Connection::do_write_data(shared_ptr<Connection>    self,
@@ -432,12 +559,52 @@ void Connection::do_write_data(shared_ptr<Connection>    self,
   async_write_some(buffs, std::move(handler));
 }
 
+void Connection::do_write_file(shared_ptr<Connection>    self,
+                               int                       fd,
+                               size_t                    size,
+                               boost::asio::const_buffer buff) {
+  if (size == 0) {
+    ::close(fd);
+    return dequeue(ok());
+  }
+
+  if (buff.size() == 0) {
+    auto bytes = std::min(size, read_file_buff_->size());
+
+    if (auto r = fread(fd, read_file_buff_->data(), bytes); !r) {
+      ::close(fd);
+      dequeue(r.error());
+      return shutdown(r.error());
+    }
+    buff = boost::asio::const_buffer(read_file_buff_->data(), bytes);
+  }
+
+  auto handler = [this, s = std::move(self), fd, size, buff](error_code const& ec,
+                                                             size_t            length) mutable {
+    set_last_epoch(outstanding_write_req_);
+
+    if (ec) {
+      ::close(fd);
+      dequeue(ec);
+      return shutdown(ec);
+    }
+
+    buff += length;
+    size -= length;
+
+    do_write_file(std::move(s), fd, size, buff);
+  };
+  async_write_some(buff, std::move(handler));
+}
+
 void Connection::shutdown(boost::system::error_code const& ec, std::source_location loc) {
   if (closed_.test_and_set())
     return;
 
   shutdown(boost::asio::error::connection_aborted, write_data_q_);
+  shutdown(boost::asio::error::connection_aborted, write_file_q_);
   shutdown(boost::asio::error::connection_aborted, read_data_q_);
+  shutdown(boost::asio::error::connection_aborted, read_file_q_);
 
   // The peer called shutdown to exchange close_notify.
   if (ec == boost::asio::error::eof)
@@ -459,7 +626,9 @@ void Connection::shutdown(std::source_location loc) {
     return;
 
   shutdown(boost::asio::error::connection_aborted, write_data_q_);
+  shutdown(boost::asio::error::connection_aborted, write_file_q_);
   shutdown(boost::asio::error::connection_aborted, read_data_q_);
+  shutdown(boost::asio::error::connection_aborted, read_file_q_);
 
   LOG_INFO("Close connection to {} ({}:{})", peer(), loc.file_name(), loc.line());
   shutdown(self());
@@ -521,4 +690,26 @@ void Connection::async_shutdown(std::function<void()> invoke_on_shutdown) {
 
 void Connection::shutdown(shared_ptr<Connection> self) {
   async_shutdown([self = std::move(self)]() mutable { self->on_shutdown(); });
+}
+
+Result<size_t> Connection::fwrite(int fd, void const* buf, size_t count) {
+  size_t size = 0;
+  while (size < count) {
+    ssize_t rc = ::write(fd, reinterpret_cast<char const*>(buf) + size, count - size);
+    if (rc <= 0)
+      return system_error_code(errno);
+    size += static_cast<size_t>(rc);
+  }
+  return size;
+}
+
+Result<size_t> Connection::fread(int fd, void* buf, size_t count) {
+  size_t size = 0;
+  while (size < count) {
+    ssize_t rc = ::read(fd, reinterpret_cast<char*>(buf) + size, count - size);
+    if (rc <= 0)
+      return system_error_code(errno);
+    size += static_cast<size_t>(rc);
+  }
+  return size;
 }

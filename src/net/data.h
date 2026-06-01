@@ -129,4 +129,3 @@ Result<T> from_data(Data msg) {
   assert(bytes.empty());
   return t;
 }
-
