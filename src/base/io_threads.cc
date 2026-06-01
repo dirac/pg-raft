@@ -7,15 +7,17 @@ asio::io_context& io_context() {
   return ctx;
 }
 
-IoThreads::IoThreads(unsigned threads) {
-  info("Starting {} threads", threads);
+IoThreads::IoThreads(asio::io_context& ctx, unsigned threads)
+    : ctx_(ctx), work_(ctx_.get_executor()) {
+  LOG_INFO("Starting {} threads", threads);
   while (threads_.size() < threads)
-    threads_.emplace_back([]() { io_context().run(); });
+    threads_.emplace_back([this]() { ctx_.run(); });
 }
 
 void IoThreads::stop() {
-  if (!io_context().stopped())
-    io_context().stop();
+  work_.reset();
+  if (!ctx_.stopped())
+    ctx_.stop();
 
   std::for_each(std::begin(threads_), std::end(threads_), [](auto& th) { th.join(); });
   threads_.clear();

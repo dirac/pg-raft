@@ -1,6 +1,6 @@
-#include "lib/net/connection.h"
+#include "src/net/connection.h"
 
-namespace banyandb::net {
+#include "src/base/logger.h"
 
 using error_code = ::boost::system::error_code;
 
@@ -19,7 +19,7 @@ Connection::Connection(string peer, socket_type socket, std::chrono::millisecond
       status_(std::min(std::chrono::milliseconds(1000), timeout / 10)),
       status_timer_(io_context_) {
   if (!peer_.empty())
-    set_log_prefix(fn::format("({0}) ", peer_));
+    set_log_prefix(format("({0}) ", peer_));
 
   assert(!closed());
 }
@@ -28,13 +28,13 @@ Connection::~Connection() {
   if (closed_.test_and_set())
     return;
 
-  LOG_INFO << log_prefix() << "Connection terminated without calling shutdown!!!";
+  LOG_INFO("{} Connection terminated without calling shutdown!!!", log_prefix());
 }
 
 void Connection::on_shutdown() {}
 
 void Connection::start() {
-  ASSERT(started_.test_and_set() == false);
+  assert(started_.test_and_set() == false);
 
   do_read_header();
   if (timeout_.count() > 0) {
@@ -64,8 +64,8 @@ void Connection::enqueue_timeout_check(unsigned curr, unsigned last) {
     auto c = epoch_msec();
     auto l = last_epoch();
     if (l + timeout_.count() < c) {
-      LOG_INFO << log_prefix() << "c=" << c << " l=" << l << " diff=" << (c - l)
-               << " timeout=" << timeout_.count();
+      LOG_INFO(
+          "{} c={} l={} diff = {} timeout = {}", log_prefix(), c, l, (c - l), timeout_.count());
 
       ec.assign(ETIMEDOUT, boost::system::system_category());
       shutdown(ec);
@@ -139,11 +139,15 @@ void Connection::read_data(std::function<void(Result<Data>)> handler) {
 void Connection::process_header(unsigned idx) {
   if (idx == 0) {
     // We send and recv in network format.
-    if (read_header_[0] != hton(0xDEADBEEF)) [[unlikely]]
-      breakpoint("Invalid start of the packet");
+    if (read_header_[0] != hton(0xDEADBEEF)) [[unlikely]] {
+      LOG_ERROR("Invalid start of the packet");
+      return shutdown();
+    }
 
-    if (++recv_packet_ != ntoh(read_header_[1])) [[unlikely]]
-      breakpoint("Invalid counter");
+    if (++recv_packet_ != ntoh(read_header_[1])) [[unlikely]] {
+      LOG_ERROR("Invalid counter");
+      return shutdown();
+    }
 
     uint32_t const h = ntoh(read_header_[2]);
 
@@ -165,19 +169,7 @@ void Connection::process_header(unsigned idx) {
     } else if (ctrl == 0x2)
       do_read_header(/*idx=*/3U, /*e=*/1U);
     else
-      do_read_data(header, h);
-  } else {
-    assert(idx == (3U));
-    // Ignore the header, headers are not supported for file transfers.
-
-    uint32_t h1 = ntoh(read_header_[2]);
-    uint32_t h2 = ntoh(read_header_[3]);
-
-    // Remove the High bit.
-    h1 = (h1 << 1) >> 1;
-
-    uint64_t length = static_cast<uint64_t>(h1) << 32 | static_cast<uint32_t>(h2);
-    do_read_file(length);
+      do_read_data(h);
   }
 }
 
@@ -203,45 +195,31 @@ void Connection::do_read_header_some(boost::asio::mutable_buffer buff, unsigned 
   async_read_some(buff, std::move(handler));
 }
 
-void Connection::breakpoint(char const* data) {
-  LOG_ERROR << log_prefix() << data;
-  shutdown();
+void Connection::do_read_data(uint32_t length) {
+  do_read_data(self(), Data{length});
 }
 
-void Connection::do_read_data(AddedHeader header, uint32_t length) {
-  do_read_data(self(), header, Data{length});
-}
-
-void Connection::do_read_data(shared_ptr<Connection> self, AddedHeader header, Data data) {
+void Connection::do_read_data(shared_ptr<Connection> self, Data data) {
   if (data.filled(0U)) {
-    enqueue<ReadData>(std::move(data), read_data_q_);
+    enqueue<Data>(std::move(data), read_data_q_);
     return do_read_header();
   }
 
   auto buff    = data.mutable_buffer();
-  auto handler = [this, s = std::move(self), header, data = std::move(data)](
-                     error_code const& ec, size_t length) mutable {
+  auto handler = [this, s = std::move(self), data = std::move(data)](error_code const& ec,
+                                                                     size_t length) mutable {
     set_last_epoch(outstanding_read_req_);
 
     if (ec) {
-      enqueue<ReadData>(ec, read_data_q_);
+      enqueue<Data>(ec, read_data_q_);
       return shutdown(ec);
     }
 
     data.filled(length);
-    do_read_data(std::move(s), header, std::move(data));
+    do_read_data(std::move(s), std::move(data));
   };
 
   async_read_some(buff, std::move(handler));
-}
-
-void Connection::cleanup(std::error_code ec, int fd, std::filesystem::path file) {
-  if (fd != -1)
-    ::close(fd);
-  enqueue<std::filesystem::path>(ec, read_file_q_);
-
-  // Remove the file and ignore the error.
-  std::filesystem::remove(file, ec);
 }
 
 template <typename M>
@@ -340,19 +318,16 @@ void Connection::dequeue(Result<void> r, std::unique_lock<std::mutex> lk) {
     do_write(std::move(lk));
 }
 
-void Connection::write_data_internal(AddedHeader                       header,
-                                     Data                              data,
-                                     boost::asio::const_buffer         buff,
-                                     std::function<void(Result<void>)> handler) {
+void Connection::write_data(Data                              data,
+                            boost::asio::const_buffer         buff,
+                            std::function<void(Result<void>)> handler) {
   if (closed()) {
     error_code ec = boost::asio::error::connection_aborted;
     handler(ec);
   }
 
-  async_write(std::make_tuple(header, std::move(data), buff),
-              std::move(handler),
-              write_data_q_,
-              WriteToken::kData);
+  async_write(
+      std::make_tuple(std::move(data), buff), std::move(handler), write_data_q_, WriteToken::kData);
 }
 
 template <typename F>
@@ -407,7 +382,7 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
     } break;
 
     case WriteToken::kData: {
-      auto [header, data, buff] = std::move(write_data_q_.queue.front());
+      auto [data, buff] = std::move(write_data_q_.queue.front());
 
       // The high bit is b0
       uint32_t h       = u4(data.capacity() + buff.size());
@@ -426,6 +401,8 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
                       std::move(handler));
     } break;
   }
+
+  (void)lk;
 }
 
 void Connection::do_write_data(shared_ptr<Connection>    self,
@@ -461,7 +438,6 @@ void Connection::shutdown(boost::system::error_code const& ec, std::source_locat
 
   shutdown(boost::asio::error::connection_aborted, write_data_q_);
   shutdown(boost::asio::error::connection_aborted, read_data_q_);
-  shutdown(boost::asio::error::connection_aborted, read_file_q_);
 
   // The peer called shutdown to exchange close_notify.
   if (ec == boost::asio::error::eof)
@@ -473,9 +449,8 @@ void Connection::shutdown(boost::system::error_code const& ec, std::source_locat
   if (ec == boost::asio::ssl::error::stream_truncated)
     return on_shutdown();
 
-  LOG_INFO << log_prefix() << "Close connection to " << role() << ':' << peer() << " ("
-           << loc.file_name() << ':' << loc.line() << ") error = " << ec.message() << " (" << ec
-           << ")";
+  ERROR_CODE_MSG(
+      ec, "Close connection to {} ({}:{})", log_prefix(), peer(), loc.file_name(), loc.line());
   shutdown(self());
 }
 
@@ -485,11 +460,8 @@ void Connection::shutdown(std::source_location loc) {
 
   shutdown(boost::asio::error::connection_aborted, write_data_q_);
   shutdown(boost::asio::error::connection_aborted, read_data_q_);
-  shutdown(boost::asio::error::connection_aborted, read_file_q_);
 
-  LOG_INFO << log_prefix() << "Close connection to " << role() << ':' << peer() << " ("
-           << loc.file_name() << ':' << loc.line() << ")";
-
+  LOG_INFO("Close connection to {} ({}:{})", peer(), loc.file_name(), loc.line());
   shutdown(self());
 }
 
@@ -500,7 +472,7 @@ void Connection::socket_close(T& socket, std::function<void()> invoke_on_shutdow
     socket.close(ec);
     invoke_on_shutdown();
   } else {
-    LOG_INFO << log_prefix() << "Waiting, have outstanding read/write op";
+    LOG_INFO("{} Waiting, have outstanding read/write op", log_prefix());
 
     auto handler = [this, &socket, invoke_on_shutdown = std::move(invoke_on_shutdown)]() {
       socket_close(socket, std::move(invoke_on_shutdown));

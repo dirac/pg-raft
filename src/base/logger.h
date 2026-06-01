@@ -17,6 +17,20 @@ string& log_buffer();
 void _log(Level level, std::string_view msg, std::source_location const& loc);
 
 template <typename... Args>
+std::error_code _error(std::error_code             ec,
+                       std::source_location        loc,
+                       std::format_string<Args...> fmt,
+                       Args&&... args) {
+  auto& buffer = log_buffer();
+
+  std::format_to(std::back_inserter(buffer), fmt, std::forward<Args>(args)...);
+  std::format_to(std::back_inserter(buffer), ", error = {} ({})", ec.message(), ec.value());
+
+  _log(Level::Error, buffer, loc);
+  return ec;
+}
+
+template <typename... Args>
 void _log(Level level, std::source_location loc, std::format_string<Args...> fmt, Args&&... args) {
   auto& buffer = log_buffer();
 
@@ -31,18 +45,21 @@ void plog(char const* process, std::string_view log);
 
 }  // namespace logger
 
-#define info(fmt, ...) \
+#define ERROR_CODE_MSG(ec, fmt, ...) \
+  logger::_error(ec, std::source_location::current(), fmt, ##__VA_ARGS__)
+
+#define LOG_INFO(fmt, ...) \
   logger::_log(logger::Level::Info, std::source_location::current(), fmt, ##__VA_ARGS__)
 
-#define debug(fmt, ...) \
+#define LOG_DEBUG(fmt, ...) \
   logger::_log(logger::Level::Debug, std::source_location::current(), fmt, ##__VA_ARGS__)
 
-#define warn(fmt, ...) \
+#define LOG_WARN(fmt, ...) \
   logger::_log(logger::Level::Warn, std::source_location::current(), fmt, ##__VA_ARGS__)
 
-#define error(fmt, ...) \
+#define LOG_ERROR(fmt, ...) \
   logger::_log(logger::Level::Error, std::source_location::current(), fmt, ##__VA_ARGS__)
 
-#define fatal(fmt, ...)                                                                    \
+#define LOG_FATAL(fmt, ...)                                                                    \
   logger::_log(logger::Level::Error, std::source_location::current(), fmt, ##__VA_ARGS__); \
   abort()

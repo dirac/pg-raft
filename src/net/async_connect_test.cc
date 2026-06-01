@@ -1,18 +1,15 @@
 #define BOOST_TEST_MODULE async_connect
 #include "src/net/async_connect.h"
 
+#include "src/base/logger.h"
 #include "src/base/testing.h"
 #include "src/net/server.h"
 
-namespace banyandb::net::test {
-
 namespace {
 
-Logger test_logger{"ssl_test"};
-
-struct TestConnection : public Connection<> {
-  TestConnection(char const* role, string peer, std::filesystem::path tmpdir, socket_type socket)
-      : Connection<>(role, std::move(peer), std::move(socket), std::move(tmpdir), test_logger) {}
+struct TestConnection : public Connection {
+  TestConnection(string peer, socket_type socket)
+      : Connection(std::move(peer), std::move(socket)) {}
 
   void start() override {}
 
@@ -20,23 +17,15 @@ struct TestConnection : public Connection<> {
 };
 
 struct TestServer : public Server {
-  TestServer(boost::asio::io_context&              io_context,
-             Certificates const&                   certs,
-             std::filesystem::path                 tmpdir,
-             bool                                  enable_ssl,
-             boost::asio::ip::tcp::endpoint const& ep)
-      : Server(io_context, ep, certs, tmpdir, enable_ssl) {}
+  TestServer(boost::asio::io_context& io_context, boost::asio::ip::tcp::endpoint const& ep)
+      : Server(io_context, ep) {}
 
   void start() final { do_accept(); }
 
   void on_shutdown() final {}
 
-  void new_connection(char const*           role,
-                      string                peer,
-                      std::filesystem::path tmpdir,
-                      socket_type           socket) override {
-    Connection<>::create<TestConnection>(
-        role, std::move(peer), std::move(tmpdir), std::move(socket));
+  void new_connection(string peer, socket_type socket) override {
+    Connection::create<TestConnection>(std::move(peer), std::move(socket));
   }
 };
 
@@ -56,9 +45,9 @@ BOOST_AUTO_TEST_CASE(non_ssl) {
 
   auto server = Server::create<TestServer>(io_context, ep);
 
-  info("{}", server->host());
+  LOG_INFO("Server {}:{}", server->host().address, server->host().port);
 
-  auto socket = connect(io_context, ssl_ctx, server->host());
+  auto socket = connect(io_context, "test", server->host());
 
   BOOST_TEST(socket.has_value());
   BOOST_TEST(std::holds_alternative<tcp_socket>(socket.value()));
@@ -70,5 +59,3 @@ BOOST_AUTO_TEST_CASE(non_ssl) {
 
   th.join();
 }
-
-}  // namespace banyandb::net::test

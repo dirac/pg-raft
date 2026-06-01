@@ -1,15 +1,16 @@
 #define BOOST_TEST_MODULE connection
+#include "src/base/io_threads.h"
 #include "src/base/testing.h"
 #include "src/net/async_connect.h"
 #include "src/net/server.h"
 
 namespace {
 
-struct TestConnection : public Connection<> {
+struct TestConnection : public Connection {
   TestConnection(string peer, socket_type socket, std::chrono::milliseconds timeout)
-      : Connection<>(peer, std::move(socket), timeout) {}
+      : Connection(peer, std::move(socket), timeout) {}
 
-  TestConnection(string peer, socket_type socket) : Connection<>(peer, std::move(socket)) {}
+  TestConnection(string peer, socket_type socket) : Connection(peer, std::move(socket)) {}
 
   uint8_t status() const final {
     std::unique_lock<std::mutex> lk{mtx};
@@ -45,7 +46,7 @@ struct TestServer : public Server {
   void on_shutdown() final {}
 
   void new_connection(string peer, socket_type socket) override {
-    conn = Connection<>::create<TestConnection>(std::move(peer), std::move(socket));
+    conn = Connection::create<TestConnection>(std::move(peer), std::move(socket));
     new_conn.count_down();
   }
 
@@ -80,24 +81,21 @@ struct T {
 }  // namespace
 
 struct TestSetup {
-  TestSetup() {}
-
-  void start() {
+  TestSetup() {
     auto ep = ::boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0);
     server  = Server::create<TestServer>(io, ep);
   }
 
   shared_ptr<TestConnection> connect(
       std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
-    if (auto r = net::connect(io, server->host().with_address("localhost")); r) {
-      info("Connected to {}", server->host());
-      auto conn =
-          Connection<>::create<TestConnection>("router", "c->s ", std::move(r.value()), timeout);
+    if (auto r = ::connect(io, "test", server->host().with_address("localhost")); r) {
+      LOG_INFO("Connected to {}", server->host());
+      auto conn = Connection::create<TestConnection>("c->s ", std::move(r.value()), timeout);
 
       client = server->get();
       return conn;
     } else
-      error("{}", r.error());
+      ERROR_CODE_MSG(r.error(), "Connect failed");
     return nullptr;
   }
 
@@ -119,8 +117,8 @@ struct TestSetup {
 BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup) {
   auto conn = connect();
 
-  BOOST_TEST(conn);
-  BOOST_TEST(client);
+  BOOST_REQUIRE(conn);
+  BOOST_REQUIRE(client);
 
   auto t1 = T::instance(3 * kPageSize);
   auto t2 = T::instance(5 * kPageSize);
@@ -172,18 +170,17 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup) {
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   while (c != (p * 4 * 2)) {
-    info("waiting for {} acks, got {}", (p * 4 * 2), c.load());
+    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 2), c.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();
 }
 
 BOOST_FIXTURE_TEST_CASE(messages, TestSetup) {
-  start();
   auto conn = connect();
 
-  BOOST_TEST(conn);
-  BOOST_TEST(client);
+  BOOST_REQUIRE(conn);
+  BOOST_REQUIRE(client);
 
   auto t1 = T::instance(3 * kPageSize);
   auto t2 = T::instance(5 * kPageSize);
@@ -285,14 +282,13 @@ BOOST_FIXTURE_TEST_CASE(messages, TestSetup) {
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   while (c != (p * 4 * 10)) {
-    info("waiting for {} acks, got {}", (p * 4 * 10), c.load());
+    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 10), c.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();
 }
 
 BOOST_FIXTURE_TEST_CASE(status, TestSetup) {
-  start();
   auto conn = connect();
 
   BOOST_TEST(conn);
@@ -310,8 +306,7 @@ BOOST_FIXTURE_TEST_CASE(status, TestSetup) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(bg_status, TestStatus) {
-  start();
+BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup) {
   auto conn = connect(std::chrono::milliseconds(1000));
 
   BOOST_TEST(conn);

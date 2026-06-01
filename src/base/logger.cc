@@ -16,7 +16,7 @@ Level get_level() {
   return g_level.load(std::memory_order_relaxed);
 }
 
-string& log_buffer () {
+string& log_buffer() {
   thread_local std::string buffer;
   buffer.reserve(1024);
   buffer.clear();
@@ -48,7 +48,7 @@ void plog(char const* process, std::string_view line) {
   ::write(STDERR_FILENO, buffer.data(), buffer.size());
 }
 
-void log(Level level, std::string_view msg, std::source_location const& loc) {
+void _log(Level level, std::string_view msg, std::source_location const& loc) {
   thread_local std::string buffer;
   buffer.reserve(1024);
   buffer.clear();
@@ -61,6 +61,10 @@ void log(Level level, std::string_view msg, std::source_location const& loc) {
   struct tm tm;
   localtime_r(&ts.tv_sec, &tm);
 
+  auto name = loc.file_name();
+  if (auto n = strrchr(name, '/'); n)
+    name = n + 1;
+
   std::format_to(std::back_inserter(buffer),
                  "[{}] {:02}:{:02}:{:02}.{:03} [{}:{}] {}\n",
                  level_label(level),
@@ -68,7 +72,7 @@ void log(Level level, std::string_view msg, std::source_location const& loc) {
                  tm.tm_min,
                  tm.tm_sec,
                  static_cast<int>(ts.tv_nsec / 1'000'000),
-                 loc.file_name(),
+                 name,
                  loc.line(),
                  msg);
 

@@ -12,13 +12,19 @@ lib base
     config.cc
     io_threads.cc
     logger.cc
+    base.cc
     deps
   ;
 
-lib testing
+lib testing_cc
   : testing.cc
     base
     deps
+  ;
+
+alias testing
+  : testing_cc
+    ../..//external_test
   ;
 
 alias libs

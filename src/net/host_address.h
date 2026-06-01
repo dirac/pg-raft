@@ -30,6 +30,21 @@ struct HostAddress {
   }
 };
 
+template <>
+struct std::formatter<HostAddress> {
+  constexpr auto parse(std::format_parse_context& ctx) {
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+      throw std::format_error("Invalid format args for HostAddress.");
+    }
+    return it;
+  }
+
+  auto format(HostAddress const& p, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{}:{}", p.address, p.port);
+  }
+};
+
 inline std::ostream& operator<<(std::ostream& out, HostAddress const& address) {
   return out << "{" << address.address << ":" << address.port << "}";
 }

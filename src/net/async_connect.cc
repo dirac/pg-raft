@@ -1,6 +1,6 @@
 #include "src/net/async_connect.h"
 
-namespace banyandb::net {
+#include "src/base/logger.h"
 
 Result<socket_type> connect(boost::asio::io_context& io_context,
                             string const&            self,
@@ -30,9 +30,8 @@ struct SendInfoHandler {
 
   void operator()(boost::system::error_code const& ec, size_t) {
     if (ec)
-      return handler(ERROR_MSG(
-          ec, fn::format("Handshake ack error with host {0}:{1}", host.address, host.port)));
-
+      return handler(
+          ERROR_CODE_MSG(ec, "Handshake ack error with host {}:{}", host.address, host.port));
     handler(std::move(*socket));
   }
 };
@@ -41,15 +40,15 @@ struct ConnectHandler {
   shared_ptr<vector<boost::asio::ip::tcp::endpoint>> endpoints;
   HostAddress                                        host;
   shared_ptr<std::array<char, 64U>>                  self;
-  shared_ptr<uint8_t>                                ssl_byte;
   shared_ptr<boost::asio::ip::tcp::socket>           socket;
   Handler                                            handler;
 
-  void operator()(boost::system::error_code const& ec, ::boost::asio::ip::tcp::endpoint const&
-                  /*ep*/) {
+  void operator()(boost::system::error_code const& ec, ::boost::asio::ip::tcp::endpoint const& ep) {
     if (ec)
-      return handler(ec);
+      return handler(
+          ERROR_CODE_MSG(ec, "Failed connecting to {}:{}", ep.address().to_string(), ep.port()));
 
+    LOG_INFO("Connected to {}:{}", ep.address().to_string(), ep.port());
     boost::asio::async_write(*socket,
                              boost::asio::const_buffer(self->data(), self->size()),
                              SendInfoHandler<tcp_socket>{
@@ -71,14 +70,13 @@ struct ResolveHandler {
   void operator()(boost::system::error_code const&             ec,
                   boost::asio::ip::tcp::resolver::results_type endpts) {
     if (ec)
-      return handler(
-          ERROR_MSG(ec, fn::format("Resolve error to host {0}:{1}", host.address, host.port)));
+      return handler(ERROR_CODE_MSG(ec, "Resolve error to host {0}:{1}", host.address, host.port));
 
-    shared_ptr<vector<boost::asio::ip::tcp::endpoint>> endpoints;
+    auto endpoints = make_shared<vector<boost::asio::ip::tcp::endpoint>>();
 
     for (auto& e : endpts) {
-      e.endpoint().port(host.port);
-      endpoints->emplace_back(e.endpoint());
+      endpoints->emplace_back(e.endpoint().address(), host.port);
+      LOG_INFO("Resolved to endpoint {}:{}", endpoints->back().address().to_string(), host.port);
     }
 
     boost::asio::async_connect(*socket,
@@ -86,7 +84,6 @@ struct ResolveHandler {
                                ConnectHandler{.endpoints = endpoints,
                                               .host      = host,
                                               .self      = self,
-                                              .ssl_byte  = fn::make_shared<uint8_t>(),
                                               .socket    = socket,
                                               .handler   = std::move(handler)});
   }
@@ -95,15 +92,17 @@ struct ResolveHandler {
 }  // namespace
 
 void async_connect(boost::asio::io_context&                 io_context,
-                   string                                   self,
+                   string const&                            self,
                    HostAddress                              host,
                    std::function<void(Result<socket_type>)> handler) {
-  auto resolver = fn::make_shared<boost::asio::ip::tcp::resolver>(io_context);
-  auto socket   = fn::make_shared<boost::asio::ip::tcp::socket>(io_context);
-  auto self_ptr = fn::make_shared<std::array<char, 64U>>();
+  auto resolver = make_shared<boost::asio::ip::tcp::resolver>(io_context);
+  auto socket   = make_shared<boost::asio::ip::tcp::socket>(io_context);
+  auto self_ptr = make_shared<std::array<char, 64U>>();
 
   std::strncpy(self_ptr->data(), self.c_str(), std::max(self.size(), self_ptr->size()));
   self_ptr->back() = '\0';
+
+  LOG_INFO("Connecting to {}", host);
 
   auto ec      = ::boost::system::error_code{};
   auto address = ::boost::asio::ip::make_address(host.address, ec);
@@ -119,7 +118,7 @@ void async_connect(boost::asio::io_context&                 io_context,
                                 .handler  = std::move(handler),
                             });
   else {
-    auto endpoints = fn::make_shared<vector<boost::asio::ip::tcp::endpoint>>();
+    auto endpoints = make_shared<vector<boost::asio::ip::tcp::endpoint>>();
     endpoints->emplace_back(address, host.port);
 
     ::boost::asio::async_connect(*socket,
@@ -131,5 +130,3 @@ void async_connect(boost::asio::io_context&                 io_context,
                                                 .handler   = std::move(handler)});
   }
 }
-
-}  // namespace banyandb::net

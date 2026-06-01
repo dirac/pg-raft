@@ -38,14 +38,23 @@ lib boost_unit_test_framework  : : <name>boost_unit_test_framework <search>/opt/
 lib lmdb : : <name>lmdb <search>/opt/pg_raft/lib/ ;
 lib fuse : : <name>fuse <search>/usr/local/lib ;
 
+lib ssl    : : <name>ssl    <search>/opt/pg_raft/lib/ <search>/opt/pg_raft/lib64 ;
+lib crypto : : <name>crypto <search>/opt/pg_raft/lib/ <search>/opt/pg_raft/lib64 ;
+
 alias external :
     boost_json
     boost_filesystem
     boost_serialization
     lmdb
     fuse
+    ssl
+    crypto
   ;
 
+alias external_test
+   : boost_unit_test_framework
+     external
+   ;
 
 build-project src ;
 

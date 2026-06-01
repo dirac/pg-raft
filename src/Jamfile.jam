@@ -1,4 +1,5 @@
 build-project base ;
+build-project net ;
 build-project process ;
 build-project wal_fuse ;
 build-project wal_sender ;

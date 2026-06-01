@@ -1,5 +1,7 @@
 #include "src/net/server.h"
 
+#include "src/base/logger.h"
+
 Server::Server(boost::asio::ip::tcp::acceptor acceptor)
     : io_context_(static_cast<boost::asio::io_context&>(acceptor.get_executor().context())),
       acceptor_(std::move(acceptor)),
@@ -44,14 +46,14 @@ struct HandshakeConnection : public std::enable_shared_from_this<HandshakeConnec
     auto completion_handler = [this, p, self = shared_from_this()](
                                   boost::system::error_code const& ec, size_t) {
       if (ec) {
-        error("Ack failed {}", ec);
+        ERROR_CODE_MSG(ec, "Ack failed");
         return;
       }
 
       if (p->back() != '\0')
         return;
 
-      info("Connected to {}", p->data());
+      LOG_INFO("Connected to {}", p->data());
       handler_(string{p->data()}, std::move(socket_));
     };
     boost::asio::async_read(
@@ -77,15 +79,15 @@ void Server::do_accept() {
       if (ec != boost::asio::error::operation_aborted)
         return shutdown();
 
-      info("{}", ec.message());
+      LOG_INFO("{}", ec.message());
       return;
     }
 
     make_shared<HandshakeConnection>(std::move(socket),
-                                         [this, self](string peer, socket_type socket) {
-                                           if (!shutdown_signal())
-                                             new_connection(std::move(peer), std::move(socket));
-                                         })
+                                     [this, self](string peer, socket_type socket) {
+                                       if (!shutdown_signal())
+                                         new_connection(std::move(peer), std::move(socket));
+                                     })
         ->start();
 
     do_accept();

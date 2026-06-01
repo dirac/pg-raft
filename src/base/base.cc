@@ -1,12 +1,5 @@
 #include "src/base/base.h"
 
-unsigned epoch_msec() {
-  static auto start   = std::chrono::high_resolution_clock::now();
-  auto        elapsed = std::chrono::high_resolution_clock::now() - start;
-  return static_cast<unsigned>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-}
-
 namespace {
 class SystemErrorCategory : public std::error_category {
  public:
@@ -29,4 +22,22 @@ bool is_system_error_code(std::error_code const& ec) {
   return &(ec.category()) == &system_error_category ||
          &(ec.category()) == &(std::system_category()) ||
          &(ec.category()) == &(std::generic_category());
+}
+
+unsigned epoch_msec() {
+  static auto start   = std::chrono::high_resolution_clock::now();
+  auto        elapsed = std::chrono::high_resolution_clock::now() - start;
+  return static_cast<unsigned>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+}
+
+uint64_t pcounter() {
+  static std::atomic_uint64_t v{1};
+  return v.fetch_add(1U, std::memory_order_relaxed);
+}
+uint64_t gcounter(std::optional<uint64_t> g) {
+  static std::atomic_uint64_t v{0};
+  if (g) [[unlikely]]
+    v.store(*g);
+  return v.load(std::memory_order_relaxed);
 }

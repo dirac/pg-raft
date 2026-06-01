@@ -1,7 +1,7 @@
 #pragma once
 
-#include "src/net/host_address.h"
 #include "src/net/data.h"
+#include "src/net/host_address.h"
 
 using tcp_socket  = boost::asio::ip::tcp::socket;
 using ssl_socket  = boost::asio::ssl::stream<boost::asio::ip::tcp::socket>;
@@ -9,16 +9,15 @@ using socket_type = std::variant<tcp_socket, ssl_socket>;
 
 class Connection : public std::enable_shared_from_this<Connection> {
  public:
-  Connection(string peer, socket_type socket, std::chrono::milliseconds timeout);
-
-  Connection(string peer, socket_type socket, std::filesystem::path tmpdir)
-      : Connection(std::move(peer), std::move(socket), std::chrono::milliseconds(0)) {}
+  Connection(string                    peer,
+             socket_type               socket,
+             std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
 
   virtual ~Connection();
 
   template <class ConnectionType, typename... Args>
   static shared_ptr<ConnectionType> create(Args&&... args) {
-    auto s = fn::make_shared<ConnectionType>(std::forward<Args>(args)...);
+    auto s = std::make_shared<ConnectionType>(std::forward<Args>(args)...);
     s->start();
     return s;
   }
@@ -40,11 +39,11 @@ class Connection : public std::enable_shared_from_this<Connection> {
   virtual uint8_t status() const;
   virtual void    set_peer_status(uint8_t s);
 
-  void read_data(std::function<void(Result<Data>)> handler)
+  void read_data(std::function<void(Result<Data>)> handler);
 
-      void write_data(Data                              data,
-                      boost::asio::const_buffer         buff,
-                      std::function<void(Result<void>)> handler);
+  void write_data(Data                              data,
+                  boost::asio::const_buffer         buff,
+                  std::function<void(Result<void>)> handler);
   void write_data(Data data, std::function<void(Result<void>)> handler) {
     write_data(std::move(data), boost::asio::const_buffer{}, std::move(handler));
   }
@@ -61,6 +60,13 @@ class Connection : public std::enable_shared_from_this<Connection> {
   virtual void on_shutdown();
 
   bool ssl_enabled() const { return socket_.index() == 1; }
+
+  void set_log_prefix(string prefix) {
+    std::unique_lock<std::mutex> lk{log_prefix_mtx_};
+    log_prefixes_.emplace_back(std::move(prefix));
+    log_prefix_.store(log_prefixes_.back().c_str());
+  }
+  char const* log_prefix() const { return log_prefix_.load(std::memory_order_relaxed); }
 
  private:
   void enqueue_status_req();
@@ -134,7 +140,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
   std::array<uint32_t, 4U> write_header_;
 
   void process_header(unsigned idx);
-  void do_read_header(unsigned idx = 0, unsigned e = 3 + kHeaderSize);
+  void do_read_header(unsigned idx = 0, unsigned e = 3);
   void do_read_header_some(boost::asio::mutable_buffer buff, unsigned idx);
 
   void cleanup(std::error_code ec, int fd, std::filesystem::path file);
@@ -178,8 +184,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
         break;
 
       case 1:
-        std::get<1>(socket_).async_read(buff,
-                                        boost::asio::bind_executor(strand_, std::move(handler)));
+        std::get<1>(socket_).async_read_some(
+            buff, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
   }
@@ -198,8 +204,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
         break;
 
       case 1:
-        std::get<1>(socket_).async_read(buffs,
-                                        boost::asio::bind_executor(strand_, std::move(handler)));
+        std::get<1>(socket_).async_read_some(
+            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
   }
@@ -216,8 +222,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
         break;
 
       case 1:
-        std::get<1>(socket_).async_write(buff,
-                                         boost::asio::bind_executor(strand_, std::move(handler)));
+        std::get<1>(socket_).async_write_some(
+            buff, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
   }
@@ -236,8 +242,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
       case 1:
         assert(ssl_enabled());
-        std::get<1>(socket_).async_write(buffs,
-                                         boost::asio::bind_executor(strand_, std::move(handler)));
+        std::get<1>(socket_).async_write_some(
+            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
   }
@@ -268,7 +274,14 @@ class Connection : public std::enable_shared_from_this<Connection> {
   std::chrono::milliseconds const status_;
   boost::asio::steady_timer       status_timer_;
 
-  std::atomic_flag closed_  = ATOMIC_FLAG_INIT;
-  std::atomic_flag started_ = ATOMIC_FLAG_INIT;
-};
+  std::atomic_flag closed_                     = ATOMIC_FLAG_INIT;
+  std::atomic_flag started_                    = ATOMIC_FLAG_INIT;
+  std::atomic_flag outstanding_status_request_ = ATOMIC_FLAG_INIT;
+  std::atomic_flag outstanding_read_req_       = ATOMIC_FLAG_INIT;
+  std::atomic_flag outstanding_write_req_      = ATOMIC_FLAG_INIT;
 
+  // Prepend log statements.
+  std::mutex               log_prefix_mtx_;
+  list<string>             log_prefixes_;
+  std::atomic<char const*> log_prefix_{""};
+};
