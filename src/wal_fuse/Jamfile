@@ -1,14 +1,22 @@
 
+alias deps
+  : ../base//libs
+    ../process//libs
+  ;
+
 lib wal_fuse
-    : wal_fuse.cc
-      wal_fuse_ops.cc
-      ../process//process
-      ../base//base
-      ../..//fuse
-    ;
+  : wal_fuse.cc
+    wal_fuse_ops.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    wal_fuse
+  ;
 
 unit-test wal_fuse_test
-    : wal_fuse_test.cc
-      wal_fuse
-      ../..//external
-    ;
+  : wal_fuse_test.cc
+    libs
+    ../base//testing
+  ;

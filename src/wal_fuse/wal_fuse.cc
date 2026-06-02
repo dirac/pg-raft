@@ -2,10 +2,10 @@
 
 #include <fuse/fuse_opt.h>
 
-WalFuse::WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOpBase> ops)
+WalFuse::WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOps> ops)
     : mount_point_(std::move(mount_point)),
       ops_instance_(std::move(ops)),
-      ops_(WalFuseOpBase::make_ops()) {}
+      ops_(WalFuseOps::make_ops()) {}
 
 WalFuse::~WalFuse() {
   if (mounted_.load())

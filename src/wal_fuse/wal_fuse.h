@@ -22,9 +22,9 @@ class WalFuse {
  private:
   void run_loop();
 
-  std::filesystem::path          mount_point_;
-  std::unique_ptr<WalFuseOpBase> ops_instance_;
-  struct fuse_operations         ops_;
+  std::filesystem::path       mount_point_;
+  std::unique_ptr<WalFuseOps> ops_instance_;
+  struct fuse_operations      ops_;
 
   struct fuse*      fuse_ = nullptr;
   struct fuse_chan* chan_ = nullptr;

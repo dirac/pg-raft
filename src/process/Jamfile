@@ -19,3 +19,9 @@ unit-test process_test
       libs
       ../base//testing
     ;
+
+unit-test pg_instance_test
+    : pg_instance_test.cc
+      libs
+      ../base//testing
+    ;

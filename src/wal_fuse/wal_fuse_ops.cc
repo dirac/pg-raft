@@ -60,8 +60,9 @@ int WalFuseOps::op_opendir(char const* path, struct fuse_file_info* fi) {
 }
 
 int WalFuseOps::op_releasedir(char const* path, struct fuse_file_info* fi) {
-  log(DEBUG, "opendir {}", path);
+  log(DEBUG, "releasedir {}", path);
   ::closedir(reinterpret_cast<DIR*>(fi->fh));
+  return 0;
 }
 
 int WalFuseOps::op_readdir(char const*            path,

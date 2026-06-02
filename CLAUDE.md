@@ -57,7 +57,7 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 **`src/base/`** — Foundational utilities used by all other modules:
 
-- **`logger`** — Thread-safe, `std::format`-based logging to stderr. Levels: `Debug`, `Info`, `Warn`, `Error`. Default level is `Debug`. Call `logger::set_level()` to suppress noise in tests. Free functions `debug()`, `info()`, `warn()`, `error()` are available globally via `using.h`.
+- **`logger`** — Thread-safe, `std::format`-based logging to stderr. Levels: `Debug`, `Info`, `Warn`, `Error`, `Fatal`. Default level is `Info`. Call `logger::set_level()` to adjust. Use `log(LEVEL, fmt, args...)` globally (constants `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL` are in scope via the header). `logger::elog(ec, fmt, args...)` logs an `std::error_code` at `Error` level and returns the code. `logger::plog(prefix, line)` logs a line prefixed with a process name tag.
 - **`Result<T>`** — `std::expected<T, std::error_code>` wrapper with implicit construction from both `std::error_code` and `boost::system::error_code`. Use `ok()` to return a successful `Result<void>`.
 - **`Config`** — TOML-based system configuration (`config.toml`). Fields: `wdir`, `install_dir`, `pg_major_version`, `servers[]` (hostname + pg_port + ha_port), `pg_config`, `proxy_pg_port`/`proxy_http_port`, `s3_endpoints[]`.
 - **`IoThreads`** — Manages a pool of threads running a shared `boost::asio::io_context`. Access the global context via `io_context()`; post work with `post(func)`.
@@ -77,7 +77,7 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 **`src/process/`** — Two classes:
 
 - **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
-- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Provides: `init()` (runs `initdb`), `write_config()` / `write_hba()` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready()` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive `cp -Rp`). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, raft_dir, extra_args)`. Provides: `init()` (runs `initdb`), `create_raft_wal()` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
 
 **`src/wal_sender/`** — Two cooperating classes:
 
@@ -85,45 +85,42 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 - **`WalSenderServer`** — TCP accept loop. Binds a port, spawns a thread per connection, and calls a user-supplied `SenderCallback` with each new `WalSender`. Supports port `0` for OS-assigned ephemeral ports (used in tests).
 
-**`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Four cooperating classes:
+**`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Two primary classes:
 
-- **`WalFuse`** — Passthrough FUSE filesystem. Mounts at a given `mount_point` and redirects all file operations to a `backing_dir`. The constructor is templated on an `Ops` policy that provides a static `make_ops()` returning a `struct fuse_operations`; pass an `Ops{}` instance as the third argument for type deduction only. The resulting `fuse_operations` is stored by value. Runs the FUSE event loop in its own thread.
+- **`WalFuse`** — Passthrough FUSE filesystem. Constructor: `WalFuse(mount_point, unique_ptr<WalFuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `WalFuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
-- **`WalFuseOpBase`** — Concrete FUSE operations policy for `WalFuse`. Every FUSE op (open, read, write, readdir, …) is forwarded to the backing directory stored in `fuse_get_context()->private_data`. Tests supply a derived policy (e.g. `WalSendingOps`) that wraps `WalFuseOpBase::make_ops()` and overrides specific ops.
-
-- **`WalFuseManager`** — Orchestrates startup: mounts `WalFuse` over `$PGDATA/pg_wal` (backed by `$PGDATA/pg_raft_wal`), waits for the mount to become live, then starts the `postgres` process via `Process`. `stop()` reverses the sequence.
-
-- **`PgInitializer`** — One-shot setup helper. Runs `initdb`, creates the `pg_raft_wal` directory, and moves the initial WAL segments out of `pg_wal` into `pg_raft_wal`, leaving `pg_wal` as an empty directory ready for the FUSE mount.
+- **`WalFuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
 
 ### Data flow (end-to-end)
 
 ```
 initdb
-  └─▶  PgInitializer  ──(moves WAL)──▶  pg_raft_wal/
-                                               │
-             WalFuse (FUSE)  ◀──(backs)────────┘
-                │  mounted at pg_wal
-                ▼
-           postgres write(WAL) ──▶ FUSE op_write (WalSendingOps)
-                                         │  accumulates bytes in WalFileAccum
-                                         │  (per WAL segment file, keyed by FUSE path)
-                                         ▼
-                                   postgres fsync ──▶ FUSE op_fsync → flush_wal_accum()
-                                         │  validates XLog page header magic (0xD116)
-                                         │  and xlp_pageaddr before building WalSegment
-                                         ▼
-                                   WalSender.send(WalSegment)
-                                         │
-                                   WalSenderServer  ──(wire protocol TCP)──▶  PostgreSQL standby
+  └─▶  PgInstance::create_raft_wal()  ──(moves WAL)──▶  pg_raft_wal/
+                                                               │
+                 WalFuse (FUSE)  ◀──(backs)────────────────────┘
+                    │  mounted at pg_wal
+                    ▼
+               postgres write(WAL) ──▶ FUSE op_write (WalSendingOps subclass)
+                                             │  accumulates bytes in WalFileAccum
+                                             │  (per WAL segment file, keyed by FUSE path)
+                                             ▼
+                                       postgres fsync ──▶ FUSE op_fsync → flush_wal_accum()
+                                             │  validates XLog page header magic (0xD116)
+                                             │  and xlp_pageaddr before building WalSegment
+                                             ▼
+                                       WalSender.send(WalSegment)
+                                             │
+                                       WalSenderServer  ──(wire protocol TCP)──▶  PostgreSQL standby
 ```
 
 WAL bytes are accumulated per-file in `WalFileAccum` on each FUSE `write`, then validated and delivered as a single `WalSegment` on `fsync`. Validation walks pages checking magic (`0xD116`) and `xlp_pageaddr`; it stops at the first stale or pre-zeroed page. macOS `F_FULLFSYNC` is not intercepted by FUSE, but regular `fsync` is — which is sufficient for PostgreSQL's WAL flush path.
 
-The integration tests wire these components together with real PostgreSQL processes.
+The accumulation and validation logic lives in the test (`pg_replication_test.cc`) as local helpers (`WalFileAccum`, `accum_wal_write`, `flush_wal_accum`), not in shared library code.
 
 ### Key data types
 
 ```cpp
+// In src/wal_sender/wal_sender.h
 struct WalSegment { uint64_t start_lsn; std::vector<uint8_t> data; };
 struct StandbyStatus { uint64_t written_lsn, flushed_lsn, applied_lsn; };
 ```
@@ -141,9 +138,9 @@ Any file that includes `<fuse/fuse.h>` must define these macros first:
 
 ## Tests
 
-All integration tests require PostgreSQL 17 binaries at `/opt/pg_raft/pgsql/v17/bin` and auto-skip if absent.
+Integration tests in `wal_fuse_test` use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`; those in `pg_replication_test` use `/opt/pg_raft/pgsql/v17/bin`. Both auto-skip if the binaries are absent.
 
 - **`process_test`** — unit tests for `Process`.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
-- **`pg_replication_test`** — end-to-end integration test. Uses `PgInitializer` to set up the WAL directories, `PgInstance` to manage primary and standby processes, mounts `WalFuse` with a custom `WalSendingOps` policy that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`PgInstance::backup()`/`restore()`, i.e. `cp -Rp`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
-- **`wal_fuse_test`** — integration test. Uses `PgInitializer` + `WalFuseManager` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
+- **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `WalFuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
+- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `WalFuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
