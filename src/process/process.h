@@ -110,6 +110,7 @@ class Process {
 
   asio::io_context& io_context_;
 
+  string const                   name_;
   std::filesystem::path const    executable_;
   std::vector<std::string> const args_;
   pid_t                          pid_ = -1;

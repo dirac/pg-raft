@@ -5,7 +5,10 @@
 Process::Process(asio::io_context&        io_context,
                  std::filesystem::path    executable,
                  std::vector<std::string> args)
-    : io_context_(io_context), executable_(std::move(executable)), args_(std::move(args)) {}
+    : io_context_(io_context),
+      name_(strrchr(executable.c_str(), '/') + 1),
+      executable_(std::move(executable)),
+      args_(std::move(args)) {}
 
 Process::~Process() {
   if (is_running()) {
@@ -128,11 +131,11 @@ bool Process::is_running() const {
 }
 
 void Process::on_stdout_line(std::string_view line) {
-  log(INFO, "{}", line);
+  logger::plog(name_.c_str(), line);
 }
 
 void Process::on_stderr_line(std::string_view line) {
-  log(ERROR, "{}", line);
+  logger::plog(name_.c_str(), line);
 }
 
 // ── private ───────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 
+#include "src/base/io_threads.h"
 #include "src/process/pg_instance.h"
 #include "src/process/process.h"
 #include "src/wal_fuse/wal_fuse.h"
@@ -82,6 +83,9 @@ static void run_pgbench() {
 // ── test ─────────────────────────────────────────────────────────────────────
 
 BOOST_AUTO_TEST_CASE(WalWritesToPgRaftWal) {
+
+  IoThreads threads{2};
+
   if (access((kPgBin + "/postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not found at " + kPgBin + "; skipping");
     return;
@@ -92,11 +96,17 @@ BOOST_AUTO_TEST_CASE(WalWritesToPgRaftWal) {
   char* base   = mkdtemp(tmpl);
   BOOST_REQUIRE(base != nullptr);
   std::string const data_dir = std::string(base) + "/pgdata";
+  std::string const raft_dir = std::string(base) + "/pgraft";
   auto              cleanup  = [&]() { rmrf(base); };
+
+  if (mkdir(raft_dir.c_str(), 0700) != 0) {
+    cleanup();
+    BOOST_FAIL("mkdir pgraft failed");
+  }
 
   // ── initialize PostgreSQL ────────────────────────────────────────────────────
   PgInstance pg(
-      kPgBin, data_dir, {"-p", std::to_string(kPort), "-c", "listen_addresses=127.0.0.1"});
+      kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort), "-c", "listen_addresses=127.0.0.1"});
   if (!pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"})) {
     cleanup();
     BOOST_FAIL("PgInstance::init() failed");
@@ -109,14 +119,14 @@ BOOST_AUTO_TEST_CASE(WalWritesToPgRaftWal) {
   pg.write_config({});
   pg.write_hba({"host  all  all  127.0.0.1/32  trust"});
 
-  // ── verify initial WAL was moved to pg_raft_wal ──────────────────────────────
-  std::string const pg_raft_wal = data_dir + "/pg_raft_wal";
+  // ── verify initial WAL was moved to raft_dir/pg_wal ─────────────────────────
+  std::string const pg_raft_wal = raft_dir + "/pg_wal";
   BOOST_REQUIRE_GT(count_wal_segments(pg_raft_wal), 0);
 
   // pg_wal itself must be empty (its contents were moved to pg_raft_wal).
   BOOST_REQUIRE_EQUAL(count_wal_segments(data_dir + "/pg_wal"), 0);
 
-  WalFuse fuse{data_dir + "/pg_wal", std::make_unique<WalFuseOpBase>(pg_raft_wal)};
+  WalFuse fuse{data_dir + "/pg_wal", std::make_unique<WalFuseOps>(pg_raft_wal)};
   if (!fuse.start()) {
     cleanup();
     BOOST_FAIL("WalFuse::start() failed");
