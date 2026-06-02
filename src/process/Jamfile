@@ -1,12 +1,21 @@
 
+alias deps
+  : ../base//libs
+  ;
+
 lib process
     : process.cc
       pg_instance.cc
-      ../base//base
+      deps
     ;
+
+alias libs
+  : deps
+    process
+  ;
 
 unit-test process_test
     : process_test.cc
-      process
-      ../..//external
+      libs
+      ../base//testing
     ;

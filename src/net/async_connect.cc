@@ -30,8 +30,7 @@ struct SendInfoHandler {
 
   void operator()(boost::system::error_code const& ec, size_t) {
     if (ec)
-      return handler(
-          ERROR_CODE_MSG(ec, "Handshake ack error with host {}:{}", host.address, host.port));
+      return handler(elog(ec, "Handshake ack error with host {}:{}", host.address, host.port));
     handler(std::move(*socket));
   }
 };
@@ -45,10 +44,9 @@ struct ConnectHandler {
 
   void operator()(boost::system::error_code const& ec, ::boost::asio::ip::tcp::endpoint const& ep) {
     if (ec)
-      return handler(
-          ERROR_CODE_MSG(ec, "Failed connecting to {}:{}", ep.address().to_string(), ep.port()));
+      return handler(elog(ec, "Failed connecting to {}:{}", ep.address().to_string(), ep.port()));
 
-    LOG_INFO("Connected to {}:{}", ep.address().to_string(), ep.port());
+    log(INFO, "Connected to {}:{}", ep.address().to_string(), ep.port());
     boost::asio::async_write(*socket,
                              boost::asio::const_buffer(self->data(), self->size()),
                              SendInfoHandler<tcp_socket>{
@@ -70,13 +68,13 @@ struct ResolveHandler {
   void operator()(boost::system::error_code const&             ec,
                   boost::asio::ip::tcp::resolver::results_type endpts) {
     if (ec)
-      return handler(ERROR_CODE_MSG(ec, "Resolve error to host {0}:{1}", host.address, host.port));
+      return handler(elog(ec, "Resolve error to host {0}:{1}", host.address, host.port));
 
     auto endpoints = make_shared<vector<boost::asio::ip::tcp::endpoint>>();
 
     for (auto& e : endpts) {
       endpoints->emplace_back(e.endpoint().address(), host.port);
-      LOG_INFO("Resolved to endpoint {}:{}", endpoints->back().address().to_string(), host.port);
+      log(INFO, "Resolved to endpoint {}:{}", endpoints->back().address().to_string(), host.port);
     }
 
     boost::asio::async_connect(*socket,
@@ -102,7 +100,7 @@ void async_connect(boost::asio::io_context&                 io_context,
   std::strncpy(self_ptr->data(), self.c_str(), std::max(self.size(), self_ptr->size()));
   self_ptr->back() = '\0';
 
-  LOG_INFO("Connecting to {}", host);
+  log(INFO, "Connecting to {}", host);
 
   auto ec      = ::boost::system::error_code{};
   auto address = ::boost::asio::ip::make_address(host.address, ec);

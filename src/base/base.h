@@ -52,5 +52,6 @@ std::filesystem::path tmp_file(char const* ext = "tmp");
 #include "src/base/convert.h"
 #include "src/base/int_type.h"
 #include "src/base/using.h"
+#include "src/base/formatter.h"
 
 #endif

@@ -8,8 +8,6 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 
-#include <string>
-
 #include "src/base/logger.h"
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -27,22 +25,22 @@ std::filesystem::path WalFuseOps::real_path(char const* path) const {
 // ── operations ────────────────────────────────────────────────────────────────
 
 int WalFuseOps::op_getattr(char const* path, struct stat* st) {
-  logger::debug("getattr {}", path);
+  log(DEBUG, "getattr {}", path);
   return lstat(real_path(path).c_str(), st) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_fgetattr(char const* path, struct stat* st, struct fuse_file_info* fi) {
-  logger::debug("fgetattr {} fd={}", path, fi->fh);
+  log(DEBUG, "fgetattr {} fd={}", path, fi->fh);
   return fstat(static_cast<int>(fi->fh), st) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_access(char const* path, int mask) {
-  logger::debug("access {} mask={}", path, mask);
+  log(DEBUG, "access {} mask={}", path, mask);
   return access(real_path(path).c_str(), mask) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_readlink(char const* path, char* buf, size_t size) {
-  logger::debug("readlink {}", path);
+  log(DEBUG, "readlink {}", path);
   ssize_t res = readlink(real_path(path).c_str(), buf, size - 1);
   if (res == -1)
     return -errno;
@@ -51,7 +49,7 @@ int WalFuseOps::op_readlink(char const* path, char* buf, size_t size) {
 }
 
 int WalFuseOps::op_opendir(char const* path, struct fuse_file_info* fi) {
-  logger::debug("opendir {}", path);
+  log(DEBUG, "opendir {}", path);
 
   DIR* dp = opendir(real_path(path).c_str());
   if (!dp)
@@ -62,7 +60,7 @@ int WalFuseOps::op_opendir(char const* path, struct fuse_file_info* fi) {
 }
 
 int WalFuseOps::op_releasedir(char const* path, struct fuse_file_info* fi) {
-  logger::debug("opendir {}", path);
+  log(DEBUG, "opendir {}", path);
   ::closedir(reinterpret_cast<DIR*>(fi->fh));
 }
 
@@ -71,7 +69,7 @@ int WalFuseOps::op_readdir(char const*            path,
                            fuse_fill_dir_t        filler,
                            off_t                  offset,
                            struct fuse_file_info* fi) {
-  logger::debug("readdir {} {}", path, offset);
+  log(DEBUG, "readdir {} {}", path, offset);
 
   DIR* dp = reinterpret_cast<DIR*>(fi->fh);
   ::seekdir(dp, offset);
@@ -88,62 +86,62 @@ int WalFuseOps::op_readdir(char const*            path,
 }
 
 int WalFuseOps::op_mkdir(char const* path, mode_t mode) {
-  logger::debug("mkdir {} mode={:o}", path, mode);
+  log(DEBUG, "mkdir {} mode={:o}", path, mode);
   return mkdir(real_path(path).c_str(), mode) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_unlink(char const* path) {
-  logger::debug("unlink {}", path);
+  log(DEBUG, "unlink {}", path);
   return unlink(real_path(path).c_str()) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_rmdir(char const* path) {
-  logger::debug("rmdir {}", path);
+  log(DEBUG, "rmdir {}", path);
   return rmdir(real_path(path).c_str()) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_symlink(char const* target, char const* path) {
-  logger::debug("symlink {} -> {}", path, target);
+  log(DEBUG, "symlink {} -> {}", path, target);
   return symlink(target, real_path(path).c_str()) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_rename(char const* from, char const* to) {
-  logger::debug("rename {} -> {}", from, to);
+  log(DEBUG, "rename {} -> {}", from, to);
   return rename(real_path(from).c_str(), real_path(to).c_str()) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_link(char const* from, char const* to) {
-  logger::debug("link {} -> {}", from, to);
+  log(DEBUG, "link {} -> {}", from, to);
   return link(real_path(from).c_str(), real_path(to).c_str()) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_chmod(char const* path, mode_t mode) {
-  logger::debug("chmod {} mode={:o}", path, mode);
+  log(DEBUG, "chmod {} mode={:o}", path, mode);
   return chmod(real_path(path).c_str(), mode) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_chown(char const* path, uid_t uid, gid_t gid) {
-  logger::debug("chown {} uid={} gid={}", path, uid, gid);
+  log(DEBUG, "chown {} uid={} gid={}", path, uid, gid);
   return lchown(real_path(path).c_str(), uid, gid) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_truncate(char const* path, off_t size) {
-  logger::debug("truncate {} size={}", path, size);
+  log(DEBUG, "truncate {} size={}", path, size);
   return truncate(real_path(path).c_str(), size) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_ftruncate(char const* path, off_t size, struct fuse_file_info* fi) {
-  logger::debug("ftruncate {} size={} fd={}", path, size, fi->fh);
+  log(DEBUG, "ftruncate {} size={} fd={}", path, size, fi->fh);
   return ftruncate(static_cast<int>(fi->fh), size) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_utimens(char const* path, const struct timespec ts[2]) {
-  logger::debug("utimens {}", path);
+  log(DEBUG, "utimens {}", path);
   return utimensat(AT_FDCWD, real_path(path).c_str(), ts, AT_SYMLINK_NOFOLLOW) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_create(char const* path, mode_t mode, struct fuse_file_info* fi) {
-  logger::debug("create {} mode={:o}", path, mode);
+  log(DEBUG, "create {} mode={:o}", path, mode);
   int fd = open(real_path(path).c_str(), fi->flags, mode);
   if (fd == -1)
     return -errno;
@@ -152,7 +150,7 @@ int WalFuseOps::op_create(char const* path, mode_t mode, struct fuse_file_info* 
 }
 
 int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
-  logger::debug("open {}", path);
+  log(DEBUG, "open {}", path);
   int fd = open(real_path(path).c_str(), fi->flags);
   if (fd == -1)
     return -errno;
@@ -165,7 +163,7 @@ int WalFuseOps::op_read(char const*            path,
                         size_t                 size,
                         off_t                  offset,
                         struct fuse_file_info* fi) {
-  logger::debug("read {} size={} off={}", path, size, offset);
+  log(DEBUG, "read {} size={} off={}", path, size, offset);
 
   ssize_t res = pread(static_cast<int>(fi->fh), buf, size, offset);
   return res == -1 ? -errno : static_cast<int>(res);
@@ -176,29 +174,29 @@ int WalFuseOps::op_write(char const*            path,
                          size_t                 size,
                          off_t                  offset,
                          struct fuse_file_info* fi) {
-  logger::debug("write {} size={} off={}", path, size, offset);
+  log(DEBUG, "write {} size={} off={}", path, size, offset);
   ssize_t res = pwrite(static_cast<int>(fi->fh), buf, size, offset);
   return res == -1 ? -errno : static_cast<int>(res);
 }
 
 int WalFuseOps::op_statfs(char const* path, struct statvfs* stbuf) {
-  logger::debug("statfs {}", path);
+  log(DEBUG, "statfs {}", path);
   return statvfs(real_path(path).c_str(), stbuf) == -1 ? -errno : 0;
 }
 
 int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
-  logger::debug("flush {} fd={}", path, fi->fh);
+  log(DEBUG, "flush {} fd={}", path, fi->fh);
   return 0;
 }
 
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
-  logger::debug("release {} fd={}", path, fi->fh);
+  log(DEBUG, "release {} fd={}", path, fi->fh);
   close(static_cast<int>(fi->fh));
   return 0;
 }
 
 int WalFuseOps::op_fsync(char const* path, int datasync, struct fuse_file_info* fi) {
-  logger::debug("fsync {} datasync={} fd={}", path, datasync, fi->fh);
+  log(DEBUG, "fsync {} datasync={} fd={}", path, datasync, fi->fh);
   return fsync(static_cast<int>(fi->fh)) == -1 ? -errno : 0;
 }
 
@@ -208,7 +206,7 @@ int WalFuseOps::op_setxattr(char const* path,
                             size_t      size,
                             int         options,
                             uint32_t    position) {
-  logger::debug("setxattr {} {}", path, name);
+  log(DEBUG, "setxattr {} {}", path, name);
   return setxattr(real_path(path).c_str(), name, value, size, position, options) == -1 ? -errno : 0;
 }
 
@@ -217,19 +215,19 @@ int WalFuseOps::op_getxattr(char const* path,
                             char*       value,
                             size_t      size,
                             uint32_t    position) {
-  logger::debug("getxattr {} {}", path, name);
+  log(DEBUG, "getxattr {} {}", path, name);
   ssize_t res = getxattr(real_path(path).c_str(), name, value, size, position, XATTR_NOFOLLOW);
   return res == -1 ? -errno : static_cast<int>(res);
 }
 
 int WalFuseOps::op_listxattr(char const* path, char* list, size_t size) {
-  logger::debug("listxattr {}", path);
+  log(DEBUG, "listxattr {}", path);
   ssize_t res = listxattr(real_path(path).c_str(), list, size, XATTR_NOFOLLOW);
   return res == -1 ? -errno : static_cast<int>(res);
 }
 
 int WalFuseOps::op_removexattr(char const* path, char const* name) {
-  logger::debug("removexattr {} {}", path, name);
+  log(DEBUG, "removexattr {} {}", path, name);
   return removexattr(real_path(path).c_str(), name, XATTR_NOFOLLOW) == -1 ? -errno : 0;
 }
 

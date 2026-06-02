@@ -33,6 +33,8 @@ static std::string_view level_label(Level level) noexcept {
       return "WARN ";
     case Level::Error:
       return "ERROR";
+    case Level::Fatal:
+      return "FATAL";
   }
   std::unreachable();
 }
@@ -76,8 +78,13 @@ void _log(Level level, std::string_view msg, std::source_location const& loc) {
                  loc.line(),
                  msg);
 
-  std::lock_guard lock{g_mu};
-  ::write(STDERR_FILENO, buffer.data(), buffer.size());
+  {
+    std::lock_guard lock{g_mu};
+    ::write(STDERR_FILENO, buffer.data(), buffer.size());
+  }
+
+  if (level == Level::Fatal) [[unlikely]]
+    abort();
 }
 
 }  // namespace logger

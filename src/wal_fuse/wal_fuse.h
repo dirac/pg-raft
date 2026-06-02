@@ -1,19 +1,5 @@
 #pragma once
 
-#ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 26
-#endif
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
-#endif
-#include <fuse/fuse.h>
-
-#include <atomic>
-#include <memory>
-#include <string>
-#include <thread>
-#include <filesystem>
-
 #include "src/wal_fuse/wal_fuse_ops.h"
 
 // Passthrough FUSE filesystem that mounts at |mount_point|.
@@ -23,7 +9,7 @@
 // dispatch works inside the static FUSE callbacks.
 class WalFuse {
  public:
-  WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOpBase> ops);
+  WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOps> ops);
   ~WalFuse();
 
   WalFuse(WalFuse const&)            = delete;

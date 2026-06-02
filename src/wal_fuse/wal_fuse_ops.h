@@ -1,15 +1,6 @@
 #pragma once
 
-#ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 26
-#endif
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
-#endif
-#include <fuse/fuse.h>
-
-#include <filesystem>
-#include <string>
+#include "src/base/base.h"
 
 // Passthrough FUSE operations backed by a directory on the real filesystem.
 //

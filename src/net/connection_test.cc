@@ -110,7 +110,7 @@ std::vector<char> read_file(Result<std::filesystem::path> const& r) {
   std::error_code ec;
   std::filesystem::remove(r.value(), ec);
   if (ec)
-    ERROR_CODE_MSG(ec, "Removing {}", r.value().c_str());
+    elog(ec, "Removing {}", r.value().c_str());
 
   return result;
 }
@@ -126,13 +126,13 @@ struct TestSetup {
   shared_ptr<TestConnection> connect(
       std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
     if (auto r = ::connect(io, "test", server->host().with_address("localhost")); r) {
-      LOG_INFO("Connected to {}", server->host());
+      log(INFO, "Connected to {}", server->host());
       auto conn = Connection::create<TestConnection>("c->s ", std::move(r.value()), timeout);
 
       client = server->get();
       return conn;
     } else
-      ERROR_CODE_MSG(r.error(), "Connect failed");
+      elog(r.error(), "Connect failed");
     return nullptr;
   }
 
@@ -208,7 +208,7 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup) {
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   while (c != (p * 4 * 2)) {
-    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 2), c.load());
+    log(INFO, "waiting for {} acks, got {}", (p * 4 * 2), c.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();
@@ -320,7 +320,7 @@ BOOST_FIXTURE_TEST_CASE(messages, TestSetup) {
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   while (c != (p * 4 * 10)) {
-    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 10), c.load());
+    log(INFO, "waiting for {} acks, got {}", (p * 4 * 10), c.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();
@@ -473,7 +473,7 @@ BOOST_FIXTURE_TEST_CASE(files, TestSetup) {
 
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   while (c != (p * 4 * 10)) {
-    LOG_INFO("waiting for {} acks, got {}", (p * 4 * 10), c.load());
+    log(INFO, "waiting for {} acks, got {}", (p * 4 * 10), c.load());
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();

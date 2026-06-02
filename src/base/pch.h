@@ -2,6 +2,16 @@
 
 #ifdef BOOST_BUILD_PCH_ENABLED
 
+#include <dirent.h>
+#include <errno.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -31,6 +41,8 @@
 #include <memory_resource>
 #include <mutex>
 #include <new>
+#include <numeric>
+#include <optional>
 #include <ostream>
 #include <queue>
 #include <random>
@@ -44,6 +56,7 @@
 #include <sstream>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -107,14 +120,8 @@
 
 // Scope exit
 #include <boost/scope/scope_exit.hpp>
-#include <cxxopts.hpp>
-
-/// mmap/errno.
-#include <dirent.h>
-#include <sys/mman.h>
-#include <sys/types.h>
-
 #include <cerrno>
+#include <cxxopts.hpp>
 
 /// FUSE
 #ifndef FUSE_USE_VERSION

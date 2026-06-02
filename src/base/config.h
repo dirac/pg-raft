@@ -52,6 +52,6 @@ struct Config {
 
 /// Parse a toml configuration file.
 inline Config config(string const& filename) {
-  LOG_INFO("Reading config file: {}", filename);
+  log(INFO, "Reading config file: {}", filename);
   return Config{filename};
 }

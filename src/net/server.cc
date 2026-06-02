@@ -46,14 +46,14 @@ struct HandshakeConnection : public std::enable_shared_from_this<HandshakeConnec
     auto completion_handler = [this, p, self = shared_from_this()](
                                   boost::system::error_code const& ec, size_t) {
       if (ec) {
-        ERROR_CODE_MSG(ec, "Ack failed");
+        elog(ec, "Ack failed");
         return;
       }
 
       if (p->back() != '\0')
         return;
 
-      LOG_INFO("Connected to {}", p->data());
+      log(INFO, "Connected to {}", p->data());
       handler_(string{p->data()}, std::move(socket_));
     };
     boost::asio::async_read(
@@ -79,7 +79,7 @@ void Server::do_accept() {
       if (ec != boost::asio::error::operation_aborted)
         return shutdown();
 
-      LOG_INFO("{}", ec.message());
+      elog(ec, "Accept handler");
       return;
     }
 

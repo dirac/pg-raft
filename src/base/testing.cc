@@ -28,10 +28,10 @@ Config test_config() {
 
     std::error_code ec;
     if (!std::filesystem::exists(s3, ec) || ec)
-      LOG_FATAL("The file {}/.pg_raft/testing.toml doesn't exist", getenv("HOME"));
+      log(FATAL, "The file {}/.pg_raft/testing.toml doesn't exist", getenv("HOME"));
 
     if (!std::filesystem::is_regular_file(s3, ec) || ec)
-      LOG_FATAL("The file {}/.pg_raft/testing.toml isn't a regular file.", getenv("HOME"));
+      log(FATAL, "The file {}/.pg_raft/testing.toml isn't a regular file.", getenv("HOME"));
     config.s3_endpoints = Config{s3.c_str()}.s3_endpoints;
   }
   return config;
@@ -53,9 +53,9 @@ struct TestBasePath {
       std::error_code ec;
       std::filesystem::remove_all(base_path_, ec);
       if (ec)
-        ERROR_CODE_MSG(ec, "Unable to delete test directory: {}", base_path_.c_str());
+        elog(ec, "Unable to delete test directory: {}", base_path_.c_str());
     } else
-      LOG_INFO("Base test directory: {}", base_path_.c_str());
+      log(INFO, "Base test directory: {}", base_path_.c_str());
   }
 
   std::filesystem::path path() {
@@ -111,7 +111,7 @@ TmpDir::TmpDir(bool remove) : rm_(remove) {
   tmp_dir(path_ / "tmp");
 
   if (!rm_)
-    LOG_INFO("Created: {}", path_.c_str());
+    log(INFO, "Created: {}", path_.c_str());
 }
 
 TmpDir::~TmpDir() {
@@ -139,7 +139,7 @@ struct S : boost::unit_test::test_observer {
 int main(int argc, char* argv[], char* envp[]) {
   (void)envp;
   if (char const* skip = getenv("SKIP_TESTS"); skip != nullptr && strcmp(skip, "true") == 0) {
-    LOG_INFO("Skipping test because the environment variable SKIP_TESTS is set : {}", argv[0]);
+    log(INFO, "Skipping test because the environment variable SKIP_TESTS is set : {}", argv[0]);
     return -1;
   }
 

@@ -4,7 +4,7 @@
 
 namespace logger {
 
-enum class Level { Debug, Info, Warn, Error };
+enum class Level { Debug, Info, Warn, Error, Fatal };
 
 // Suppress messages below |level| (default: Info).
 void set_level(Level level);
@@ -16,50 +16,59 @@ string& log_buffer();
 // Write a pre-formatted message at |level|.
 void _log(Level level, std::string_view msg, std::source_location const& loc);
 
+struct LogLevel {
+  LogLevel(Level lvl, std::source_location loc = std::source_location::current())
+      : level(lvl), location(loc) {}
+
+  Level const                level;
+  std::source_location const location;
+};
+
 template <typename... Args>
-std::error_code _error(std::error_code             ec,
-                       std::source_location        loc,
-                       std::format_string<Args...> fmt,
-                       Args&&... args) {
+void log(LogLevel info, std::format_string<Args...> fmt, Args&&... args) {
+  auto& buffer = log_buffer();
+
+  if (info.level < get_level()) [[likely]]
+    return;
+
+  std::format_to(std::back_inserter(buffer), fmt, std::forward<Args>(args)...);
+  _log(info.level, buffer, info.location);
+}
+
+struct ErrorCode : public std::error_code {
+  using std::error_code::message;
+  using std::error_code::value;
+
+  ErrorCode(std::error_code ec, std::source_location loc = std::source_location::current())
+      : std::error_code(ec), location(loc) {}
+
+  ErrorCode(boost::system::error_code const& ec,
+            std::source_location             loc = std::source_location::current())
+      : std::error_code(ec), location(loc) {}
+
+  std::source_location const location;
+};
+
+template <typename... Args>
+std::error_code elog(ErrorCode ec, std::format_string<Args...> fmt, Args&&... args) {
   auto& buffer = log_buffer();
 
   std::format_to(std::back_inserter(buffer), fmt, std::forward<Args>(args)...);
   std::format_to(std::back_inserter(buffer), ", error = {} ({})", ec.message(), ec.value());
 
-  _log(Level::Error, buffer, loc);
+  _log(Level::Error, buffer, ec.location);
   return ec;
-}
-
-template <typename... Args>
-void _log(Level level, std::source_location loc, std::format_string<Args...> fmt, Args&&... args) {
-  auto& buffer = log_buffer();
-
-  if (level < get_level()) [[likely]]
-    return;
-
-  std::format_to(std::back_inserter(buffer), fmt, std::forward<Args>(args)...);
-  _log(level, buffer, loc);
 }
 
 void plog(char const* process, std::string_view log);
 
 }  // namespace logger
 
-#define ERROR_CODE_MSG(ec, fmt, ...) \
-  logger::_error(ec, std::source_location::current(), fmt, ##__VA_ARGS__)
+constexpr auto INFO  = logger::Level::Info;
+constexpr auto WARN  = logger::Level::Warn;
+constexpr auto DEBUG = logger::Level::Debug;
+constexpr auto ERROR = logger::Level::Error;
+constexpr auto FATAL = logger::Level::Fatal;
 
-#define LOG_INFO(fmt, ...) \
-  logger::_log(logger::Level::Info, std::source_location::current(), fmt, ##__VA_ARGS__)
-
-#define LOG_DEBUG(fmt, ...) \
-  logger::_log(logger::Level::Debug, std::source_location::current(), fmt, ##__VA_ARGS__)
-
-#define LOG_WARN(fmt, ...) \
-  logger::_log(logger::Level::Warn, std::source_location::current(), fmt, ##__VA_ARGS__)
-
-#define LOG_ERROR(fmt, ...) \
-  logger::_log(logger::Level::Error, std::source_location::current(), fmt, ##__VA_ARGS__)
-
-#define LOG_FATAL(fmt, ...)                                                                    \
-  logger::_log(logger::Level::Error, std::source_location::current(), fmt, ##__VA_ARGS__); \
-  abort()
+using logger::elog;
+using logger::log;

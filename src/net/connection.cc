@@ -28,7 +28,7 @@ Connection::~Connection() {
   if (closed_.test_and_set())
     return;
 
-  LOG_INFO("{} Connection terminated without calling shutdown!!!", log_prefix());
+  log(INFO, "{} Connection terminated without calling shutdown!!!", log_prefix());
 }
 
 void Connection::on_shutdown() {}
@@ -64,8 +64,13 @@ void Connection::enqueue_timeout_check(unsigned curr, unsigned last) {
     auto c = epoch_msec();
     auto l = last_epoch();
     if (l + timeout_.count() < c) {
-      LOG_INFO(
-          "{} c={} l={} diff = {} timeout = {}", log_prefix(), c, l, (c - l), timeout_.count());
+      log(INFO,
+          "{} c={} l={} diff = {} timeout = {}",
+          log_prefix(),
+          c,
+          l,
+          (c - l),
+          timeout_.count());
 
       ec.assign(ETIMEDOUT, boost::system::system_category());
       shutdown(ec);
@@ -144,12 +149,12 @@ void Connection::process_header(unsigned idx) {
   if (idx == 0) {
     // We send and recv in network format.
     if (read_header_[0] != hton(0xDEADBEEF)) [[unlikely]] {
-      LOG_ERROR("Invalid start of the packet");
+      log(ERROR, "Invalid start of the packet");
       return shutdown();
     }
 
     if (++recv_packet_ != ntoh(read_header_[1])) [[unlikely]] {
-      LOG_ERROR("Invalid counter");
+      log(ERROR, "Invalid counter");
       return shutdown();
     }
 
@@ -261,7 +266,7 @@ void Connection::do_read_file(uint64_t length) {
     write_file_buff_ = make_unique<std::array<char, kPageSize>>();
 
   auto file = tmp_file();
-  LOG_DEBUG("Writing file from peer at {}", file.c_str());
+  log(DEBUG, "Writing file from peer at {}", file.c_str());
 
   int fd = ::open(file.c_str(), O_RDWR | O_CREAT | O_EXCL, file_mode());
   if (fd == -1) {
@@ -616,8 +621,7 @@ void Connection::shutdown(boost::system::error_code const& ec, std::source_locat
   if (ec == boost::asio::ssl::error::stream_truncated)
     return on_shutdown();
 
-  ERROR_CODE_MSG(
-      ec, "Close connection to {} ({}:{})", log_prefix(), peer(), loc.file_name(), loc.line());
+  elog(ec, "Close connection to {} ({}:{})", peer(), loc.file_name(), loc.line());
   shutdown(self());
 }
 
@@ -630,7 +634,7 @@ void Connection::shutdown(std::source_location loc) {
   shutdown(boost::asio::error::connection_aborted, read_data_q_);
   shutdown(boost::asio::error::connection_aborted, read_file_q_);
 
-  LOG_INFO("Close connection to {} ({}:{})", peer(), loc.file_name(), loc.line());
+  log(INFO, "Close connection to {} ({}:{})", peer(), loc.file_name(), loc.line());
   shutdown(self());
 }
 
@@ -641,7 +645,7 @@ void Connection::socket_close(T& socket, std::function<void()> invoke_on_shutdow
     socket.close(ec);
     invoke_on_shutdown();
   } else {
-    LOG_INFO("{} Waiting, have outstanding read/write op", log_prefix());
+    log(INFO, "{} Waiting, have outstanding read/write op", log_prefix());
 
     auto handler = [this, &socket, invoke_on_shutdown = std::move(invoke_on_shutdown)]() {
       socket_close(socket, std::move(invoke_on_shutdown));

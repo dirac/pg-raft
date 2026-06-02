@@ -45,7 +45,7 @@ BOOST_AUTO_TEST_CASE(non_ssl) {
 
   auto server = Server::create<TestServer>(io_context, ep);
 
-  LOG_INFO("Server {}:{}", server->host().address, server->host().port);
+  log(INFO, "Server {}", server->host());
 
   auto socket = connect(io_context, "test", server->host());
 

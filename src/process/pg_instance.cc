@@ -1,16 +1,5 @@
 #include "src/process/pg_instance.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <signal.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <chrono>
-#include <fstream>
-#include <thread>
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 static std::vector<std::string> build_postgres_args(std::string const&              data_dir,
@@ -24,11 +13,13 @@ static std::vector<std::string> build_postgres_args(std::string const&          
 
 PgInstance::PgInstance(std::filesystem::path    pg_bin,
                        std::filesystem::path    data_dir,
+                       std::filesystem::path    raft_dir,
                        std::vector<std::string> extra_args)
     : pg_bin_(std::move(pg_bin)),
       data_dir_(std::move(data_dir)),
+      raft_dir_(std::move(raft_dir)),
       extra_args_(std::move(extra_args)),
-      postgres_(pg_bin_ + "/postgres", build_postgres_args(data_dir_, extra_args_)) {}
+      postgres_(pg_bin_ / "postgres", build_postgres_args(data_dir_, extra_args_)) {}
 
 PgInstance::~PgInstance() {
   if (is_running())
@@ -38,11 +29,11 @@ PgInstance::~PgInstance() {
 // ── initialisation ────────────────────────────────────────────────────────────
 
 bool PgInstance::create_raft_wal() {
-  std::filesystem::path const pg_raft_wal = data_dir_ / "pg_raft_wal";
+  std::filesystem::path const pg_raft_wal = raft_dir_ / "pg_wal";
   if (mkdir(pg_raft_wal.c_str(), 0700) != 0 && errno != EEXIST)
     return false;
 
-  std::filesystem::path const pg_wal = data_dir_ + "/pg_wal";
+  std::filesystem::path const pg_wal = data_dir_ / "pg_wal";
   DIR*                        dp     = opendir(pg_wal.c_str());
   if (!dp)
     return false;
@@ -52,8 +43,8 @@ bool PgInstance::create_raft_wal() {
   while ((de = readdir(dp)) != nullptr) {
     if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
       continue;
-    std::filesystem::path src = pg_wal + "/" + de->d_name;
-    std::filesystem::path dst = pg_raft_wal + "/" + de->d_name;
+    std::filesystem::path src = pg_wal / de->d_name;
+    std::filesystem::path dst = pg_raft_wal / de->d_name;
     if (rename(src.c_str(), dst.c_str()) != 0) {
       ok = false;
       break;
@@ -66,7 +57,7 @@ bool PgInstance::create_raft_wal() {
 bool PgInstance::init(std::vector<std::string> initdb_args) {
   std::vector<std::string> args = {"-D", data_dir_};
   args.insert(args.end(), initdb_args.begin(), initdb_args.end());
-  Process p(pg_bin_ + "/initdb", std::move(args));
+  Process p(pg_bin_ / "initdb", std::move(args));
   return p.start() && p.wait() == 0;
 }
 
@@ -94,7 +85,7 @@ bool PgInstance::write_config(std::map<std::string, std::string> const& settings
   std::string content = "\n";
   for (auto const& [k, v] : merged)
     content += k + " = " + v + "\n";
-  return append_file(data_dir_ + "/postgresql.conf", content);
+  return append_file(data_dir_ / "postgresql.conf", content);
 }
 
 bool PgInstance::write_hba(std::vector<std::string> const& lines) {
@@ -103,7 +94,7 @@ bool PgInstance::write_hba(std::vector<std::string> const& lines) {
     content += line + "\n";
   for (auto const& line : kDefaultHbaConfig)
     content += line + "\n";
-  return append_file(data_dir_ + "/pg_hba.conf", content);
+  return append_file(data_dir_ / "pg_hba.conf", content);
 }
 
 // ── process control ───────────────────────────────────────────────────────────
@@ -155,11 +146,11 @@ bool PgInstance::is_running() const {
   return postgres_.is_running();
 }
 
-bool PgInstance::wait_ready(std::string const& host, uint16_t port, int timeout_s) const {
+bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
   while (std::chrono::steady_clock::now() < deadline) {
-    Process p(pg_bin_ + "/pg_isready",
-              {"-h", host, "-p", std::to_string(port), "-d", "postgres", "-q"});
+    Process p(pg_bin_ / "pg_isready",
+              {"-h", "localhost", "-p", std::to_string(port), "-d", "postgres", "-q"});
     p.start();
     if (p.wait() == 0)
       return true;
@@ -173,7 +164,7 @@ bool PgInstance::wait_ready(std::string const& host, uint16_t port, int timeout_
 bool PgInstance::backup(std::filesystem::path const& dest_dir, StopMode mode) {
   if (is_running())
     stop(mode);
-  Process p("/usr/bin/rsync", {"-a", "--exclude=pg_raft_wal", data_dir_ + "/", dest_dir});
+  Process p("/bin/cp", {"-Rp", data_dir_.string(), dest_dir.string()});
   return p.start() && p.wait() == 0;
 }
 

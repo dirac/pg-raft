@@ -1,10 +1,5 @@
 #pragma once
 
-#include <cstdint>
-#include <map>
-#include <string>
-#include <vector>
-
 #include "src/base/logger.h"
 #include "src/process/process.h"
 
@@ -57,34 +52,35 @@ class PgInstance {
 
   bool is_running() const;
 
-  // Poll pg_isready on |host|:|port| until it returns OK or timeout elapses.
-  bool wait_ready(std::string const& host, uint16_t port, int timeout_s = 30) const;
+  // Poll pg_isready on |localhost|:|port| until it returns OK or timeout elapses.
+  bool wait_ready(uint16_t port, int timeout_s = 30) const;
 
   // ── backup / restore ──────────────────────────────────────────────────────
 
   // Stop the instance (if running), then copy data_dir recursively to
   // |dest_dir|. |dest_dir| must not exist.
-  bool backup(std::string const& dest_dir, StopMode mode = StopMode::Fast);
+  bool backup(std::filesystem::path const& dest_dir, StopMode mode = StopMode::Fast);
 
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
-  bool restore(std::string const& backup_dir);
+  bool restore(std::filesystem::path const& backup_dir);
 
   // restore() then start().
-  bool restore_and_start(std::string const& backup_dir);
+  bool restore_and_start(std::filesystem::path const& backup_dir);
 
-  // Create data_dir/pg_raft_wal and move the WAL segments out of
+  // Create raft_dir/pg_wal and move the WAL segments out of
   // data_dir/pg_wal into it, leaving pg_wal as an empty directory ready
   // for a FUSE mount. Must be called after init() and before start().
   bool create_raft_wal();
 
   // ── accessors ─────────────────────────────────────────────────────────────
 
-  std::string const& data_dir() const { return data_dir_; }
-  std::string const& pg_bin() const { return pg_bin_; }
+  std::filesystem::path const& data_dir() const { return data_dir_; }
+  std::filesystem::path const& raft_dir() const { return raft_dir_; }
+  std::filesystem::path const& pg_bin() const { return pg_bin_; }
 
  private:
-  static bool copy_dir(std::string const& src, std::string const& dst);
-  static bool append_file(std::string const& path, std::string const& content);
+  static bool copy_dir(std::filesystem::path const& src, std::filesystem::path const& dst);
+  static bool append_file(std::filesystem::path const& path, std::string const& content);
 
   std::filesystem::path    pg_bin_;
   std::filesystem::path    data_dir_;
@@ -93,8 +89,8 @@ class PgInstance {
 
   struct PostgresProcess : public Process {
     using Process::Process;
-    void on_stdout_line(std::string_view line) override { logger::pg_log(line); }
-    void on_stderr_line(std::string_view line) override { logger::pg_log(line); }
+    void on_stdout_line(std::string_view line) override { logger::plog("pgres", line); }
+    void on_stderr_line(std::string_view line) override { logger::plog("pgres", line); }
   };
   PostgresProcess postgres_;
 };
