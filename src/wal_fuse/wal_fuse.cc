@@ -1,7 +1,5 @@
 #include "src/wal_fuse/wal_fuse.h"
 
-#include <fuse/fuse_opt.h>
-
 WalFuse::WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOps> ops)
     : mount_point_(std::move(mount_point)),
       ops_instance_(std::move(ops)),

@@ -1,13 +1,5 @@
 #include "src/wal_fuse/wal_fuse_ops.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/statvfs.h>
-#include <sys/xattr.h>
-#include <unistd.h>
-
 #include "src/base/logger.h"
 
 // ── helpers ───────────────────────────────────────────────────────────────────

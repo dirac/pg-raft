@@ -4,12 +4,15 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -131,5 +134,6 @@
 #define _FILE_OFFSET_BITS 64
 #endif
 #include <fuse/fuse.h>
+#include <fuse/fuse_opt.h>
 
 #endif
