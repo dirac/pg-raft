@@ -30,6 +30,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 
 # Run a specific test target (specify by Jamfile target name)
 /opt/sparrow/bin/b2 src/process//process_test
+/opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
 /opt/sparrow/bin/b2 src/wal_sender//pg_replication_test
 /opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_test
@@ -51,6 +52,10 @@ Compiler flags (from `Jamroot.jam`):
 
 Include paths: the repo root (`.`) is on the include path, so headers are included as `#include "src/module/file.h"`.
 
+## Code formatting
+
+`src/.clang-format` configures clang-format (Chromium-based style, 100-column limit, 2-space indent, pointer alignment left). Run `clang-format -i <file>` to format a file in place.
+
 ## Architecture
 
 ### Modules
@@ -61,9 +66,11 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 - **`Result<T>`** — `std::expected<T, std::error_code>` wrapper with implicit construction from both `std::error_code` and `boost::system::error_code`. Use `ok()` to return a successful `Result<void>`.
 - **`Config`** — TOML-based system configuration (`config.toml`). Fields: `wdir`, `install_dir`, `pg_major_version`, `servers[]` (hostname + pg_port + ha_port), `pg_config`, `proxy_pg_port`/`proxy_http_port`, `s3_endpoints[]`.
 - **`IoThreads`** — Manages a pool of threads running a shared `boost::asio::io_context`. Access the global context via `io_context()`; post work with `post(func)`.
-- **`Int<T, L>`** — Strongly-typed integer wrapper template. Defined aliases: `RaftTerm` (uint64_t), `RaftIndex` (uint64_t), `RaftNodeId` (uint16_t). Use `INT(x)` macro to extract the underlying value. `std::atomic<Int<T,L>>` is specialized.
+- **`Int<T, L>`** — Strongly-typed integer wrapper template. Defined aliases: `RaftTerm` (uint64_t), `RaftIndex` (uint64_t), `RaftNodeId` (uint16_t). Use `INT(x)` or `.value()` to extract the underlying value. `std::atomic<Int<T,L>>` is specialized. `std::format("{:v}", x)` prints `TypeName(value)`; `"{}"` prints the bare integer.
 - **`convert.h`** — Checked narrowing casts: `u8()`, `u4()`, `u2()`, `u1()`, `i8()`, `i4()`, `i2()`, `i1()`, `i<U>(v)`. All assert that the value fits in the target type.
-- **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, etc.) and `asio` as an alias for `boost::asio`.
+- **`formatter.h`** — Specializes `std::formatter<std::filesystem::path>` so paths work directly in `std::format` calls.
+- **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, `Bytes`, etc.) and `asio` as an alias for `boost::asio`.
+- **`base.h`** — Also exposes: `kWalBlockSize` (8192), `kWalSegmentSize` (16 MiB), `epoch_msec()` (wall-clock ms), `pcounter()`/`gcounter()` (monotonic counters), `tmp_dir()`/`tmp_file()` (temp path helpers), `system_error_code(errno)`.
 - **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
 
 **`src/net/`** — Async networking layer built on Boost.Asio with optional TLS:
@@ -77,7 +84,7 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 **`src/process/`** — Two classes:
 
 - **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
-- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, raft_dir, extra_args)`. Provides: `init()` (runs `initdb`), `create_raft_wal()` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, raft_dir, extra_args)`. Provides: `init()` (runs `initdb`), `create_raft_wal()` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
 
 **`src/wal_sender/`** — Two cooperating classes:
 
@@ -129,7 +136,7 @@ LSNs are `uint64_t` (high 32 bits = segment number, low 32 bits = offset). Postg
 
 ### FUSE include requirements
 
-Any file that includes `<fuse/fuse.h>` must define these macros first:
+`src/base/pch.h` already defines `FUSE_USE_VERSION 26` and `_FILE_OFFSET_BITS 64` before including `<fuse/fuse.h>`, so files compiled through the PCH get these automatically. Any file that includes `<fuse/fuse.h>` **outside** the PCH must define them first:
 
 ```cpp
 #define FUSE_USE_VERSION 26
@@ -138,9 +145,10 @@ Any file that includes `<fuse/fuse.h>` must define these macros first:
 
 ## Tests
 
-Integration tests in `wal_fuse_test` use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`; those in `pg_replication_test` use `/opt/pg_raft/pgsql/v17/bin`. Both auto-skip if the binaries are absent.
+Integration tests in `wal_fuse_test` and `pg_instance_test` use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`; those in `pg_replication_test` use `/opt/pg_raft/pgsql/v17/bin`. Both auto-skip if the binaries are absent.
 
 - **`process_test`** — unit tests for `Process`.
+- **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
 - **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `WalFuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
 - **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `WalFuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
