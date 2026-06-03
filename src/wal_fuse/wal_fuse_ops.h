@@ -93,4 +93,31 @@ class WalFuseOps {
 
  private:
   std::filesystem::path backing_dir_;
+
+  /// Validate that op on the same file is not concurrently active.
+#ifndef NDEBUG
+#define TEST_CONCURRENCY Active a{&active_, fi->fh};
+
+  std::array<std::atomic_flag, 1024> active_;
+  struct Active {
+    Active(std::array<std::atomic_flag, 1024>* flags, uint64_t fd) : flags_(flags), fd_(fd) {
+      if (fd_ >= flags_->size())
+        return;
+
+      bool a = flags_->at(fd_).test_and_set();
+      assert(!a);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ~Active() {
+      if (fd_ >= flags_->size())
+        return;
+      flags_->at(fd_).clear();
+    }
+    std::array<std::atomic_flag, 1024>* flags_;
+    uint64_t                            fd_;
+  };
+#else
+#define TEST_CONCURRENCY
+#endif
 };

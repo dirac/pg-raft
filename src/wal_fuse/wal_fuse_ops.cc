@@ -192,7 +192,10 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
   int fd = open(real_path(path).c_str(), fi->flags);
   if (fd == -1)
     return -errno;
+
   fi->fh = static_cast<uint64_t>(fd);
+
+  TEST_CONCURRENCY;
   return 0;
 }
 
@@ -201,6 +204,8 @@ int WalFuseOps::op_read(char const*            path,
                         size_t                 size,
                         off_t                  offset,
                         struct fuse_file_info* fi) {
+  TEST_CONCURRENCY;
+
   n_read.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "read {} size={} off={}", path, size, offset);
 
@@ -213,6 +218,8 @@ int WalFuseOps::op_write(char const*            path,
                          size_t                 size,
                          off_t                  offset,
                          struct fuse_file_info* fi) {
+  TEST_CONCURRENCY;
+
   n_write.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "write {} size={} off={}", path, size, offset);
   ssize_t res = pwrite(static_cast<int>(fi->fh), buf, size, offset);
@@ -226,12 +233,16 @@ int WalFuseOps::op_statfs(char const* path, struct statvfs* stbuf) {
 }
 
 int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
+  TEST_CONCURRENCY;
+
   n_flush.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "flush {} fd={}", path, fi->fh);
   return 0;
 }
 
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
+  TEST_CONCURRENCY;
+
   n_release.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "release {} fd={}", path, fi->fh);
   close(static_cast<int>(fi->fh));
@@ -239,6 +250,8 @@ int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
 }
 
 int WalFuseOps::op_fsync(char const* path, int datasync, struct fuse_file_info* fi) {
+  TEST_CONCURRENCY;
+
   n_fsync.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "fsync {} datasync={} fd={}", path, datasync, fi->fh);
   return fsync(static_cast<int>(fi->fh)) == -1 ? -errno : 0;

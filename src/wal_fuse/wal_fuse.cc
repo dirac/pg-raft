@@ -64,5 +64,5 @@ void WalFuse::stop() {
 }
 
 void WalFuse::run_loop() {
-  fuse_loop(fuse_);
+  fuse_loop_mt(fuse_);
 }
