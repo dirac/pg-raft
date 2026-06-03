@@ -19,6 +19,38 @@ class WalFuseOps {
   WalFuseOps(WalFuseOps const&)            = delete;
   WalFuseOps& operator=(WalFuseOps const&) = delete;
 
+  // Per-op invocation counters (relaxed — for observation only).
+  std::atomic<uint64_t> n_getattr{0};
+  std::atomic<uint64_t> n_fgetattr{0};
+  std::atomic<uint64_t> n_access{0};
+  std::atomic<uint64_t> n_readlink{0};
+  std::atomic<uint64_t> n_opendir{0};
+  std::atomic<uint64_t> n_readdir{0};
+  std::atomic<uint64_t> n_releasedir{0};
+  std::atomic<uint64_t> n_mkdir{0};
+  std::atomic<uint64_t> n_unlink{0};
+  std::atomic<uint64_t> n_rmdir{0};
+  std::atomic<uint64_t> n_symlink{0};
+  std::atomic<uint64_t> n_rename{0};
+  std::atomic<uint64_t> n_link{0};
+  std::atomic<uint64_t> n_chmod{0};
+  std::atomic<uint64_t> n_chown{0};
+  std::atomic<uint64_t> n_truncate{0};
+  std::atomic<uint64_t> n_ftruncate{0};
+  std::atomic<uint64_t> n_utimens{0};
+  std::atomic<uint64_t> n_create{0};
+  std::atomic<uint64_t> n_open{0};
+  std::atomic<uint64_t> n_read{0};
+  std::atomic<uint64_t> n_write{0};
+  std::atomic<uint64_t> n_statfs{0};
+  std::atomic<uint64_t> n_flush{0};
+  std::atomic<uint64_t> n_release{0};
+  std::atomic<uint64_t> n_fsync{0};
+  std::atomic<uint64_t> n_setxattr{0};
+  std::atomic<uint64_t> n_getxattr{0};
+  std::atomic<uint64_t> n_listxattr{0};
+  std::atomic<uint64_t> n_removexattr{0};
+
   // Returns a fuse_operations table whose entries are static trampolines.
   // Each trampoline casts fuse_get_context()->private_data to WalFuseOps*
   // and calls the corresponding virtual method.
