@@ -1,10 +1,11 @@
 #define BOOST_TEST_MODULE WalFuseTest
 
+#include "src/wal_fuse/wal_fuse.h"
+
 #include "src/base/io_threads.h"
 #include "src/base/testing.h"
 #include "src/process/pg_instance.h"
 #include "src/process/process.h"
-#include "src/wal_fuse/wal_fuse.h"
 
 static std::string const  kPgBin = "/opt/pg_raft/postgresql/17/bin";
 static constexpr uint16_t kPort  = 15436;
@@ -14,9 +15,10 @@ static bool pg_available() {
 }
 
 static int count_wal_segments(std::filesystem::path const& dir) {
-  DIR*           dp = opendir(dir.c_str());
-  if (!dp) return -1;
-  int            n  = 0;
+  DIR* dp = opendir(dir.c_str());
+  if (!dp)
+    return -1;
+  int            n = 0;
   struct dirent* de;
   while ((de = readdir(dp)) != nullptr)
     if (de->d_name[0] != '.' && de->d_type == DT_REG)
@@ -31,20 +33,24 @@ static void run_pgbench() {
   BOOST_REQUIRE(init.start());
   BOOST_REQUIRE_EQUAL(init.wait(), 0);
 
-  Process bench(kPgBin + "/pgbench",
-                {"-h", "127.0.0.1", "-p", std::to_string(kPort), "-t", "200", "-c", "4", "postgres"});
+  Process bench(
+      kPgBin + "/pgbench",
+      {"-h", "127.0.0.1", "-p", std::to_string(kPort), "-t", "200", "-c", "4", "postgres"});
   BOOST_REQUIRE(bench.start());
   BOOST_REQUIRE_EQUAL(bench.wait(), 0);
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(WalMovedToRaftDir) {
-  if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
+BOOST_AUTO_TEST_CASE(WalMovedToRaftDir, *boost::unit_test::disabled()) {
+  if (!pg_available()) {
+    BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
+    return;
+  }
   IoThreads threads{1};
   TmpDir    tmp;
-  auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
+  auto      data_dir = tmp() / "pgdata";
+  auto      raft_dir = tmp() / "pgraft";
   std::filesystem::create_directory(raft_dir);
 
   PgInstance pg(kPgBin, data_dir, raft_dir);
@@ -77,20 +83,25 @@ BOOST_AUTO_TEST_CASE(ReadDirLargeDirectory) {
   BOOST_REQUIRE(fuse.start());
 
   int n = 0;
-  for (auto const& entry : std::filesystem::directory_iterator(mount_point))
+  for (auto const& entry : std::filesystem::directory_iterator(mount_point)) {
     if (entry.is_regular_file())
       ++n;
+  }
 
   BOOST_CHECK_EQUAL(n, kFileCount);
+  log(INFO, "op_readdir {}", fuse.ops().n_readdir.load());
 }
 
-BOOST_AUTO_TEST_CASE(WalWritesToBackingDir) {
-  if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
+BOOST_AUTO_TEST_CASE(WalWritesToBackingDir, *boost::unit_test::disabled()) {
+  if (!pg_available()) {
+    BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
+    return;
+  }
   IoThreads threads{1};
   TmpDir    tmp;
-  auto data_dir    = tmp() / "pgdata";
-  auto raft_dir    = tmp() / "pgraft";
-  auto raft_pg_wal = raft_dir / "pg_wal";
+  auto      data_dir    = tmp() / "pgdata";
+  auto      raft_dir    = tmp() / "pgraft";
+  auto      raft_pg_wal = raft_dir / "pg_wal";
   std::filesystem::create_directory(raft_dir);
 
   // fuse declared before pg so pg destructs first (stops postgres before FUSE unmounts).

@@ -19,6 +19,8 @@ class WalFuse {
   void stop();
   bool is_mounted() const { return mounted_.load(); }
 
+  WalFuseOps const& ops() const { return *ops_instance_; }
+
  private:
   void run_loop();
 

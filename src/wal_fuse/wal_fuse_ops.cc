@@ -44,6 +44,14 @@ int WalFuseOps::op_readlink(char const* path, char* buf, size_t size) {
   return 0;
 }
 
+namespace {
+struct DirInfo {
+  DIR* const     dp;
+  struct dirent* de;
+  off_t          offset;
+};
+}  // namespace
+
 int WalFuseOps::op_opendir(char const* path, struct fuse_file_info* fi) {
   n_opendir.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "opendir {}", path);
@@ -52,14 +60,20 @@ int WalFuseOps::op_opendir(char const* path, struct fuse_file_info* fi) {
   if (!dp)
     return -errno;
 
-  fi->fh = reinterpret_cast<uint64_t>(dp);
+  auto* fh = new DirInfo{.dp = dp, .de = nullptr, .offset = 0};
+  fi->fh   = reinterpret_cast<uint64_t>(fh);
   return 0;
 }
 
 int WalFuseOps::op_releasedir(char const* path, struct fuse_file_info* fi) {
   n_releasedir.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "releasedir {}", path);
-  ::closedir(reinterpret_cast<DIR*>(fi->fh));
+
+  auto* fh = reinterpret_cast<DirInfo*>(fi->fh);
+
+  ::closedir(fh->dp);
+  delete fh;
+
   return 0;
 }
 
@@ -71,14 +85,26 @@ int WalFuseOps::op_readdir(char const*            path,
   n_readdir.fetch_add(1, std::memory_order_relaxed);
   log(DEBUG, "readdir {} {}", path, offset);
 
-  DIR* dp = reinterpret_cast<DIR*>(fi->fh);
+  auto* fh = reinterpret_cast<DirInfo*>(fi->fh);
+
+  if (fh->de && fh->offset == offset) {
+    struct stat st{};
+    st.st_ino  = fh->de->d_ino;
+    st.st_mode = static_cast<mode_t>(static_cast<unsigned>(fh->de->d_type) << 12u);
+    if (filler(buf, fh->de->d_name, &st, ++offset)) {
+      return 0;
+    }
+  }
 
   struct dirent* de;
-  while ((de = readdir(dp)) != nullptr) {
+  while ((de = readdir(fh->dp)) != nullptr) {
+    fh->de     = de;
+    fh->offset = offset;
+
     struct stat st{};
     st.st_ino  = de->d_ino;
     st.st_mode = static_cast<mode_t>(static_cast<unsigned>(de->d_type) << 12u);
-    if (filler(buf, de->d_name, &st, 0))
+    if (filler(buf, de->d_name, &st, ++offset))
       return 0;
   }
   return 0;
