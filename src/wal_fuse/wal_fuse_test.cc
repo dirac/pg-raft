@@ -42,7 +42,7 @@ static void run_pgbench() {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(WalMovedToRaftDir, *boost::unit_test::disabled()) {
+BOOST_AUTO_TEST_CASE(WalMovedToRaftDir) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
     return;
@@ -92,7 +92,7 @@ BOOST_AUTO_TEST_CASE(ReadDirLargeDirectory) {
   log(INFO, "op_readdir {}", fuse.ops().n_readdir.load());
 }
 
-BOOST_AUTO_TEST_CASE(WalWritesToBackingDir, *boost::unit_test::disabled()) {
+BOOST_AUTO_TEST_CASE(WalWritesToBackingDir) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
     return;
