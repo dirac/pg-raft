@@ -60,6 +60,16 @@ std::error_code elog(ErrorCode ec, std::format_string<Args...> fmt, Args&&... ar
   return ec;
 }
 
+template <typename... Args>
+std::error_code elog(ErrorCode ec) {
+  auto& buffer = log_buffer();
+
+  std::format_to(std::back_inserter(buffer), "error = {} ({})", ec.message(), ec.value());
+
+  _log(Level::Error, buffer, ec.location);
+  return ec;
+}
+
 void plog(char const* process, std::string_view log);
 
 }  // namespace logger

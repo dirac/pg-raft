@@ -49,9 +49,12 @@ uint64_t gcounter(std::optional<uint64_t> g = std::nullopt);
 std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t = std::nullopt);
 std::filesystem::path tmp_file(char const* ext = "tmp");
 
+constexpr unsigned kWalBlockSize   = 8192;              // wal_block_size (integer).
+constexpr unsigned kWalSegmentSize = 16 * 1024 * 1024;  /// wal_segment_size (integer) = 16MB
+
 #include "src/base/convert.h"
+#include "src/base/formatter.h"
 #include "src/base/int_type.h"
 #include "src/base/using.h"
-#include "src/base/formatter.h"
 
 #endif
