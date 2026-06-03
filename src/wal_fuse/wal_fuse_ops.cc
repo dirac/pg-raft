@@ -65,14 +65,13 @@ int WalFuseOps::op_readdir(char const*            path,
   log(DEBUG, "readdir {} {}", path, offset);
 
   DIR* dp = reinterpret_cast<DIR*>(fi->fh);
-  ::seekdir(dp, offset);
 
   struct dirent* de;
   while ((de = readdir(dp)) != nullptr) {
     struct stat st{};
     st.st_ino  = de->d_ino;
     st.st_mode = static_cast<mode_t>(static_cast<unsigned>(de->d_type) << 12u);
-    if (filler(buf, de->d_name, &st, ++offset))
+    if (filler(buf, de->d_name, &st, 0))
       return 0;
   }
   return 0;

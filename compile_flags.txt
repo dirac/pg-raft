@@ -1,0 +1,12 @@
+-std=c++2a
+-I
+/opt/pg_raft/include
+-I
+.
+-DBOOST_BUILD_PCH_ENABLED=1
+-DCLANG_TIDY=1
+-DBOOST_ASIO_NO_DEPRECATED=1
+-Xclang
+-analyzer-config
+-Xclang
+unix.DynamicMemoryModeling:Optimistic=true

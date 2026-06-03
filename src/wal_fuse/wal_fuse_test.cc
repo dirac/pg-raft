@@ -58,6 +58,32 @@ BOOST_AUTO_TEST_CASE(WalMovedToRaftDir) {
   BOOST_TEST(count_wal_segments(data_dir / "pg_wal") == 0);
 }
 
+BOOST_AUTO_TEST_CASE(ReadDirLargeDirectory) {
+  TmpDir tmp;
+  auto   backing_dir = tmp() / "backing";
+  auto   mount_point = tmp() / "mount";
+  std::filesystem::create_directory(backing_dir);
+  std::filesystem::create_directory(mount_point);
+
+  static constexpr int kFileCount = 4096;
+  for (int i = 0; i < kFileCount; ++i) {
+    auto path = backing_dir / std::format("file_{:04d}", i);
+    int  fd   = open(path.c_str(), O_CREAT | O_WRONLY, 0644);
+    BOOST_REQUIRE_GE(fd, 0);
+    close(fd);
+  }
+
+  WalFuse fuse(mount_point, std::make_unique<WalFuseOps>(backing_dir));
+  BOOST_REQUIRE(fuse.start());
+
+  int n = 0;
+  for (auto const& entry : std::filesystem::directory_iterator(mount_point))
+    if (entry.is_regular_file())
+      ++n;
+
+  BOOST_CHECK_EQUAL(n, kFileCount);
+}
+
 BOOST_AUTO_TEST_CASE(WalWritesToBackingDir) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
