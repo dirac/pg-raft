@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build system
 
-This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/sparrow/bin/b2`. All external dependencies (Boost, libpq, PostgreSQL internals, lmdb, sqlite3, fuse) are installed under `/opt/sparrow/` and `/usr/local/`.
+This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/sparrow/bin/b2`. All external dependencies (Boost, libpq, PostgreSQL internals, lmdb, sqlite3, fuse) are installed under `/opt/pg_raft/` and `/usr/local/` (see `Jamroot.jam` for exact search paths).
 
 All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
@@ -151,4 +151,4 @@ Integration tests in `wal_fuse_test` and `pg_instance_test` use PostgreSQL at `/
 - **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
 - **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `WalFuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
-- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `WalFuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`.
+- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `WalFuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`. Note: `WalMovedToRaftDir` and `WalWritesToBackingDir` are marked `*boost::unit_test::disabled()` and never run automatically; only `ReadDirLargeDirectory` (no PostgreSQL needed) runs in CI.
