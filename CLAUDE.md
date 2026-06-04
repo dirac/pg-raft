@@ -114,9 +114,9 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 **`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Two primary classes:
 
-- **`WalFuse`** — Passthrough FUSE filesystem. Constructor: `WalFuse(mount_point, unique_ptr<WalFuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `WalFuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
+- **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
-- **`WalFuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
+- **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
 
 **`src/raft/`** and **`src/proxy/`** — Reserved directories for future modules; currently empty and not referenced in `src/Jamfile.jam`.
 
@@ -126,7 +126,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 initdb
   └─▶  PgInstance::create_raft_wal()  ──(moves WAL)──▶  pg_raft_wal/
                                                                │
-                 WalFuse (FUSE)  ◀──(backs)────────────────────┘
+                 Fuse (FUSE)  ◀──(backs)────────────────────┘
                     │  mounted at pg_wal
                     ▼
                postgres write(WAL) ──▶ FUSE op_write (WalSendingOps subclass)
@@ -172,5 +172,5 @@ Integration tests in `wal_fuse_test` and `pg_instance_test` use PostgreSQL at `/
 - **`process_test`** — unit tests for `Process`.
 - **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
-- **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `WalFuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
-- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `WalFuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`. Note: `WalMovedToRaftDir` and `WalWritesToBackingDir` are marked `*boost::unit_test::disabled()` and never run automatically; only `ReadDirLargeDirectory` (no PostgreSQL needed) runs in CI.
+- **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `Fuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
+- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `Fuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`. Note: `WalMovedToRaftDir` and `WalWritesToBackingDir` are marked `*boost::unit_test::disabled()` and never run automatically; only `ReadDirLargeDirectory` (no PostgreSQL needed) runs in CI.

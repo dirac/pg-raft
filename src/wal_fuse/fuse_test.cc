@@ -1,6 +1,6 @@
-#define BOOST_TEST_MODULE WalFuseTest
+#define BOOST_TEST_MODULE FuseTest
 
-#include "src/wal_fuse/wal_fuse.h"
+#include "src/wal_fuse/fuse.h"
 
 #include "src/base/io_threads.h"
 #include "src/base/testing.h"
@@ -73,7 +73,7 @@ BOOST_AUTO_TEST_CASE(MountAndUnmount) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
   BOOST_CHECK(fuse.is_mounted());
 
@@ -99,7 +99,7 @@ BOOST_AUTO_TEST_CASE(DestructorUnmounts) {
   std::filesystem::create_directory(mount);
 
   {
-    WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+    Fuse fuse(mount, std::make_unique<FuseOps>(backing));
     BOOST_REQUIRE(fuse.start());
   }  // destructor runs here
 
@@ -116,7 +116,7 @@ BOOST_AUTO_TEST_CASE(StopIdempotent) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
   fuse.stop();
   fuse.stop();  // must not crash
@@ -133,7 +133,7 @@ BOOST_AUTO_TEST_CASE(BackingFileVisibleThroughMount) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "hello.txt", "world"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_CHECK_EQUAL(read_file(mount / "hello.txt"), "world");
@@ -146,7 +146,7 @@ BOOST_AUTO_TEST_CASE(WriteGoesToBackingDir) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE(write_file(mount / "data.bin", "pg-raft"));
@@ -163,7 +163,7 @@ BOOST_AUTO_TEST_CASE(GetattrMatchesBacking) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "abcde"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   struct stat st_m{}, st_b{};
@@ -182,7 +182,7 @@ BOOST_AUTO_TEST_CASE(GetattrNonExistentReturnsENOENT) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   struct stat st{};
@@ -198,7 +198,7 @@ BOOST_AUTO_TEST_CASE(FgetattrOpenFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "hello"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "f").c_str(), O_RDONLY);
@@ -222,7 +222,7 @@ BOOST_AUTO_TEST_CASE(AccessExistingFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_CHECK_EQUAL(access((mount / "f").c_str(), F_OK), 0);
@@ -238,7 +238,7 @@ BOOST_AUTO_TEST_CASE(AccessNonExistentReturnsENOENT) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_CHECK_EQUAL(access((mount / "missing").c_str(), F_OK), -1);
@@ -254,7 +254,7 @@ BOOST_AUTO_TEST_CASE(CreateFile) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "new.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -272,7 +272,7 @@ BOOST_AUTO_TEST_CASE(WriteAndReadBack) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   std::string payload(8192, 'X');
@@ -289,7 +289,7 @@ BOOST_AUTO_TEST_CASE(WriteAtOffset) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "sparse").c_str(), O_WRONLY | O_CREAT, 0644);
@@ -315,7 +315,7 @@ BOOST_AUTO_TEST_CASE(TruncateFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "hello world"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(truncate((mount / "f").c_str(), 5), 0);
@@ -334,7 +334,7 @@ BOOST_AUTO_TEST_CASE(FtruncateFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "hello world"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "f").c_str(), O_WRONLY);
@@ -358,7 +358,7 @@ BOOST_AUTO_TEST_CASE(UnlinkFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "victim", "data"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(unlink((mount / "victim").c_str()), 0);
@@ -373,7 +373,7 @@ BOOST_AUTO_TEST_CASE(UnlinkNonExistentReturnsENOENT) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_CHECK_EQUAL(unlink((mount / "no_such_file").c_str()), -1);
@@ -390,7 +390,7 @@ BOOST_AUTO_TEST_CASE(RenameFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "old", "content"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(rename((mount / "old").c_str(), (mount / "new").c_str()), 0);
@@ -409,7 +409,7 @@ BOOST_AUTO_TEST_CASE(HardLink) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "orig", "data"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(link((mount / "orig").c_str(), (mount / "linked").c_str()), 0);
@@ -431,7 +431,7 @@ BOOST_AUTO_TEST_CASE(SymlinkAndReadlink) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "target", "data"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(symlink("target", (mount / "link").c_str()), 0);
@@ -455,7 +455,7 @@ BOOST_AUTO_TEST_CASE(ChmodFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(chmod((mount / "f").c_str(), 0600), 0);
@@ -476,7 +476,7 @@ BOOST_AUTO_TEST_CASE(UtimensFile) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   struct timespec ts[2];
@@ -501,7 +501,7 @@ BOOST_AUTO_TEST_CASE(MkdirAndRmdir) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(mkdir((mount / "subdir").c_str(), 0755), 0);
@@ -522,7 +522,7 @@ BOOST_AUTO_TEST_CASE(ReadDirEmpty) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int n = 0;
@@ -541,7 +541,7 @@ BOOST_AUTO_TEST_CASE(ReadDirSmall) {
   for (int i = 0; i < 5; ++i)
     BOOST_REQUIRE(write_file(backing / std::format("f{}", i), "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int n = 0;
@@ -560,7 +560,7 @@ BOOST_AUTO_TEST_CASE(FsyncFile) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "f").c_str(), O_WRONLY | O_CREAT, 0644);
@@ -582,7 +582,7 @@ BOOST_AUTO_TEST_CASE(StatfsMount) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   struct statvfs st{};
@@ -600,7 +600,7 @@ BOOST_AUTO_TEST_CASE(OpCountersIncrement) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   // write: create + write + flush + release
@@ -637,7 +637,7 @@ BOOST_AUTO_TEST_CASE(SetGetXattr) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.test", "pg-raft", 7, 0, 0), 0);
@@ -658,7 +658,7 @@ BOOST_AUTO_TEST_CASE(ListXattr) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.a", "1", 1, 0, 0), 0);
@@ -678,7 +678,7 @@ BOOST_AUTO_TEST_CASE(RemoveXattr) {
   std::filesystem::create_directory(mount);
   BOOST_REQUIRE(write_file(backing / "f", "x"));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.tmp", "val", 3, 0, 0), 0);
@@ -695,8 +695,8 @@ BOOST_AUTO_TEST_CASE(RemoveXattr) {
 
 namespace {
 
-struct InterceptOps : public WalFuseOps {
-  using WalFuseOps::WalFuseOps;
+struct InterceptOps : public FuseOps {
+  using FuseOps::FuseOps;
 
   mutable std::mutex       mu;
   std::vector<std::string> intercepted_writes;
@@ -711,7 +711,7 @@ struct InterceptOps : public WalFuseOps {
       std::lock_guard lock(mu);
       intercepted_writes.emplace_back(path);
     }
-    return WalFuseOps::op_write(path, buf, size, offset, fi);
+    return FuseOps::op_write(path, buf, size, offset, fi);
   }
 
   int op_fsync(char const* path, int datasync, struct fuse_file_info* fi) override {
@@ -719,7 +719,7 @@ struct InterceptOps : public WalFuseOps {
       std::lock_guard lock(mu);
       intercepted_fsyncs.emplace_back(path);
     }
-    return WalFuseOps::op_fsync(path, datasync, fi);
+    return FuseOps::op_fsync(path, datasync, fi);
   }
 };
 
@@ -732,7 +732,7 @@ BOOST_AUTO_TEST_CASE(SubclassInterceptsWriteAndFsync) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<InterceptOps>(backing));
+  Fuse fuse(mount, std::make_unique<InterceptOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   int fd = open((mount / "wal.seg").c_str(), O_WRONLY | O_CREAT, 0644);
@@ -758,15 +758,15 @@ BOOST_AUTO_TEST_CASE(SubclassCanSuppressWrite) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  struct DropWriteOps : public WalFuseOps {
-    using WalFuseOps::WalFuseOps;
+  struct DropWriteOps : public FuseOps {
+    using FuseOps::FuseOps;
     int op_write(char const*, char const*, size_t size, off_t,
                  struct fuse_file_info*) override {
       return static_cast<int>(size);  // report success without writing
     }
   };
 
-  WalFuse fuse(mount, std::make_unique<DropWriteOps>(backing));
+  Fuse fuse(mount, std::make_unique<DropWriteOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   BOOST_REQUIRE(write_file(mount / "f", "should not appear"));
@@ -785,7 +785,7 @@ BOOST_AUTO_TEST_CASE(ConcurrentWrites) {
   std::filesystem::create_directory(backing);
   std::filesystem::create_directory(mount);
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   static constexpr int kThreads = 8;
@@ -822,7 +822,7 @@ BOOST_AUTO_TEST_CASE(ConcurrentReadWrite) {
   for (int i = 0; i < kFiles; ++i)
     BOOST_REQUIRE(write_file(backing / std::format("f{}", i), std::format("init{}", i)));
 
-  WalFuse fuse(mount, std::make_unique<WalFuseOps>(backing));
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
   std::vector<std::thread> threads;
@@ -880,7 +880,7 @@ BOOST_AUTO_TEST_CASE(ReadDirLargeDirectory) {
     close(fd);
   }
 
-  WalFuse fuse(mount_point, std::make_unique<WalFuseOps>(backing_dir));
+  Fuse fuse(mount_point, std::make_unique<FuseOps>(backing_dir));
   BOOST_REQUIRE(fuse.start());
 
   int n = 0;
@@ -906,7 +906,7 @@ BOOST_AUTO_TEST_CASE(WalWritesToBackingDir) {
   std::filesystem::create_directory(raft_dir);
 
   // fuse declared before pg so pg destructs first (stops postgres before FUSE unmounts).
-  WalFuse    fuse(data_dir / "pg_wal", std::make_unique<WalFuseOps>(raft_pg_wal));
+  Fuse    fuse(data_dir / "pg_wal", std::make_unique<FuseOps>(raft_pg_wal));
   PgInstance pg(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));

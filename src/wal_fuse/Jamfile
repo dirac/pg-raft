@@ -4,19 +4,19 @@ alias deps
     ../process//libs
   ;
 
-lib wal_fuse
-  : wal_fuse.cc
-    wal_fuse_ops.cc
+lib fuse
+  : fuse.cc
+    fuse_ops.cc
     deps
   ;
 
 alias libs
   : deps
-    wal_fuse
+    fuse
   ;
 
-unit-test wal_fuse_test
-  : wal_fuse_test.cc
+unit-test fuse_test
+  : fuse_test.cc
     libs
     ../base//testing
   ;

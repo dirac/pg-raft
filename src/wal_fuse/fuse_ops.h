@@ -8,16 +8,16 @@
 // subclass to intercept specific operations; all others pass through to the
 // backing directory unchanged.
 //
-// Pass as the ops argument to WalFuse. The WalFuse instance stores this object
+// Pass as the ops argument to Fuse. The Fuse instance stores this object
 // and passes it as fuse_get_context()->private_data so that the static
 // trampolines in make_ops() can dispatch to the correct virtual method.
-class WalFuseOps {
+class FuseOps {
  public:
-  explicit WalFuseOps(std::filesystem::path backing_dir);
-  virtual ~WalFuseOps() = default;
+  explicit FuseOps(std::filesystem::path backing_dir);
+  virtual ~FuseOps() = default;
 
-  WalFuseOps(WalFuseOps const&)            = delete;
-  WalFuseOps& operator=(WalFuseOps const&) = delete;
+  FuseOps(FuseOps const&)            = delete;
+  FuseOps& operator=(FuseOps const&) = delete;
 
   // Per-op invocation counters (relaxed — for observation only).
   std::atomic<uint64_t> n_getattr{0};
@@ -52,7 +52,7 @@ class WalFuseOps {
   std::atomic<uint64_t> n_removexattr{0};
 
   // Returns a fuse_operations table whose entries are static trampolines.
-  // Each trampoline casts fuse_get_context()->private_data to WalFuseOps*
+  // Each trampoline casts fuse_get_context()->private_data to FuseOps*
   // and calls the corresponding virtual method.
   static struct fuse_operations make_ops();
 
@@ -106,7 +106,7 @@ class WalFuseOps {
 
       if (flags_->at(fd_).test_and_set())
         throw format("Concurrent access {}", fd_);
-      
+
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 

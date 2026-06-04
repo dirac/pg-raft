@@ -7,8 +7,8 @@
 #include <fuse/fuse.h>
 
 #include "src/process/pg_instance.h"
-#include "src/wal_fuse/wal_fuse.h"
-#include "src/wal_fuse/wal_fuse_ops.h"
+#include "src/wal_fuse/fuse.h"
+#include "src/wal_fuse/fuse_ops.h"
 #include "src/wal_sender/wal_sender_server.h"
 #include "src/process/process.h"
 #include "src/base/logger.h"
@@ -197,16 +197,16 @@ static void flush_wal_accum(const char* fuse_path) {
 
 // ── custom FUSE ops ───────────────────────────────────────────────────────────
 //
-// Identical to WalFuseOpBase for every op except write (accumulates WAL bytes)
+// Identical to FuseOps for every op except write (accumulates WAL bytes)
 // and fsync (validates the accumulated bytes and emits one WalSegment).
 
-class WalSendingOps : public WalFuseOpBase {
+class WalSendingOps : public FuseOps {
  public:
-  using WalFuseOpBase::WalFuseOpBase;
+  using FuseOps::FuseOps;
 
   int op_write(const char* path, const char* buf, size_t size,
                off_t offset, struct fuse_file_info* fi) override {
-    int res = WalFuseOpBase::op_write(path, buf, size, offset, fi);
+    int res = FuseOps::op_write(path, buf, size, offset, fi);
     if (res > 0 && is_wal_segment(path))
       accum_wal_write(path, buf, static_cast<size_t>(res), offset,
                       backing_dir().c_str());
@@ -280,7 +280,7 @@ static void rmrf(const std::string& path) {
 
 // ── test ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
+BOOST_AUTO_TEST_CASE(PrimaryStandbyWithFuse) {
   if (access((kPgBin + "/postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not found at " + kPgBin + "; skipping");
     return;
@@ -315,9 +315,9 @@ BOOST_AUTO_TEST_CASE(PrimaryStandbyWithWalFuse) {
   });
 
   // ── mount FUSE over pg_wal with WAL-capturing ops ───────────────────────────
-  WalFuse fuse(primary_dir + "/pg_wal",
+  Fuse fuse(primary_dir + "/pg_wal",
                std::make_unique<WalSendingOps>(primary_dir + "/pg_raft_wal"));
-  if (!fuse.start()) { cleanup(); BOOST_FAIL("WalFuse start failed"); }
+  if (!fuse.start()) { cleanup(); BOOST_FAIL("Fuse start failed"); }
   if (!wait_for_fuse_mount(primary_dir + "/pg_wal", primary_dir, 5000)) {
     fuse.stop(); cleanup(); BOOST_FAIL("FUSE mount timed out");
   }

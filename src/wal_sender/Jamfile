@@ -15,6 +15,6 @@ exe pg_replication_test
       wal_sender
       ../base//base
       ../process//process
-      ../wal_fuse//wal_fuse
+      ../wal_fuse//fuse
       ../..//external
     ;

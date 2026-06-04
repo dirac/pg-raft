@@ -1,18 +1,18 @@
-#include "src/wal_fuse/wal_fuse.h"
+#include "src/wal_fuse/fuse.h"
 
-WalFuse::WalFuse(std::filesystem::path mount_point, std::unique_ptr<WalFuseOps> ops)
+Fuse::Fuse(std::filesystem::path mount_point, std::unique_ptr<FuseOps> ops)
     : mount_point_(std::move(mount_point)),
       ops_instance_(std::move(ops)),
-      ops_(WalFuseOps::make_ops()) {}
+      ops_(FuseOps::make_ops()) {}
 
-WalFuse::~WalFuse() {
+Fuse::~Fuse() {
   if (mounted_.load())
     stop();
 }
 
-bool WalFuse::start(int timeout_ms) {
+bool Fuse::start(int timeout_ms) {
   struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
-  fuse_opt_add_arg(&args, "wal_fuse");
+  fuse_opt_add_arg(&args, "fuse");
   // noappledouble: suppress ._ resource-fork files in pg_wal.
   fuse_opt_add_arg(&args, "-onoappledouble");
 
@@ -29,7 +29,7 @@ bool WalFuse::start(int timeout_ms) {
     chan_ = nullptr;
     return false;
   }
-  loop_thread_ = std::thread(&WalFuse::run_loop, this);
+  loop_thread_ = std::thread(&Fuse::run_loop, this);
 
   // Wait for the mounting.
   // A FUSE mount is live when the mountpoint's st_dev differs from its
@@ -50,7 +50,7 @@ bool WalFuse::start(int timeout_ms) {
   return false;
 }
 
-void WalFuse::stop() {
+void Fuse::stop() {
   if (!mounted_.load())
     return;
   // Unmounting causes the blocking fuse_loop() in the loop thread to return.
@@ -63,6 +63,6 @@ void WalFuse::stop() {
   mounted_.store(false);
 }
 
-void WalFuse::run_loop() {
+void Fuse::run_loop() {
   fuse_loop_mt(fuse_);
 }
