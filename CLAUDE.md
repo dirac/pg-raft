@@ -28,15 +28,24 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/wal_fuse
 /opt/sparrow/bin/b2 src/net
 
-# Run a specific test target (specify by Jamfile target name)
+# Build + run a specific unit-test target (auto-runs after build)
 /opt/sparrow/bin/b2 src/process//process_test
 /opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
-/opt/sparrow/bin/b2 src/wal_sender//pg_replication_test
 /opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_test
 /opt/sparrow/bin/b2 src/net//async_connect_test
 /opt/sparrow/bin/b2 src/net//data_test
 /opt/sparrow/bin/b2 src/net//connection_test
+
+# pg_replication_test is declared as exe (not unit-test) — b2 only builds it:
+/opt/sparrow/bin/b2 src/wal_sender//pg_replication_test
+# Run it manually:
+./src/wal_sender/bin/clang-darwin-17/debug/cxxstd-latest-iso/pg_replication_test
+
+# Run a single Boost.Test case within a unit-test binary (pass args after --):
+/opt/sparrow/bin/b2 src/process//process_test -- --run_test=TestCaseName
+# Or run the binary directly for full Boost.Test flags (--log_level=all, etc.):
+./src/process/bin/clang-darwin-17/debug/cxxstd-latest-iso/process_test --run_test=TestCaseName
 
 # Build with sanitizers
 /opt/sparrow/bin/b2 address-sanitizer=norecover
@@ -52,9 +61,20 @@ Compiler flags (from `Jamroot.jam`):
 
 Include paths: the repo root (`.`) is on the include path, so headers are included as `#include "src/module/file.h"`.
 
-## Code formatting
+## Environment setup
+
+Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under `/opt/pg_raft/`. To build or rebuild them from source, run the scripts in `external/`:
+
+```bash
+./external/install.sh          # install all dependencies
+./external/install-boost.sh    # or individually
+```
+
+## Code formatting and tooling
 
 `src/.clang-format` configures clang-format (Chromium-based style, 100-column limit, 2-space indent, pointer alignment left). Run `clang-format -i <file>` to format a file in place.
+
+`compile_flags.txt` at the repo root is for clang-tidy and IDE tooling (sets include paths and defines). It is not used by b2.
 
 ## Architecture
 
@@ -97,6 +117,8 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 - **`WalFuse`** — Passthrough FUSE filesystem. Constructor: `WalFuse(mount_point, unique_ptr<WalFuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `WalFuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
 - **`WalFuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
+
+**`src/raft/`** and **`src/proxy/`** — Reserved directories for future modules; currently empty and not referenced in `src/Jamfile.jam`.
 
 ### Data flow (end-to-end)
 
