@@ -2,33 +2,33 @@
 
 #include "src/base/base.h"
 
-class WalFile;
+class WalSegment;
 
 struct WalTracker {
-  virtual void async_publish(shared_ptr<WalFile> file, off_t offset, size_t size);
+  virtual void async_publish(shared_ptr<WalSegment> segment, off_t offset, size_t size);
 
   /// Invoke msync. The args (buff and size) are page aligned.
-  virtual void async_fsync(std::promise<int>   promise,
-                           shared_ptr<WalFile> file,
-                           char const*         buff,
-                           size_t              size);
+  virtual void async_fsync(std::promise<int>      promise,
+                           shared_ptr<WalSegment> segment,
+                           char const*            buff,
+                           size_t                 size);
 };
 
-class WalFile : std::enable_shared_from_this<WalFile> {
+class WalSegment : std::enable_shared_from_this<WalSegment> {
  public:
-  WalFile(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
+  WalSegment(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
       : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_(0), synced_(0), state_() {}
 
-  ~WalFile() {
+  ~WalSegment() {
     ::munmap(map_, kWalSegmentSize);
     ::close(fd_);
   }
 
-  WalFile(WalFile const&)            = delete;
-  WalFile& operator=(WalFile const&) = delete;
+  WalSegment(WalSegment const&)            = delete;
+  WalSegment& operator=(WalSegment const&) = delete;
 
-  WalFile(WalFile&&)            = delete;
-  WalFile& operator=(WalFile&&) = delete;
+  WalSegment(WalSegment&&)            = delete;
+  WalSegment& operator=(WalSegment&&) = delete;
 
   LogSeqNumber const& lsn() const { return lsn_; }
 

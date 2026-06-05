@@ -1,4 +1,4 @@
-#include "src/wal_fuse/wal_file.h"
+#include "src/wal_fuse/wal_segment.h"
 
 namespace {
 uint16 xlp_magic(char const* p) {
@@ -35,7 +35,7 @@ uint32_t diff(char const* s, char const* e) {
 
 }  // namespace
 
-std::tuple<off_t, size_t> WalFile::WalState::update(char const* ptr, size_t size, off_t off) {
+std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t size, off_t off) {
   assert(!(curr_ < off));
   assert(!((off + size) <= curr_));
 
@@ -79,7 +79,7 @@ std::tuple<off_t, size_t> WalFile::WalState::update(char const* ptr, size_t size
   return {std::exchange(curr_, next), sz + hsize};
 }
 
-void WalFile::write(char const* buf, size_t size, off_t off) {
+void WalSegment::write(char const* buf, size_t size, off_t off) {
   if (!next_) [[unlikely]] {
     size_t bytes = 0;
     do {
@@ -115,7 +115,7 @@ void WalFile::write(char const* buf, size_t size, off_t off) {
   tracker_.async_publish(shared_from_this(), begin, (next_ - begin));
 }
 
-int WalFile::fsync() {
+int WalSegment::fsync() {
   // page aligned size.
   auto size = (((next_ - synced_) + (getpagesize() - 1)) / getpagesize()) * getpagesize();
 
@@ -131,43 +131,43 @@ int WalFile::fsync() {
   return 0;
 }
 
-uint32_t WalFile::offset(char const* p) const {
+uint32_t WalSegment::offset(char const* p) const {
   return diff(map_, p);
 }
 
-bool WalFile::page_start(char const* p) const {
+bool WalSegment::page_start(char const* p) const {
   return (offset(p) % kWalBlockSize) == 0;
 }
 
-bool WalFile::first_page(char const* p) const {
+bool WalSegment::first_page(char const* p) const {
   return offset(p) < kWalBlockSize;
 }
 
-uint32_t WalFile::remaining_space(char const* p) const {
+uint32_t WalSegment::remaining_space(char const* p) const {
   assert(page_start(p) == false);
   return kWalBlockSize - (offset(p) % kWalBlockSize);
 }
 
-uint16_t WalFile::xlp_magic(unsigned page) const {
+uint16_t WalSegment::xlp_magic(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize);
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
 }
 
 /// Flags (first page, continuation, etc.)
-uint16_t WalFile::xlp_info(unsigned page) const {
+uint16_t WalSegment::xlp_info(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize) + 2;
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
 }
 
 /// Remaining bytes of a spanning record
-uint32_t WalFile::xlp_rem_len(unsigned page) const {
+uint32_t WalSegment::xlp_rem_len(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize) + 16;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
 /// LSN of this page's start
-uint64_t WalFile::xlp_pageaddr(unsigned page) const {
+uint64_t WalSegment::xlp_pageaddr(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize) + 8;
   return (static_cast<uint64_t>(p[0]) << 0) | (static_cast<uint64_t>(p[1]) << 8) |
          (static_cast<uint64_t>(p[2]) << 16) | (static_cast<uint64_t>(p[3]) << 24) |
@@ -175,10 +175,10 @@ uint64_t WalFile::xlp_pageaddr(unsigned page) const {
          (static_cast<uint64_t>(p[5]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
 }
 
-void WalTracker::async_publish(shared_ptr<WalFile>, off_t, size_t) {}
+void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}
 
 void WalTracker::async_fsync(std::promise<int> promise,
-                             shared_ptr<WalFile>,
+                             shared_ptr<WalSegment>,
                              char const* buff,
                              size_t      size);
 

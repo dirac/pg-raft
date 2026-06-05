@@ -46,8 +46,8 @@ std::optional<LogSeqNumber> timeline_and_lsn(char const* path) {
   return LogSeqNumber{.timeline = timeline, .lsn = lsn};
 }
 
-void set_wal_file(struct fuse_file_info* fi, WalFile* file) {
-  uint64_t fh = reinterpret_cast<uint64_t>(file);
+void set_wal_segment(struct fuse_file_info* fi, WalSegment* segment) {
+  uint64_t fh = reinterpret_cast<uint64_t>(segment);
   assert((fh & 0x1) == 0x0);
 
   if (fh & (u8(0x1) << 63))
@@ -57,7 +57,7 @@ void set_wal_file(struct fuse_file_info* fi, WalFile* file) {
   fi->fh = fh;
 }
 
-WalFile* get_wal_file(struct fuse_file_info* fi) {
+WalSegment* get_wal_segment(struct fuse_file_info* fi) {
   uint64_t fh = fi->fh;
 
   if (!(fh & (u8(0x1) << 63)))
@@ -68,7 +68,7 @@ WalFile* get_wal_file(struct fuse_file_info* fi) {
   else
     fh = fh ^ (u8(0x1) << 63);
 
-  return reinterpret_cast<WalFile*>(fh);
+  return reinterpret_cast<WalSegment*>(fh);
 }
 }  // namespace
 
@@ -77,8 +77,8 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
     n_open.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "open {}, lsn={}", path, *lsn);
 
-    auto pos = files_.find(*lsn);
-    if (pos == files_.end()) {
+    auto pos = segments_.find(*lsn);
+    if (pos == segments_.end()) {
       int fd = ::open(real_path(path).c_str(), fi->flags);
       if (fd == -1)
         return -errno;
@@ -90,23 +90,25 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
         return -err;
       }
 
-      pos = files_.emplace(*lsn, std::make_tuple(0U, make_shared<WalFile>(tracker_, *lsn, fd, map)))
-                .first;
+      pos =
+          segments_
+              .emplace(*lsn, std::make_tuple(0U, make_shared<WalSegment>(tracker_, *lsn, fd, map)))
+              .first;
     }
     ++std::get<0>(pos->second);
-    set_wal_file(fi, std::get<shared_ptr<WalFile>>(pos->second).get());
+    set_wal_segment(fi, std::get<shared_ptr<WalSegment>>(pos->second).get());
   } else
     return FuseOps::op_open(path, fi);
 }
 
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
-  if (auto* file = get_wal_file(fi); file) {
+  if (auto* segment = get_wal_segment(fi); segment) {
     n_release.fetch_add(1, std::memory_order_relaxed);
-    log(DEBUG, "release {}, lsn={}", path, file->lsn());
+    log(DEBUG, "release {}, lsn={}", path, segment->lsn());
 
-    if (auto pos = files_.find(file->lsn()); pos != files_.end()) {
+    if (auto pos = segments_.find(segment->lsn()); pos != segments_.end()) {
       if (--std::get<0>(pos->second) == 0)
-        files_.erase(pos);
+        segments_.erase(pos);
     }
   } else
     return FuseOps::op_release(path, fi);
@@ -117,11 +119,11 @@ int WalFuseOps::op_write(char const*            path,
                          size_t                 size,
                          off_t                  offset,
                          struct fuse_file_info* fi) {
-  if (auto* file = get_wal_file(fi); file) {
+  if (auto* segment = get_wal_segment(fi); segment) {
     n_write.fetch_add(1, std::memory_order_relaxed);
-    log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, file->lsn());
+    log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
 
-    file->write(buf, size, offset);
+    segment->write(buf, size, offset);
     return 0;
   } else
     return FuseOps::op_write(path, fi);
@@ -132,6 +134,6 @@ int WalFuseOps::op_read(char const*            path,
                         size_t                 size,
                         off_t                  offset,
                         struct fuse_file_info* fi) {
-  if (auto* file = get_wal_file(fi); file) {
+  if (auto* segment = get_wal_segment(fi); segment) {
   }
 }

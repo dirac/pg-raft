@@ -1,7 +1,7 @@
 #pragma once
 
 #include "src/wal_fuse/fuse_ops.h"
-#include "src/wal_fuse/wal_file.h"
+#include "src/wal_fuse/wal_segment.h"
 
 class WalFuseOps : public FuseOps {
   WalFuseOps(WalTracker& tracker) : tracker_(tracker) {}
@@ -15,5 +15,5 @@ class WalFuseOps : public FuseOps {
 
  private:
   WalTracker&                                                     tracker_;
-  map<LogSeqNumber, std::tuple<unsigned, shared_ptr<WalSegment>>> files_;
+  map<LogSeqNumber, std::tuple<unsigned, shared_ptr<WalSegment>>> segments_;
 };
