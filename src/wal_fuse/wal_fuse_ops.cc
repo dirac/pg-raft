@@ -52,6 +52,8 @@ void set_wal_file(struct fuse_file_info* fi, WalFile* file) {
 
   if (fh & (0x1 << 63))
     fh &= 0x1;
+  else
+    fh &= (0x1 << 63);
   fi->fh = fh;
 }
 
@@ -88,7 +90,8 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
         return -err;
       }
 
-      pos = files_.emplace(*lsn, std::make_tuple(0, make_shared<WalFile>(*lsn))).first;
+      pos = files_.emplace(*lsn, std::make_tuple(0, make_shared<WalFile>(tracker_, *lsn, fd, map)))
+                .first;
     }
     ++std::get<0>(pos->second);
     set_wal_file(fi, std::get<1>(pos->second).get());
@@ -99,9 +102,9 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
   if (auto* file = get_wal_file(fi); file) {
     n_release.fetch_add(1, std::memory_order_relaxed);
-    log(DEBUG, "release {}, lsn={}", path, file->lsn);
+    log(DEBUG, "release {}, lsn={}", path, file->lsn());
 
-    if (auto pos = files_.find(file->lsn); pos != file_.end()) {
+    if (auto pos = files_.find(file->lsn()); pos != files_.end()) {
       if (--std::get<0>(pos->second) == 0)
         files_.erase(pos);
     }
@@ -116,7 +119,7 @@ int WalFuseOps::op_write(char const*            path,
                          struct fuse_file_info* fi) {
   if (auto* file = get_wal_file(fi); file) {
     n_write.fetch_add(1, std::memory_order_relaxed);
-    log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, file->lsn);
+    log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, file->lsn());
 
     file->write(buf, size, offset);
     return 0;

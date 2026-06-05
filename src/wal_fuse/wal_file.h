@@ -17,11 +17,11 @@ struct WalTracker {
 class WalFile : std::enable_shared_from_this<WalFile> {
  public:
   WalFile(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
-      : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map) {}
+      : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_ (0), synced_(0), state_() {}
 
   ~WalFile() {
-    ::unmmap(map);
-    ::close(fd);
+    ::unmmap(map_, kWalSegmentSize);
+    ::close(fd_);
   }
 
   WalFile(WalFile const&)            = delete;
@@ -75,10 +75,11 @@ class WalFile : std::enable_shared_from_this<WalFile> {
   uint64_t xlp_pageaddr(unsigned page) const;
 
  private:
-  WalTracker& const  tracker_;
+  WalTracker&        tracker_;
   LogSeqNumber const lsn_;
   int const          fd_;
   char* const        map_;
-  char const*        synced_;
+  off_t              next_;
+  off_t              synced_;
   WalState           state_;
 };

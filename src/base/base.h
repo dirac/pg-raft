@@ -42,6 +42,16 @@ struct LogSeqNumber {
   uint32_t timeline;
   uint32_t lsn;
 
+  bool operator<(LogSeqNumber const& that) const {
+    return timeline == that.timeline ? lsn < that.lsn : timeline < that.timeline;
+  }
+  bool operator>(LogSeqNumber const& that) const {
+    return timeline == that.timeline ? lsn > that.lsn : timeline > that.timeline;
+  }
+  bool operator==(LogSeqNumber const& that) const {
+    return timeline == that.timeline && lsn == that.lsn;
+  }
+
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
     ar & timeline;

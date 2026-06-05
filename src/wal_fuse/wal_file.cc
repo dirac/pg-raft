@@ -100,8 +100,8 @@ void WalFile::write(char const* buf, size_t size, off_t off) {
   assert(std::memcmp(map_ + off, buf, (next_ - off)) == 0);
 
   // forward the buff for already processed bytes.
-  buf  = buf + (next_ - offset);
-  size = size - (next_ - offset);
+  buf  = buf + (next_ - off);
+  size = size - (next_ - off);
   off  = next_;
 
   // bytes with data.
@@ -113,9 +113,7 @@ void WalFile::write(char const* buf, size_t size, off_t off) {
   } while (bytes);
 
   std::memcpy(map_ + begin, buf, (next_ - begin));
-  tracker_.async_publish(shared_from_this(), start, (next_ - start));
-
-  return 0;
+  tracker_.async_publish(shared_from_this(), begin, (next_ - begin));
 }
 
 int WalFile::fsync() {
@@ -177,4 +175,3 @@ uint64_t WalFile::xlp_pageaddr(unsigned page) const {
          (static_cast<uint64_t>(p[4]) << 32) | (static_cast<uint64_t>(p[5]) << 40) |
          (static_cast<uint64_t>(p[5]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
 }
-
