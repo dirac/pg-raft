@@ -38,6 +38,17 @@ inline Result<void> ok() {
   return Result<void>(std::expected<void, std::error_code>{});
 }
 
+struct LogSeqNumber {
+  uint32_t timeline;
+  uint32_t lsn;
+
+  template <typename Archive>
+  void serialize(Archive& ar, unsigned int /* version */) {
+    ar & timeline;
+    ar & lsn;
+  }
+};
+
 std::error_code system_error_code(int err);
 
 bool is_system_error_code(std::error_code const& ec);

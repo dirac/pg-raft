@@ -18,4 +18,19 @@ struct std::formatter<std::filesystem::path> {
   }
 };
 
+template <>
+struct std::formatter<LogSeqNumber> {
+  constexpr auto parse(std::format_parse_context& ctx) {
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+      throw std::format_error("Invalid format args for LogSeqNumber.");
+    }
+    return it;
+  }
+
+  auto format(LogSeqNumber const& p, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{}/{}", p.timeline, p.lsn);
+  }
+};
+
 #endif
