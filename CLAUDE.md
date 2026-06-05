@@ -116,11 +116,11 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
-- **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
+- **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. All ops expose `std::atomic<uint64_t> n_<opname>` counters (relaxed, observation-only) for testing. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
 
-- **`WalFuseOps`** (in `wal_fuse_ops.h/cc`) — `FuseOps` subclass that identifies WAL segment files by their 24-hex-char filename (TLI+LOGID+LOGSEG), memory-maps them via `mmap`, and routes writes/reads through `WalFile` objects stored per `LogSeqNumber`. Non-WAL files fall through to the `FuseOps` passthrough. **Not yet wired into the `fuse` lib in the Jamfile** — `wal_fuse_ops.cc` and `wal_file.cc` are currently outside the build.
+- **`WalFuseOps`** (in `wal_fuse_ops.h/cc`) — `FuseOps` subclass that identifies WAL segment files by their 24-hex-char filename (TLI+LOGID+LOGSEG), memory-maps them via `mmap`, and routes writes/reads through `WalSegment` objects stored per `LogSeqNumber` in `segments_`. Non-WAL files fall through to the `FuseOps` passthrough. Stores a raw tagged `WalSegment*` in `fuse_file_info::fh` (bit 63 set = WAL file) to avoid a map lookup on every I/O call.
 
-- **`WalFile`** (in `wal_file.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer and a `WalState` that tracks the parse cursor (completed XLogRecord bytes). `write()` advances the cursor and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result.
+- **`WalSegment`** (in `wal_segment.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer (`map_`), an fd, parse cursor (`next_`), sync cursor (`synced_`), and a `WalState` that tracks completed XLogRecord bytes. `write()` advances the cursor via `WalState::update()` (parses XLog page and record headers inline) and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result via `std::future`.
 
 - **`WalTracker`** — Abstract interface (virtual base) that external code implements to receive WAL events. `async_publish(file, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, file, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done. The caller (e.g. the raft layer) supplies the concrete `WalTracker` to `WalFuseOps`.
 
@@ -155,12 +155,18 @@ The accumulation and validation logic lives in the test (`pg_replication_test.cc
 ### Key data types
 
 ```cpp
+// In src/base/base.h
+struct LogSeqNumber { uint32_t timeline; uint64_t lsn; };
+// lsn encoding: high 32 bits = logid (segment file high word), low 32 bits = logseg * kWalSegmentSize
+
 // In src/wal_sender/wal_sender.h
 struct WalSegment { uint64_t start_lsn; std::vector<uint8_t> data; };
 struct StandbyStatus { uint64_t written_lsn, flushed_lsn, applied_lsn; };
 ```
 
-LSNs are `uint64_t` (high 32 bits = segment number, low 32 bits = offset). PostgreSQL timestamps are microseconds since 2000-01-01 (not Unix epoch).
+Note: `src/wal_fuse/wal_segment.h` defines a *different* `WalSegment` class (mmap'd WAL file) from `src/wal_sender/wal_sender.h`'s `WalSegment` struct (byte buffer + LSN for streaming). These are unrelated types in different namespaces/modules.
+
+LSNs in `wal_sender` are `uint64_t` (high 32 bits = segment number, low 32 bits = offset). PostgreSQL timestamps are microseconds since 2000-01-01 (not Unix epoch).
 
 ### FUSE include requirements
 

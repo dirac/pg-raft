@@ -76,8 +76,8 @@ WalSegment* get_wal_segment(struct fuse_file_info* fi) {
 
 int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
   if (auto lsn = timeline_and_lsn(path); lsn) {
-    n_open.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "open {}, lsn={}", path, *lsn);
+    n_open.fetch_add(1, std::memory_order_relaxed);
 
     auto pos = segments_.find(*lsn);
     if (pos == segments_.end()) {
@@ -106,8 +106,8 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
 
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    n_release.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "release {}, lsn={}", path, segment->lsn());
+    n_release.fetch_add(1, std::memory_order_relaxed);
 
     if (auto pos = segments_.find(segment->lsn()); pos != segments_.end()) {
       if (--std::get<0>(pos->second) == 0)
@@ -124,8 +124,8 @@ int WalFuseOps::op_write(char const*            path,
                          off_t                  offset,
                          struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    n_write.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
+    n_write.fetch_add(1, std::memory_order_relaxed);
 
     segment->write(buf, size, offset);
     return 0;
@@ -135,8 +135,9 @@ int WalFuseOps::op_write(char const*            path,
 
 int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    n_flush.fetch_add(1, std::memory_order_relaxed);
     log(INFO, "flush {}, lsn={}", path, segment->lsn());
+    n_flush.fetch_add(1, std::memory_order_relaxed);
+
     return 0;
   } else
     return FuseOps::op_flush(path, fi);
@@ -144,8 +145,9 @@ int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
 
 int WalFuseOps::op_fsync(char const* path, int datasync, struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    n_fsync.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "fsync {}, lsn={}", path, segment->lsn());
+    n_fsync.fetch_add(1, std::memory_order_relaxed);
+
     return segment->fsync();
   } else
     return FuseOps::op_fsync(path, datasync, fi);
@@ -157,8 +159,9 @@ int WalFuseOps::op_read(char const*            path,
                         off_t                  offset,
                         struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    n_read.fetch_add(1, std::memory_order_relaxed);
     log(DEBUG, "read {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
+    n_read.fetch_add(1, std::memory_order_relaxed);
+
     segment->read(buf, size, offset);
     return 0;
   } else
