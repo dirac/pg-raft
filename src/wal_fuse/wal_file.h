@@ -17,10 +17,10 @@ struct WalTracker {
 class WalFile : std::enable_shared_from_this<WalFile> {
  public:
   WalFile(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
-      : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_ (0), synced_(0), state_() {}
+      : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_(0), synced_(0), state_() {}
 
   ~WalFile() {
-    ::unmmap(map_, kWalSegmentSize);
+    ::munmap(map_, kWalSegmentSize);
     ::close(fd_);
   }
 

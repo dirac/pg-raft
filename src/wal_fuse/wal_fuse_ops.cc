@@ -50,25 +50,25 @@ void set_wal_file(struct fuse_file_info* fi, WalFile* file) {
   uint64_t fh = reinterpret_cast<uint64_t>(file);
   assert((fh & 0x1) == 0x0);
 
-  if (fh & (0x1 << 63))
-    fh &= 0x1;
+  if (fh & (u8(0x1) << 63))
+    fh |= u8(0x1);
   else
-    fh &= (0x1 << 63);
+    fh |= (u8(0x1) << 63);
   fi->fh = fh;
 }
 
 WalFile* get_wal_file(struct fuse_file_info* fi) {
   uint64_t fh = fi->fh;
 
-  if (!(fh & (0x1 << 63)))
+  if (!(fh & (u8(0x1) << 63)))
     return nullptr;
 
-  if (fh & 0x1)
-    fh = fh ^ 0x1;
+  if (fh & u8(0x1))
+    fh = fh ^ u8(0x1);
   else
-    fh = fh ^ (0x1 << 63);
+    fh = fh ^ (u8(0x1) << 63);
 
-  return reinterpret_cast<struct fuse_file_info*>(fh);
+  return reinterpret_cast<WalFile*>(fh);
 }
 }  // namespace
 
@@ -90,11 +90,11 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
         return -err;
       }
 
-      pos = files_.emplace(*lsn, std::make_tuple(0, make_shared<WalFile>(tracker_, *lsn, fd, map)))
+      pos = files_.emplace(*lsn, std::make_tuple(0U, make_shared<WalFile>(tracker_, *lsn, fd, map)))
                 .first;
     }
     ++std::get<0>(pos->second);
-    set_wal_file(fi, std::get<1>(pos->second).get());
+    set_wal_file(fi, std::get<shared_ptr<WalFile>>(pos->second).get());
   } else
     return FuseOps::op_open(path, fi);
 }

@@ -1,5 +1,3 @@
-#pragma once
-
 #include "src/wal_fuse/wal_file.h"
 
 namespace {
@@ -8,6 +6,7 @@ uint16 xlp_magic(char const* p) {
 }
 
 uint32 xlp_rem_len(char const* p) {
+  p += 16;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
@@ -123,7 +122,7 @@ int WalFile::fsync() {
   auto promise = std::promise<int>{};
   auto future  = promise.get_future();
 
-  tracker_.async_fsync(std::move(promise), shared_from_this(), synced_, size);
+  tracker_.async_fsync(std::move(promise), shared_from_this(), map_ + synced_, size);
 
   if (auto r = future.get(); !r)
     return r;
@@ -174,4 +173,18 @@ uint64_t WalFile::xlp_pageaddr(unsigned page) const {
          (static_cast<uint64_t>(p[2]) << 16) | (static_cast<uint64_t>(p[3]) << 24) |
          (static_cast<uint64_t>(p[4]) << 32) | (static_cast<uint64_t>(p[5]) << 40) |
          (static_cast<uint64_t>(p[5]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
+}
+
+void WalTracker::async_publish(shared_ptr<WalFile>, off_t, size_t) {}
+
+void WalTracker::async_fsync(std::promise<int> promise,
+                             shared_ptr<WalFile>,
+                             char const* buff,
+                             size_t      size);
+
+{
+  if (::msync(buff, size, MSYNC))
+    promise.set_value(-errno);
+  else
+    promise.set_value(0);
 }

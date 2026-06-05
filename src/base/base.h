@@ -40,7 +40,7 @@ inline Result<void> ok() {
 
 struct LogSeqNumber {
   uint32_t timeline;
-  uint32_t lsn;
+  uint64_t lsn;
 
   bool operator<(LogSeqNumber const& that) const {
     return timeline == that.timeline ? lsn < that.lsn : timeline < that.timeline;
