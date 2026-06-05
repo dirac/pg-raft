@@ -1,0 +1,358 @@
+#define BOOST_TEST_MODULE WalFuseOpsTest
+
+#include "src/wal_fuse/wal_fuse_ops.h"
+
+#include "src/base/testing.h"
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// FUSE paths for a WAL segment (TLI=1, LOGID=0, LOGSEG=1) and a plain file.
+static constexpr char kWalPath[]  = "/000000010000000000000001";
+static constexpr char kTextPath[] = "/readme.txt";
+
+// Minimal first-page layout (40-byte XLogLongPageHeader + one 24-byte record):
+//   [0..1]   xlp_magic = 0xD116 (little-endian)
+//   [2..15]  zeros (xlp_info, xlp_tli)
+//   [16..19] xlp_rem_len = 0 (no continuation from prior segment)
+//   [20..39] zeros (xlp_seg_size, xlp_xlog_blcksz, padding)
+//   [40..43] xl_tot_len = 24 (one minimal XLogRecord, already 8-byte aligned)
+//   [44..]   zeros
+//
+// WalState::update() consumes header(40) + record(24) = 64 bytes and then
+// hits zeros at offset 64, which round_up(xl_tot_len=0) = 0, ending the loop.
+// async_publish is therefore called with offset=0, size=64.
+static void fill_wal_page(char* page) {
+  memset(page, 0, kWalBlockSize);
+  page[0] = 0x16;
+  page[1] = 0xD1;  // xlp_magic = 0xD116 LE
+  uint32_t tot_len = 24;
+  memcpy(page + 40, &tot_len, 4);  // xl_tot_len of first XLogRecord
+}
+
+// Create and pre-allocate a 16 MiB file; return its fd (caller owns).
+static int alloc_seg(std::filesystem::path const& path) {
+  int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
+  if (fd < 0)
+    return -1;
+  if (::ftruncate(fd, kWalSegmentSize) != 0) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+struct RecordingTracker : public WalTracker {
+  struct Pub {
+    off_t  offset;
+    size_t size;
+  };
+  struct Syn {
+    char*  buf;
+    size_t size;
+  };
+
+  std::vector<Pub> publishes;
+  std::vector<Syn> fsyncs;
+
+  void async_publish(shared_ptr<WalSegment>, off_t off, size_t sz) override {
+    publishes.push_back({off, sz});
+  }
+  void async_fsync(std::promise<int> p, shared_ptr<WalSegment>, char* b, size_t s) override {
+    fsyncs.push_back({b, s});
+    p.set_value(0);
+  }
+};
+
+// Open a fresh mmap'd segment, return (fd, map). Caller must use make_shared<WalSegment>
+// which takes ownership and will close+unmap on destruction.
+static std::pair<int, void*> open_seg_mmap(std::filesystem::path const& path) {
+  int fd = alloc_seg(path);
+  if (fd < 0)
+    return {-1, MAP_FAILED};
+  void* map = ::mmap(nullptr, kWalSegmentSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (map == MAP_FAILED) {
+    ::close(fd);
+    return {-1, MAP_FAILED};
+  }
+  return {fd, map};
+}
+
+// ── WalSegment ────────────────────────────────────────────────────────────────
+
+BOOST_AUTO_TEST_CASE(WalSegmentZeroPageNoUsefulData) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  char page[kWalBlockSize]{};  // all zeros — xlp_magic == 0
+  seg->write(page, kWalBlockSize, 0);
+
+  // No valid WAL bytes: any publish must carry size 0.
+  for (auto const& p : tracker.publishes)
+    BOOST_CHECK_EQUAL(p.size, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentWriteOneRecord) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  seg->write(page, kWalBlockSize, 0);
+
+  // header(40) + record(24) = 64 bytes from offset 0.
+  BOOST_REQUIRE_EQUAL(tracker.publishes.size(), 1u);
+  BOOST_CHECK_EQUAL(tracker.publishes[0].offset, 0);
+  BOOST_CHECK_EQUAL(tracker.publishes[0].size, 64u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentFsyncCallsTracker) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  seg->write(page, kWalBlockSize, 0);
+
+  BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
+
+  BOOST_REQUIRE_EQUAL(tracker.fsyncs.size(), 1u);
+  // Size is rounded up to the OS page size.
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size % static_cast<size_t>(getpagesize()), 0u);
+  BOOST_CHECK_GT(tracker.fsyncs[0].size, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentFsyncWithoutWriteIsNoop) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  // No write → next_==synced_==0 → dirty range size rounds to 0.
+  BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
+  // async_fsync is still invoked (with size 0 / empty range).
+  BOOST_CHECK_EQUAL(tracker.fsyncs.size(), 1u);
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, 0u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentRead) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  seg->write(page, kWalBlockSize, 0);
+
+  char buf[2]{};
+  seg->read(buf, 2, 0);
+  BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[0]), 0x16u);
+  BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[1]), 0xD1u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentReadAtOffset) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  seg->write(page, kWalBlockSize, 0);
+
+  // xl_tot_len is at offset 40 in the mmap.
+  char buf[4]{};
+  seg->read(buf, 4, 40);
+  uint32_t tot_len{};
+  memcpy(&tot_len, buf, 4);
+  BOOST_CHECK_EQUAL(tot_len, 24u);
+}
+
+BOOST_AUTO_TEST_CASE(WalSegmentLsnAccessor) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+
+  auto [fd, map] = open_seg_mmap(tmp() / "seg");
+  BOOST_REQUIRE_GE(fd, 0);
+
+  LogSeqNumber lsn{3, 42};
+  auto         seg = make_shared<WalSegment>(tracker, lsn, fd, map);
+  BOOST_CHECK_EQUAL(seg->lsn().timeline, 3u);
+  BOOST_CHECK_EQUAL(seg->lsn().lsn, 42u);
+}
+
+// ── WalFuseOps ────────────────────────────────────────────────────────────────
+
+// Shared fixture: backing dir + one pre-allocated WAL segment file.
+struct WalOpsFixture {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+  std::filesystem::path backing;
+
+  WalOpsFixture() : backing(tmp() / "backing") {
+    std::filesystem::create_directory(backing);
+    // kWalPath + 1 strips the leading '/'.
+    int fd = alloc_seg(backing / (kWalPath + 1));
+    BOOST_REQUIRE_GE(fd, 0);
+    ::close(fd);
+  }
+};
+
+BOOST_FIXTURE_TEST_CASE(NonWalFilePassesThrough, WalOpsFixture) {
+  int tfd = ::open((backing / (kTextPath + 1)).c_str(), O_WRONLY | O_CREAT, 0644);
+  BOOST_REQUIRE_GE(tfd, 0);
+  ::close(tfd);
+
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDONLY;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kTextPath, &fi), 0);
+
+  // FuseOps base-class passthrough: n_open is incremented there, no WAL tracking.
+  BOOST_CHECK_EQUAL(ops.n_open.load(), 1u);
+  BOOST_CHECK(tracker.publishes.empty());
+
+  ::close(static_cast<int>(fi.fh));
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileOpenIncreasesCounter, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+  BOOST_CHECK_EQUAL(ops.n_open.load(), 1u);
+
+  ops.op_release(kWalPath, &fi);
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileWritePublishes, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
+
+  BOOST_REQUIRE_EQUAL(tracker.publishes.size(), 1u);
+  BOOST_CHECK_EQUAL(tracker.publishes[0].offset, 0);
+  BOOST_CHECK_EQUAL(tracker.publishes[0].size, 64u);
+  BOOST_CHECK_EQUAL(ops.n_write.load(), 1u);
+
+  ops.op_release(kWalPath, &fi);
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileFsyncCallsTracker, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
+
+  BOOST_REQUIRE_EQUAL(ops.op_fsync(kWalPath, 0, &fi), 0);
+  BOOST_REQUIRE_EQUAL(tracker.fsyncs.size(), 1u);
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size % static_cast<size_t>(getpagesize()), 0u);
+  BOOST_CHECK_EQUAL(ops.n_fsync.load(), 1u);
+
+  ops.op_release(kWalPath, &fi);
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileFlushIsNoop, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+  BOOST_REQUIRE_EQUAL(ops.op_flush(kWalPath, &fi), 0);
+  BOOST_CHECK_EQUAL(ops.n_flush.load(), 1u);
+  BOOST_CHECK(tracker.publishes.empty());
+
+  ops.op_release(kWalPath, &fi);
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileRead, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
+
+  char buf[2]{};
+  ops.op_read(kWalPath, buf, 2, 0, &fi);
+  BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[0]), 0x16u);
+  BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[1]), 0xD1u);
+  BOOST_CHECK_EQUAL(ops.n_read.load(), 1u);
+
+  ops.op_release(kWalPath, &fi);
+}
+
+BOOST_FIXTURE_TEST_CASE(WalFileReleaseCountsAndSucceeds, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
+  BOOST_REQUIRE_EQUAL(ops.op_release(kWalPath, &fi), 0);
+  BOOST_CHECK_EQUAL(ops.n_release.load(), 1u);
+}
+
+BOOST_FIXTURE_TEST_CASE(TwoOpensShareSegment, WalOpsFixture) {
+  WalFuseOps ops(tracker, backing);
+
+  struct fuse_file_info fi1{}, fi2{};
+  fi1.flags = fi2.flags = O_RDWR;
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi1), 0);
+  BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi2), 0);
+  BOOST_CHECK_EQUAL(ops.n_open.load(), 2u);
+
+  // Write through first handle, read back through second — shared mmap.
+  char page[kWalBlockSize]{};
+  fill_wal_page(page);
+  ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi1);
+
+  char buf[2]{};
+  ops.op_read(kWalPath, buf, 2, 0, &fi2);
+  BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[0]), 0x16u);
+
+  // One publish regardless of how many handles are open.
+  BOOST_CHECK_EQUAL(tracker.publishes.size(), 1u);
+
+  ops.op_release(kWalPath, &fi1);
+  ops.op_release(kWalPath, &fi2);
+}

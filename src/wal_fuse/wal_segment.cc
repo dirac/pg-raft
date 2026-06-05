@@ -100,7 +100,7 @@ void WalSegment::write(char const* buf, size_t size, off_t off) {
   assert(std::memcmp(map_ + off, buf, u8(next_ - off)) == 0);
 
   // forward the buff for already processed bytes.
-  assert(next_ > off);
+  assert(next_ >= off);
 
   buf  = buf + (next_ - off);
   size = size - u8(next_ - off);

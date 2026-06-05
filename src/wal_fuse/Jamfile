@@ -22,3 +22,9 @@ unit-test fuse_test
     libs
     ../base//testing
   ;
+
+unit-test wal_fuse_ops_test
+  : wal_fuse_ops_test.cc
+    libs
+    ../base//testing
+  ;

@@ -4,6 +4,7 @@
 #include "src/wal_fuse/wal_segment.h"
 
 class WalFuseOps : public FuseOps {
+ public:
   WalFuseOps(WalTracker& tracker, std::filesystem::path backing_dir)
       : FuseOps(std::move(backing_dir)), tracker_(tracker) {}
 
