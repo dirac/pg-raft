@@ -26,9 +26,6 @@ uint32_t block_space(off_t offset) {
   return u4(kWalBlockSize - (offset % kWalBlockSize));
 }
 
-uint32_t diff(char const* s, char const* e) {
-  return u4(reinterpret_cast<uint64_t>(e) - reinterpret_cast<uint64_t>(s));
-}
 template <uint32_t n = 8>
 uint32_t round_up(uint32_t len) {
   return ((len + n - 1) / n) * n;
