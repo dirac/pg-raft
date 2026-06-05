@@ -32,7 +32,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/process//process_test
 /opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
-/opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_test
+/opt/sparrow/bin/b2 src/wal_fuse//fuse_test
 /opt/sparrow/bin/b2 src/net//async_connect_test
 /opt/sparrow/bin/b2 src/net//data_test
 /opt/sparrow/bin/b2 src/net//connection_test
@@ -112,11 +112,17 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`WalSenderServer`** — TCP accept loop. Binds a port, spawns a thread per connection, and calls a user-supplied `SenderCallback` with each new `WalSender`. Supports port `0` for OS-assigned ephemeral ports (used in tests).
 
-**`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Two primary classes:
+**`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Primary classes:
 
 - **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
 - **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. Tests supply a derived class (e.g. `WalSendingOps` in `pg_replication_test.cc`) that overrides `op_write` and `op_fsync` to capture WAL.
+
+- **`WalFuseOps`** (in `wal_fuse_ops.h/cc`) — `FuseOps` subclass that identifies WAL segment files by their 24-hex-char filename (TLI+LOGID+LOGSEG), memory-maps them via `mmap`, and routes writes/reads through `WalFile` objects stored per `LogSeqNumber`. Non-WAL files fall through to the `FuseOps` passthrough. **Not yet wired into the `fuse` lib in the Jamfile** — `wal_fuse_ops.cc` and `wal_file.cc` are currently outside the build.
+
+- **`WalFile`** (in `wal_file.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer and a `WalState` that tracks the parse cursor (completed XLogRecord bytes). `write()` advances the cursor and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result.
+
+- **`WalTracker`** — Abstract interface (virtual base) that external code implements to receive WAL events. `async_publish(file, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, file, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done. The caller (e.g. the raft layer) supplies the concrete `WalTracker` to `WalFuseOps`.
 
 **`src/raft/`** and **`src/proxy/`** — Reserved directories for future modules; currently empty and not referenced in `src/Jamfile.jam`.
 
