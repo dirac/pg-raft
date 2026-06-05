@@ -7,6 +7,8 @@ alias deps
 lib fuse
   : fuse.cc
     fuse_ops.cc
+    wal_segment.cc
+    wal_fuse_ops.cc
     deps
   ;
 

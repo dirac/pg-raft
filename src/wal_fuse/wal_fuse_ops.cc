@@ -129,11 +129,34 @@ int WalFuseOps::op_write(char const*            path,
     return FuseOps::op_write(path, fi);
 }
 
+int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
+  if (auto* segment = get_wal_segment(fi); segment) {
+    n_flush.fetch_add(1, std::memory_order_relaxed);
+    log(INFO, "flush {}, lsn={}", path, segment->lsn());
+    return 0;
+  } else
+    return FuseOps::op_flush(path, fi);
+}
+
+int WalFuseOps::op_fsync(char const* path, int datasync, struct fuse_file_info* fi) {
+  if (auto* segment = get_wal_segment(fi); segment) {
+    n_fsync.fetch_add(1, std::memory_order_relaxed);
+    log(DEBUG, "fsync {}, lsn={}", path, segment->lsn());
+    return segment->fsync();
+  } else
+    return FuseOps::op_fsync(path, datasync, fi);
+}
+
 int WalFuseOps::op_read(char const*            path,
                         char*                  buf,
                         size_t                 size,
                         off_t                  offset,
                         struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-  }
+    n_read.fetch_add(1, std::memory_order_relaxed);
+    log(DEBUG, "read {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
+    segment->read(buf, size, offset);
+    return 0;
+  } else
+    return FuseOps::op_read(path, buf, size, offset, fi);
 }

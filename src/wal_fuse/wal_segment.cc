@@ -133,6 +133,10 @@ int WalSegment::fsync() {
   return 0;
 }
 
+void WalSegment::read(char* buf, size_t size, off_t off) {
+  std::memcpy(buf, map_ + off, size);
+}
+
 uint32_t WalSegment::offset(char const* p) const {
   return diff(map_, p);
 }
