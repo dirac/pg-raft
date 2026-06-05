@@ -6,12 +6,12 @@
 class WalFuseOps : public FuseOps {
   WalFuseOps(WalTracker& tracker) : tracker_(tracker) {}
 
-  int op_open(char const*, struct fuse_file_info*) final;
+  int op_open(char const*, struct fuse_file_info*) override;
   int op_read(char const*, char*, size_t, off_t, struct fuse_file_info*) override;
   int op_write(char const*, char const*, size_t, off_t, struct fuse_file_info*) override;
   int op_fsync(char const*, int, struct fuse_file_info*) override;
   int op_flush(char const* path, struct fuse_file_info* fi) override;
-  int op_release(char const*, struct fuse_file_info*) final;
+  int op_release(char const*, struct fuse_file_info*) override;
 
  private:
   WalTracker&                                                     tracker_;

@@ -1,36 +1,38 @@
 #include "src/wal_fuse/wal_segment.h"
 
 namespace {
-uint16_t xlp_magic(char const* p) {
+uint16_t seg_xlp_magic(char const* p) {
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
 }
 
-uint32_t xlp_rem_len(char const* p) {
+uint32_t seg_xlp_rem_len(char const* p) {
   p += 16;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
-bool page_start(off_t const offset) {
+bool seg_page_start(off_t const offset) {
   return offset % kWalBlockSize == 0;
 }
-uint32_t round_up(uint32_t len) {
-  return ((len + 7) / 8) * 8;
-}
+
 
 /// Total length of XLogRecord
-uint32_t xl_tot_len(char const* record) {
+uint32_t seg_xl_tot_len(char const* record) {
   auto* p = record;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
-uint32_t block_space(off_t offset) {
+uint32_t set_block_space(off_t offset) {
   return kWalBlockSize - (offset % kWalBlockSize);
 }
 
 uint32_t diff(char const* s, char const* e) {
   return u4(reinterpret_cast<uint64_t>(e) - reinterpret_cast<uint64_t>(s));
+}
+template <uint32_t n = 8>
+uint32_t round_up(uint32_t len) {
+  return ((len + n - 1) / n) * n;
 }
 
 }  // namespace
@@ -48,13 +50,13 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t s
   size_t hsize = 0;
   off_t  next  = curr_;
 
-  if (page_start(curr_)) {
-    if (xlp_magic(ptr) == 0)
+  if (seg_page_start(curr_)) {
+    if (seg_xlp_magic(ptr) == 0)
       return {curr_, 0U};
 
     /// Start of the file, initialize rsize_ from the header.
     if (curr_ == 0)
-      rsize_ = round_up(xlp_rem_len(ptr));
+      rsize_ = round_up(seg_xlp_rem_len(ptr));
 
     hsize = curr_ == 0 ? 40 : 24;
 
@@ -69,9 +71,9 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t s
   // it is start of a XLogReader, therefore read the size. If there are no more data to read then
   // it will return a block of zero size.
   if (!rsize_)
-    rsize_ = round_up(xl_tot_len(ptr));
+    rsize_ = round_up(seg_xl_tot_len(ptr));
 
-  auto sz = std::min({size, static_cast<size_t>(block_space(next)), rsize_});
+  auto sz = std::min({size, static_cast<size_t>(seg_block_space(next)), rsize_});
 
   rsize_ -= sz;
   next += sz;
@@ -178,7 +180,7 @@ uint64_t WalSegment::xlp_pageaddr(unsigned page) const {
   return (static_cast<uint64_t>(p[0]) << 0) | (static_cast<uint64_t>(p[1]) << 8) |
          (static_cast<uint64_t>(p[2]) << 16) | (static_cast<uint64_t>(p[3]) << 24) |
          (static_cast<uint64_t>(p[4]) << 32) | (static_cast<uint64_t>(p[5]) << 40) |
-         (static_cast<uint64_t>(p[5]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
+         (static_cast<uint64_t>(p[6]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
 }
 
 void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}
@@ -186,10 +188,8 @@ void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}
 void WalTracker::async_fsync(std::promise<int> promise,
                              shared_ptr<WalSegment>,
                              char const* buff,
-                             size_t      size);
-
-{
-  if (::msync(buff, size, MSYNC))
+                             size_t      size) {
+  if (::msync(buff, size, MS_SYNC))
     promise.set_value(-errno);
   else
     promise.set_value(0);
