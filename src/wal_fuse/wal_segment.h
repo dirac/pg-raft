@@ -61,25 +61,6 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   /// msync the modified region.
   int fsync();
 
-  uint32_t offset(char const* p) const;
-
-  bool page_start(char const* p) const;
-
-  bool first_page(char const* p) const;
-
-  uint32_t remaining_space(char const* p) const;
-
-  uint16_t xlp_magic(unsigned page) const;
-
-  /// Flags (first page, continuation, etc.)
-  uint16_t xlp_info(unsigned page) const;
-
-  /// Remaining bytes of a spanning record
-  uint32_t xlp_rem_len(unsigned page) const;
-
-  /// LSN of this page's start
-  uint64_t xlp_pageaddr(unsigned page) const;
-
  private:
   WalTracker&        tracker_;
   LogSeqNumber const lsn_;
