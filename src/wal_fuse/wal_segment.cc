@@ -2,7 +2,7 @@
 
 namespace {
 uint16_t seg_xlp_magic(char const* p) {
-  return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+  return static_cast<uint16_t>(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
 }
 
 uint32_t seg_xlp_rem_len(char const* p) {
@@ -15,7 +15,6 @@ bool seg_page_start(off_t const offset) {
   return offset % kWalBlockSize == 0;
 }
 
-
 /// Total length of XLogRecord
 uint32_t seg_xl_tot_len(char const* record) {
   auto* p = record;
@@ -23,8 +22,8 @@ uint32_t seg_xl_tot_len(char const* record) {
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
-uint32_t set_block_space(off_t offset) {
-  return kWalBlockSize - (offset % kWalBlockSize);
+uint32_t seg_block_space(off_t offset) {
+  return u4(kWalBlockSize - (offset % kWalBlockSize));
 }
 
 uint32_t diff(char const* s, char const* e) {
@@ -39,16 +38,16 @@ uint32_t round_up(uint32_t len) {
 
 std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t size, off_t off) {
   assert(!(curr_ < off));
-  assert(!((off + size) <= curr_));
+  assert(!((off + static_cast<off_t>(size)) <= curr_));
 
   // The bytes before curr_ have already been processed. Increment ptr to the unprocessed part (and
   // decrement size).
   ptr += (curr_ - off);
-  size -= (curr_ - off);
+  size -= u8(curr_ - off);
   off = curr_;
 
-  size_t hsize = 0;
-  off_t  next  = curr_;
+  off_t hsize = 0;
+  off_t next  = curr_;
 
   if (seg_page_start(curr_)) {
     if (seg_xlp_magic(ptr) == 0)
@@ -62,7 +61,7 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t s
 
     next = curr_ + hsize;
 
-    size -= hsize;
+    size -= u8(hsize);
     ptr += hsize;
     off += hsize;
   }
@@ -78,7 +77,7 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t s
   rsize_ -= sz;
   next += sz;
 
-  return {std::exchange(curr_, next), sz + hsize};
+  return {std::exchange(curr_, next), sz + u8(hsize)};
 }
 
 void WalSegment::write(char const* buf, size_t size, off_t off) {
@@ -93,16 +92,18 @@ void WalSegment::write(char const* buf, size_t size, off_t off) {
   }
 
   // Already processed or it is empty (zero elements).
-  if (off + size < next_ || next_ < off) {
+  if (off + i4(size) < next_ || next_ < off) {
     assert(std::memcmp(map_ + off, buf, size) == 0);
     return;
   }
 
-  assert(std::memcmp(map_ + off, buf, (next_ - off)) == 0);
+  assert(std::memcmp(map_ + off, buf, u8(next_ - off)) == 0);
 
   // forward the buff for already processed bytes.
+  assert(next_ > off);
+
   buf  = buf + (next_ - off);
-  size = size - (next_ - off);
+  size = size - u8(next_ - off);
   off  = next_;
 
   // bytes with data.
@@ -113,8 +114,8 @@ void WalSegment::write(char const* buf, size_t size, off_t off) {
     std::tie(next_, bytes) = state_.update(buf, size, off);
   } while (bytes);
 
-  std::memcpy(map_ + begin, buf, (next_ - begin));
-  tracker_.async_publish(shared_from_this(), begin, (next_ - begin));
+  std::memcpy(map_ + begin, buf, u8(next_ - begin));
+  tracker_.async_publish(shared_from_this(), begin, u8(next_ - begin));
 }
 
 int WalSegment::fsync() {
@@ -124,7 +125,7 @@ int WalSegment::fsync() {
   auto promise = std::promise<int>{};
   auto future  = promise.get_future();
 
-  tracker_.async_fsync(std::move(promise), shared_from_this(), map_ + synced_, size);
+  tracker_.async_fsync(std::move(promise), shared_from_this(), map_ + synced_, u8(size));
 
   if (auto r = future.get(); r)
     return r;
@@ -158,13 +159,13 @@ uint32_t WalSegment::remaining_space(char const* p) const {
 
 uint16_t WalSegment::xlp_magic(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize);
-  return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+  return u2(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
 }
 
 /// Flags (first page, continuation, etc.)
 uint16_t WalSegment::xlp_info(unsigned page) const {
   auto* p = map_ + (page * kWalBlockSize) + 2;
-  return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+  return u2(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
 }
 
 /// Remaining bytes of a spanning record
@@ -187,8 +188,8 @@ void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}
 
 void WalTracker::async_fsync(std::promise<int> promise,
                              shared_ptr<WalSegment>,
-                             char const* buff,
-                             size_t      size) {
+                             char*  buff,
+                             size_t size) {
   if (::msync(buff, size, MS_SYNC))
     promise.set_value(-errno);
   else

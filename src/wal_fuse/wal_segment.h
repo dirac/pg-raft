@@ -10,14 +10,20 @@ struct WalTracker {
   /// Invoke msync. The args (buff and size) are page aligned.
   virtual void async_fsync(std::promise<int>      promise,
                            shared_ptr<WalSegment> segment,
-                           char const*            buff,
+                           char*                  buff,
                            size_t                 size);
 };
 
 class WalSegment : public std::enable_shared_from_this<WalSegment> {
  public:
-  WalSegment(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
-      : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_(0), synced_(0), state_() {}
+  WalSegment(WalTracker& tracker, LogSeqNumber lsn, int fd, void* map)
+      : tracker_(tracker),
+        lsn_(lsn),
+        fd_(fd),
+        map_(reinterpret_cast<char*>(map)),
+        next_(0),
+        synced_(0),
+        state_() {}
 
   ~WalSegment() {
     ::munmap(map_, kWalSegmentSize);

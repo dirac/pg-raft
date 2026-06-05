@@ -1,5 +1,7 @@
 #include "src/wal_fuse/wal_fuse_ops.h"
 
+#include "src/base/logger.h"
+
 namespace {
 
 uint32_t hex_to_int(std::string_view hex_sv) {
@@ -97,6 +99,7 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
     }
     ++std::get<0>(pos->second);
     set_wal_segment(fi, std::get<shared_ptr<WalSegment>>(pos->second).get());
+    return 0;
   } else
     return FuseOps::op_open(path, fi);
 }
@@ -110,6 +113,7 @@ int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
       if (--std::get<0>(pos->second) == 0)
         segments_.erase(pos);
     }
+    return 0;
   } else
     return FuseOps::op_release(path, fi);
 }
@@ -126,7 +130,7 @@ int WalFuseOps::op_write(char const*            path,
     segment->write(buf, size, offset);
     return 0;
   } else
-    return FuseOps::op_write(path, fi);
+    return FuseOps::op_write(path, buf, size, offset, fi);
 }
 
 int WalFuseOps::op_flush(char const* path, struct fuse_file_info* fi) {
