@@ -1,11 +1,11 @@
 #include "src/wal_fuse/wal_segment.h"
 
 namespace {
-uint16 xlp_magic(char const* p) {
+uint16_t xlp_magic(char const* p) {
   return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
 }
 
-uint32 xlp_rem_len(char const* p) {
+uint32_t xlp_rem_len(char const* p) {
   p += 16;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
@@ -71,7 +71,7 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(char const* ptr, size_t s
   if (!rsize_)
     rsize_ = round_up(xl_tot_len(ptr));
 
-  auto sz = std::min(std::min(size, block_space(next)), rsize_);
+  auto sz = std::min({size, static_cast<size_t>(block_space(next)), rsize_});
 
   rsize_ -= sz;
   next += sz;
@@ -124,9 +124,11 @@ int WalSegment::fsync() {
 
   tracker_.async_fsync(std::move(promise), shared_from_this(), map_ + synced_, size);
 
-  if (auto r = future.get(); !r)
+  if (auto r = future.get(); r)
     return r;
 
+  // Keep one page of overlap so the next fsync re-covers the last page,
+  // which may still be receiving writes.
   synced_ += size - getpagesize();
   return 0;
 }

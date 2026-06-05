@@ -14,7 +14,7 @@ struct WalTracker {
                            size_t                 size);
 };
 
-class WalSegment : std::enable_shared_from_this<WalSegment> {
+class WalSegment : public std::enable_shared_from_this<WalSegment> {
  public:
   WalSegment(WalTracker& tracker, LogSeqNumber lsn, int fd, char* map)
       : tracker_(tracker), lsn_(lsn), fd_(fd), map_(map), next_(0), synced_(0), state_() {}
