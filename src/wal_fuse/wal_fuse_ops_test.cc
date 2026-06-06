@@ -86,7 +86,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentZeroPageNoUsefulData) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   char page[kWalBlockSize]{};  // all zeros — xlp_magic == 0
   seg->write(page, kWalBlockSize, 0);
@@ -103,7 +103,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentWriteOneRecord) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -122,7 +122,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentFsyncCallsTracker) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -143,7 +143,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentFsyncWithoutWriteIsNoop) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   // No write → next_==synced_==0 → dirty range size rounds to 0.
   BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
@@ -159,7 +159,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentRead) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -178,7 +178,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentReadAtOffset) {
   auto [fd, map] = open_seg_mmap(tmp() / "seg");
   BOOST_REQUIRE_GE(fd, 0);
 
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map);
+  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
   char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -200,7 +200,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentLsnAccessor) {
   BOOST_REQUIRE_GE(fd, 0);
 
   LogSeqNumber lsn{3, 42};
-  auto         seg = make_shared<WalSegment>(tracker, lsn, fd, map);
+  auto         seg = make_shared<WalSegment>(tracker, lsn, fd, map, PROT_READ | PROT_WRITE);
   BOOST_CHECK_EQUAL(seg->lsn().timeline, 3u);
   BOOST_CHECK_EQUAL(seg->lsn().lsn, 42u);
 }
