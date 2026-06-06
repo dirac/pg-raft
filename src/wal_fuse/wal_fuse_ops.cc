@@ -4,6 +4,11 @@
 
 namespace {
 
+uint16_t xlp_magic(void const* m) {
+  char const* p = reinterpret_cast<char const*>(m);
+  return static_cast<uint16_t>(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
+}
+
 uint32_t hex_to_int(std::string_view hex_sv) {
   uint32_t          value = 0;
   std::stringstream ss;
@@ -76,25 +81,45 @@ WalSegment* get_wal_segment(struct fuse_file_info* fi) {
 
 int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
   if (auto lsn = timeline_and_lsn(path); lsn) {
-    log(DEBUG, "open {}, lsn={}", path, *lsn);
+    log(DEBUG, "open {} flags={} lsn={}", path, fi->flags, *lsn);
     n_open.fetch_add(1, std::memory_order_relaxed);
 
-    auto pos = segments_.find(*lsn);
+    int prot = PROT_READ;
+    if (fi->flags & O_WRONLY)
+      prot |= PROT_WRITE;
+    if (fi->flags & O_RDWR)
+      prot |= PROT_WRITE;
+
+    auto key = std::make_tuple(prot, *lsn);
+
+    auto pos = segments_.find(key);
     if (pos == segments_.end()) {
       int fd = ::open(real_path(path).c_str(), fi->flags);
-      if (fd == -1)
-        return -errno;
+      if (fd == -1) {
+        auto err = errno;
 
-      void* map = ::mmap(nullptr, kWalSegmentSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        log(ERROR, "Unable to open file {}, error={} ({})", real_path(path), strerror(err), err);
+        return -err;
+      }
+      struct stat s;
+      fstat(fd, &s);
+      log(INFO, "Opened file={} stat={} prot={}", real_path(path), s, prot);
+
+      void* map = ::mmap(nullptr, kWalSegmentSize, prot, MAP_SHARED, fd, 0);
+      log(DEBUG, "mmap={} magic number={}", map, xlp_magic(map));
+
       if (map == MAP_FAILED) {
         int err = errno;
+        log(ERROR, "Unable to mmap file {}, error={} ({})", real_path(path), strerror(err), err);
+
         ::close(fd);
         return -err;
       }
 
       pos =
           segments_
-              .emplace(*lsn, std::make_tuple(0U, make_shared<WalSegment>(tracker_, *lsn, fd, map)))
+              .emplace(key,
+                       std::make_tuple(0U, make_shared<WalSegment>(tracker_, *lsn, fd, map, prot)))
               .first;
     }
     ++std::get<0>(pos->second);
@@ -109,7 +134,8 @@ int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
     log(DEBUG, "release {}, lsn={}", path, segment->lsn());
     n_release.fetch_add(1, std::memory_order_relaxed);
 
-    if (auto pos = segments_.find(segment->lsn()); pos != segments_.end()) {
+    auto key = std::make_tuple(segment->prot(), segment->lsn());
+    if (auto pos = segments_.find(key); pos != segments_.end()) {
       if (--std::get<0>(pos->second) == 0)
         segments_.erase(pos);
     }
@@ -128,7 +154,7 @@ int WalFuseOps::op_write(char const*            path,
     n_write.fetch_add(1, std::memory_order_relaxed);
 
     segment->write(buf, size, offset);
-    return 0;
+    return static_cast<int>(size);
   } else
     return FuseOps::op_write(path, buf, size, offset, fi);
 }
@@ -163,7 +189,7 @@ int WalFuseOps::op_read(char const*            path,
     n_read.fetch_add(1, std::memory_order_relaxed);
 
     segment->read(buf, size, offset);
-    return 0;
+    return static_cast<int>(size);
   } else
     return FuseOps::op_read(path, buf, size, offset, fi);
 }

@@ -28,3 +28,16 @@ unit-test wal_fuse_ops_test
     libs
     ../base//testing
   ;
+
+unit-test wal_state_test
+  : wal_state_test.cc
+    wal_data.cc
+    libs
+    ../base//testing
+  ;
+
+exe wal_shadow_test
+  : wal_shadow_test.cc
+    libs
+    ../base//testing
+  ;

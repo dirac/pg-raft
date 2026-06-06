@@ -16,6 +16,6 @@ class WalFuseOps : public FuseOps {
   int op_release(char const*, struct fuse_file_info*) override;
 
  private:
-  WalTracker&                                                     tracker_;
-  map<LogSeqNumber, std::tuple<unsigned, shared_ptr<WalSegment>>> segments_;
+  WalTracker&                                                                      tracker_;
+  map<std::tuple<int, LogSeqNumber>, std::tuple<unsigned, shared_ptr<WalSegment>>> segments_;
 };

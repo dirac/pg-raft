@@ -1,5 +1,7 @@
 #include "src/wal_fuse/wal_segment.h"
 
+#include "src/base/logger.h"
+
 namespace {
 uint16_t xlp_magic(char const* p) {
   return static_cast<uint16_t>(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
@@ -84,12 +86,14 @@ void WalSegment::write(char const* buf, size_t size, off_t off) {
       std::tie(next_, bytes) = state_.update(map_, kWalSegmentSize, 0);
     } while (bytes);
 
+    log(INFO, "Processed upto {}", next_);
+
     // page aligned.
     synced_ = ((next_ / getpagesize()) * getpagesize());
   }
 
   // Already processed or it is empty (zero elements).
-  if (off + i4(size) < next_ || next_ < off) {
+  if ((off + i4(size)) < next_ || next_ < off) {
     assert(std::memcmp(map_ + off, buf, size) == 0);
     return;
   }
@@ -116,6 +120,9 @@ void WalSegment::write(char const* buf, size_t size, off_t off) {
 }
 
 int WalSegment::fsync() {
+  if (!(prot_ & PROT_WRITE))
+    return 0;
+
   // page aligned size.
   auto size = (((next_ - synced_) + (getpagesize() - 1)) / getpagesize()) * getpagesize();
 

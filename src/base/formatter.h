@@ -20,6 +20,9 @@ struct std::formatter<std::filesystem::path> {
 
 template <>
 struct std::formatter<LogSeqNumber> {
+  constexpr static auto XLogSegmentsPerXLogId =
+      1ULL << 32;  //(static_cast<uint64_t>(0x100000000ULL) / kWalSegmentSize);
+
   constexpr auto parse(std::format_parse_context& ctx) {
     auto it = ctx.begin();
     if (it != ctx.end() && *it != '}') {
@@ -29,7 +32,26 @@ struct std::formatter<LogSeqNumber> {
   }
 
   auto format(LogSeqNumber const& p, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "{}/{}", p.timeline, p.lsn);
+    return std::format_to(ctx.out(),
+                          "{}/{:X}/{:X}",
+                          p.timeline,
+                          p.lsn / XLogSegmentsPerXLogId,
+                          p.lsn % XLogSegmentsPerXLogId);
+  }
+};
+
+template <>
+struct std::formatter<struct stat> {
+  constexpr auto parse(std::format_parse_context& ctx) {
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+      throw std::format_error("Invalid format args for struct stat.");
+    }
+    return it;
+  }
+
+  auto format(struct stat const& p, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{}st_size={}{}", "{", p.st_size, "}");
   }
 };
 
