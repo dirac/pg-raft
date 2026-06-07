@@ -32,6 +32,7 @@ unit-test wal_fuse_ops_test
 unit-test wal_state_test
   : wal_state_test.cc
     wal_data.cc
+    wal_data_exp.cc
     libs
     ../base//testing
   ;

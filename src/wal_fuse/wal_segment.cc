@@ -42,14 +42,16 @@ WalSegment::~WalSegment() {
   ::close(fd_);
 }
 
-std::tuple<off_t, size_t> WalSegment::WalState::update(unsigned char const* ptr,
-                                                       size_t               size,
-                                                       off_t                off) {
+std::tuple<off_t, size_t, bool> WalSegment::WalState::update(unsigned char const* ptr,
+                                                             size_t               size,
+                                                             off_t                off) {
+  bool rec_start = false;
+
   assert(off <= curr_);
   assert(curr_ <= (off + static_cast<off_t>(size)));
 
   if (curr_ == (off + static_cast<off_t>(size)))
-    return {curr_, 0U};
+    return {curr_, 0U, rec_start};
 
   // The bytes before curr_ have already been processed. Increment ptr to the unprocessed part (and
   // decrement size).
@@ -62,28 +64,33 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(unsigned char const* ptr,
 
   if (page_start(curr_)) {
     if (xlp_magic(ptr) == 0)
-      return {curr_, 0U};
+      return {curr_, 0U, rec_start};
 
     /// Start of the file, initialize rsize_ from the header.
     if (curr_ == 0)
       rsize_ = round_up(xlp_rem_len(ptr));
     assert(rsize_ == round_up(xlp_rem_len(ptr)));
+
     log(DEBUG, "xlp_rem_len = {} at {}", rsize_, next);
 
     hsize = curr_ == 0 ? 40 : 24;
-
-    next = curr_ + hsize;
+    next  = curr_ + hsize;
 
     size -= u8(hsize);
     ptr += hsize;
     off += hsize;
+
+    if (!rsize_)
+      return {std::exchange(curr_, next), u8(hsize), rec_start};
   }
 
   // If rsize is not zero, we have to consume that many bytes, otherwise
   // it is start of a XLogReader, therefore read the size. If there are no more data to read then
   // it will return a block of zero size.
   if (!rsize_) {
-    rsize_ = round_up(xl_tot_len(ptr));
+    rec_start = true;
+    rsize_    = round_up(xl_tot_len(ptr));
+
     log(DEBUG, "xl_tot_len = {} at {}", rsize_, next);
   }
 
@@ -94,7 +101,7 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(unsigned char const* ptr,
 
   log(DEBUG, "consuming {} at {}, rem = {}", sz + u8(hsize), next, rsize_);
 
-  return {std::exchange(curr_, next), sz + u8(hsize)};
+  return {std::exchange(curr_, next), sz + u8(hsize), rec_start};
 }
 
 void breakpoint();
@@ -109,10 +116,12 @@ void WalSegment::check_modified(unsigned char const* buf, size_t size, off_t off
 }
 
 void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
+  bool rec_start;
+
   if (!next_) [[unlikely]] {
     size_t bytes = 0;
     do {
-      std::tie(next_, bytes) = state_.update(map_, kWalSegmentSize, 0);
+      std::tie(next_, bytes, rec_start) = state_.update(map_, kWalSegmentSize, 0);
     } while (bytes);
 
     log(INFO, "The file {} has data upto {}", lsn(), next_);
@@ -147,7 +156,7 @@ void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
   auto   begin = next_;
 
   do {
-    std::tie(next_, bytes) = state_.update(buf, size, off);
+    std::tie(next_, bytes, rec_start) = state_.update(buf, size, off);
   } while (bytes);
 
   std::memcpy(map_ + begin, buf, u8(next_ - begin));

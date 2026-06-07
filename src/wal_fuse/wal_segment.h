@@ -44,7 +44,7 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   struct WalState {
     WalState() {}
 
-    std::tuple<off_t, size_t> update(unsigned char const* ptr, size_t size, off_t offset);
+    std::tuple<off_t, size_t, bool> update(unsigned char const* ptr, size_t size, off_t offset);
 
     off_t  curr() const { return curr_; }
     size_t rsize() const { return rsize_; }
@@ -57,9 +57,6 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   /// Update the memory region.
   void write(unsigned char const* buf, size_t size, off_t offset);
 
-  /// The expectation is the data has not been modified.
-  void check_modified(unsigned char const* buf, size_t size, off_t off);
-
   /// Read from the memory mapped region.
   void read(unsigned char* buf, size_t size, off_t offset);
 
@@ -67,6 +64,9 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   int fsync();
 
  private:
+  /// The expectation is the data has not been modified.
+  void check_modified(unsigned char const* buf, size_t size, off_t off);
+
   WalTracker&          tracker_;
   LogSeqNumber const   lsn_;
   int const            fd_;
