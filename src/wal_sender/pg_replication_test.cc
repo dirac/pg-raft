@@ -26,7 +26,7 @@
 #include <string>
 #include <thread>
 
-#define BOOST_TEST_MODULE PgReplicationTest
+#define BOOST_TEST_MODULE pg_replication
 #include <boost/test/included/unit_test.hpp>
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -280,7 +280,7 @@ static void rmrf(const std::string& path) {
 
 // ── test ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(PrimaryStandbyWithFuse) {
+BOOST_AUTO_TEST_CASE(primary_standby_with_fuse) {
   if (access((kPgBin + "/postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not found at " + kPgBin + "; skipping");
     return;

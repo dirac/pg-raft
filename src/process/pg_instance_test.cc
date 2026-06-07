@@ -1,4 +1,4 @@
-#define BOOST_TEST_MODULE pg_instance_test
+#define BOOST_TEST_MODULE pg_instance
 
 #include "src/base/io_threads.h"
 #include "src/base/testing.h"
@@ -26,7 +26,7 @@ static int count_regular_files(std::filesystem::path const& dir) {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(Init) {
+BOOST_AUTO_TEST_CASE(init) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -43,7 +43,7 @@ BOOST_AUTO_TEST_CASE(Init) {
 
 // ── write_config ──────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(WriteConfigAppendsDefaults) {
+BOOST_AUTO_TEST_CASE(write_config_appends_defaults) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -61,7 +61,7 @@ BOOST_AUTO_TEST_CASE(WriteConfigAppendsDefaults) {
   BOOST_TEST(conf.find("wal_recycle") != std::string::npos);
 }
 
-BOOST_AUTO_TEST_CASE(WriteConfigOverridesDefault) {
+BOOST_AUTO_TEST_CASE(write_config_overrides_default) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(WriteConfigOverridesDefault) {
 
 // ── write_hba ─────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(WriteHbaAppendsLinesAndDefaults) {
+BOOST_AUTO_TEST_CASE(write_hba_appends_lines_and_defaults) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -100,7 +100,7 @@ BOOST_AUTO_TEST_CASE(WriteHbaAppendsLinesAndDefaults) {
 
 // ── create_raft_wal ───────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(CreateRaftWalMovesSegments) {
+BOOST_AUTO_TEST_CASE(create_raft_wal_moves_segments) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -125,7 +125,7 @@ BOOST_AUTO_TEST_CASE(CreateRaftWalMovesSegments) {
 
 // ── start / stop / is_running ─────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(StartAndStop) {
+BOOST_AUTO_TEST_CASE(start_and_stop) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -147,7 +147,7 @@ BOOST_AUTO_TEST_CASE(StartAndStop) {
   BOOST_TEST(!pg.is_running());
 }
 
-BOOST_AUTO_TEST_CASE(StopImmediate) {
+BOOST_AUTO_TEST_CASE(stop_immediate) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -168,7 +168,7 @@ BOOST_AUTO_TEST_CASE(StopImmediate) {
 
 // ── backup / restore ──────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(Backup) {
+BOOST_AUTO_TEST_CASE(backup) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;
@@ -190,7 +190,7 @@ BOOST_AUTO_TEST_CASE(Backup) {
   BOOST_TEST(std::filesystem::exists(backup_dir / "pg_wal"));
 }
 
-BOOST_AUTO_TEST_CASE(RestoreAndStart) {
+BOOST_AUTO_TEST_CASE(restore_and_start) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};
   TmpDir    tmp;

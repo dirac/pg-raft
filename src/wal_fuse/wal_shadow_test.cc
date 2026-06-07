@@ -1,4 +1,4 @@
-#define BOOST_TEST_MODULE WalShadowTest
+#define BOOST_TEST_MODULE wal_shadow
 
 #include "src/base/testing.h"
 #include "src/process/pg_instance.h"
@@ -172,7 +172,7 @@ std::vector<char> load_file(std::filesystem::path filename) {
 
 // ── test ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(ShadowVerificationWithPgbench) {
+BOOST_AUTO_TEST_CASE(shadow_verification_with_pgbench) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found at " + kPgBin + "; skipping");
     return;

@@ -9,7 +9,7 @@
 #include <cstring>
 #include <thread>
 
-#define BOOST_TEST_MODULE WalSenderTest
+#define BOOST_TEST_MODULE wal_sender
 #include <boost/test/included/unit_test.hpp>
 
 // ── mini standby helper ───────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ static std::pair<int,int> make_socket_pair() {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(IdentifySystem) {
+BOOST_AUTO_TEST_CASE(identify_system) {
   auto [server_fd, client_fd] = make_socket_pair();
 
   std::thread sender_thread([server_fd]() {
@@ -167,7 +167,7 @@ BOOST_AUTO_TEST_CASE(IdentifySystem) {
   close(client_fd);
 }
 
-BOOST_AUTO_TEST_CASE(StartReplicationAndReceiveWal) {
+BOOST_AUTO_TEST_CASE(start_replication_and_receive_wal) {
   auto [server_fd, client_fd] = make_socket_pair();
 
   WalSender* sender_ptr = nullptr;
@@ -218,7 +218,7 @@ BOOST_AUTO_TEST_CASE(StartReplicationAndReceiveWal) {
   close(client_fd);
 }
 
-BOOST_AUTO_TEST_CASE(ServerAcceptsConnection) {
+BOOST_AUTO_TEST_CASE(server_accepts_connection) {
   uint64_t received_written_lsn = 0;
   StandbyStatus last_status{};
 

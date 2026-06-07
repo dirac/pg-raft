@@ -1,4 +1,4 @@
-#define BOOST_TEST_MODULE wal_state_test
+#define BOOST_TEST_MODULE wal_state
 
 #include "src/base/testing.h"
 #include "src/wal_fuse/wal_segment.h"

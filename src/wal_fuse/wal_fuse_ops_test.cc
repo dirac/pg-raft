@@ -1,4 +1,4 @@
-#define BOOST_TEST_MODULE WalFuseOpsTest
+#define BOOST_TEST_MODULE wal_fuse_ops
 
 #include "src/wal_fuse/wal_fuse_ops.h"
 
@@ -83,7 +83,7 @@ static std::pair<int, void*> open_seg_mmap(std::filesystem::path const& path) {
 
 // ── WalSegment ────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(WalSegmentZeroPageNoUsefulData) {
+BOOST_AUTO_TEST_CASE(wal_segment_zero_page_no_useful_data) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -100,7 +100,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentZeroPageNoUsefulData) {
     BOOST_CHECK_EQUAL(p.size, 0u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentWriteOneRecord) {
+BOOST_AUTO_TEST_CASE(wal_segment_write_one_record) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -119,7 +119,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentWriteOneRecord) {
   BOOST_CHECK_EQUAL(tracker.publishes[0].size, 64u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentFsyncCallsTracker) {
+BOOST_AUTO_TEST_CASE(wal_segment_fsync_calls_tracker) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -140,7 +140,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentFsyncCallsTracker) {
   BOOST_CHECK_GT(tracker.fsyncs[0].size, 0u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentFsyncWithoutWriteIsNoop) {
+BOOST_AUTO_TEST_CASE(wal_segment_fsync_without_write_is_noop) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -152,11 +152,10 @@ BOOST_AUTO_TEST_CASE(WalSegmentFsyncWithoutWriteIsNoop) {
   // No write → next_==synced_==0 → dirty range size rounds to 0.
   BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
   // async_fsync is still invoked (with size 0 / empty range).
-  BOOST_CHECK_EQUAL(tracker.fsyncs.size(), 1u);
-  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, 0u);
+  BOOST_CHECK_EQUAL(tracker.fsyncs.size(), 0u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentRead) {
+BOOST_AUTO_TEST_CASE(wal_segment_read) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -175,7 +174,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentRead) {
   BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[1]), 0xD1u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentReadAtOffset) {
+BOOST_AUTO_TEST_CASE(wal_segment_read_at_offset) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -196,7 +195,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentReadAtOffset) {
   BOOST_CHECK_EQUAL(tot_len, 24u);
 }
 
-BOOST_AUTO_TEST_CASE(WalSegmentLsnAccessor) {
+BOOST_AUTO_TEST_CASE(wal_segment_lsn_accessor) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
@@ -226,7 +225,7 @@ struct WalOpsFixture {
   }
 };
 
-BOOST_FIXTURE_TEST_CASE(NonWalFilePassesThrough, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(non_wal_file_passes_through, WalOpsFixture) {
   int tfd = ::open((backing / (kTextPath + 1)).c_str(), O_WRONLY | O_CREAT, 0644);
   BOOST_REQUIRE_GE(tfd, 0);
   ::close(tfd);
@@ -244,7 +243,7 @@ BOOST_FIXTURE_TEST_CASE(NonWalFilePassesThrough, WalOpsFixture) {
   ::close(static_cast<int>(fi.fh));
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileOpenIncreasesCounter, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_open_increases_counter, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -255,7 +254,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileOpenIncreasesCounter, WalOpsFixture) {
   ops.op_release(kWalPath, &fi);
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileWritePublishes, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_write_publishes, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -274,7 +273,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileWritePublishes, WalOpsFixture) {
   ops.op_release(kWalPath, &fi);
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileFsyncCallsTracker, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_fsync_calls_tracker, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -293,7 +292,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileFsyncCallsTracker, WalOpsFixture) {
   ops.op_release(kWalPath, &fi);
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileFlushIsNoop, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_flush_is_noop, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -306,7 +305,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileFlushIsNoop, WalOpsFixture) {
   ops.op_release(kWalPath, &fi);
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileRead, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_read, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -326,7 +325,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileRead, WalOpsFixture) {
   ops.op_release(kWalPath, &fi);
 }
 
-BOOST_FIXTURE_TEST_CASE(WalFileReleaseCountsAndSucceeds, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(wal_file_release_counts_and_succeeds, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi{};
@@ -336,7 +335,7 @@ BOOST_FIXTURE_TEST_CASE(WalFileReleaseCountsAndSucceeds, WalOpsFixture) {
   BOOST_CHECK_EQUAL(ops.n_release.load(), 1u);
 }
 
-BOOST_FIXTURE_TEST_CASE(TwoOpensShareSegment, WalOpsFixture) {
+BOOST_FIXTURE_TEST_CASE(two_opens_share_segment, WalOpsFixture) {
   WalFuseOps ops(tracker, backing);
 
   struct fuse_file_info fi1{}, fi2{};

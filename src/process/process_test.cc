@@ -25,7 +25,7 @@ class LineCapture : public Process {
   std::mutex mu_;
 };
 
-BOOST_AUTO_TEST_CASE(StartAndWait) {
+BOOST_AUTO_TEST_CASE(start_and_wait) {
   IoThreads threads{1};
   Process   p("/bin/echo", {"hello"});
   BOOST_TEST(p.start());
@@ -34,7 +34,7 @@ BOOST_AUTO_TEST_CASE(StartAndWait) {
   BOOST_TEST(!p.is_running());
 }
 
-BOOST_AUTO_TEST_CASE(CannotStartWhileRunning) {
+BOOST_AUTO_TEST_CASE(cannot_start_while_running) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -43,7 +43,7 @@ BOOST_AUTO_TEST_CASE(CannotStartWhileRunning) {
   p.wait();
 }
 
-BOOST_AUTO_TEST_CASE(Stop) {
+BOOST_AUTO_TEST_CASE(stop) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -51,7 +51,7 @@ BOOST_AUTO_TEST_CASE(Stop) {
   BOOST_TEST(!p.is_running());
 }
 
-BOOST_AUTO_TEST_CASE(TryWaitBeforeExit) {
+BOOST_AUTO_TEST_CASE(try_wait_before_exit) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -60,7 +60,7 @@ BOOST_AUTO_TEST_CASE(TryWaitBeforeExit) {
   p.wait();
 }
 
-BOOST_AUTO_TEST_CASE(TryWaitAfterExit) {
+BOOST_AUTO_TEST_CASE(try_wait_after_exit) {
   IoThreads threads{1};
   Process   p("/bin/echo", {"hello"});
   BOOST_TEST(p.start());
@@ -70,7 +70,7 @@ BOOST_AUTO_TEST_CASE(TryWaitAfterExit) {
   BOOST_TEST(*result == 0);
 }
 
-BOOST_AUTO_TEST_CASE(DestructorKillsRunningProcess) {
+BOOST_AUTO_TEST_CASE(destructor_kills_running_process) {
   IoThreads threads{1};
   pid_t     pid;
   {
@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(DestructorKillsRunningProcess) {
   BOOST_TEST(kill(pid, 0) != 0);
 }
 
-BOOST_AUTO_TEST_CASE(CaptureStdout) {
+BOOST_AUTO_TEST_CASE(capture_stdout) {
   IoThreads   threads{1};
   LineCapture p("/bin/echo", {"hello world"});
   BOOST_TEST(p.start());
@@ -91,7 +91,7 @@ BOOST_AUTO_TEST_CASE(CaptureStdout) {
   BOOST_TEST(p.err.empty());
 }
 
-BOOST_AUTO_TEST_CASE(CaptureStderr) {
+BOOST_AUTO_TEST_CASE(capture_stderr) {
   IoThreads   threads{1};
   LineCapture p("/bin/sh", {"-c", "echo err >&2"});
   BOOST_TEST(p.start());
@@ -101,7 +101,7 @@ BOOST_AUTO_TEST_CASE(CaptureStderr) {
   BOOST_TEST(p.out.empty());
 }
 
-BOOST_AUTO_TEST_CASE(CaptureMultipleLines) {
+BOOST_AUTO_TEST_CASE(capture_multiple_lines) {
   IoThreads   threads{1};
   LineCapture p("/bin/sh", {"-c", "printf 'line1\\nline2\\nline3'"});
   BOOST_TEST(p.start());
