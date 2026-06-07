@@ -33,6 +33,9 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
 /opt/sparrow/bin/b2 src/wal_fuse//fuse_test
+/opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_ops_test
+/opt/sparrow/bin/b2 src/wal_fuse//wal_state_test
+/opt/sparrow/bin/b2 src/wal_fuse//wal_shadow_test
 /opt/sparrow/bin/b2 src/net//async_connect_test
 /opt/sparrow/bin/b2 src/net//data_test
 /opt/sparrow/bin/b2 src/net//connection_test
@@ -186,3 +189,6 @@ Integration tests in `wal_fuse_test` and `pg_instance_test` use PostgreSQL at `/
 - **`wal_sender_test`** — unit tests using a `MiniStandby` helper that speaks just enough of the replication protocol over a `socketpair`. No real PostgreSQL needed.
 - **`pg_replication_test`** — end-to-end integration test. Uses `PgInstance::create_raft_wal()` to set up WAL directories, manages primary and standby processes, mounts `Fuse` with a local `WalSendingOps` subclass that accumulates WAL per-file and enqueues on fsync, starts a `WalSenderServer`, seeds the standby via cold backup (`backup()`/`restore()`), runs pgbench, then verifies the standby catches up via LSN comparison and row count equality. WAL capture is enabled only after the primary restarts post-backup, since the standby already has pre-backup WAL in its local `pg_wal`.
 - **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `Fuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`. Note: `WalMovedToRaftDir` and `WalWritesToBackingDir` are marked `*boost::unit_test::disabled()` and never run automatically; only `ReadDirLargeDirectory` (no PostgreSQL needed) runs in CI.
+- **`wal_fuse_ops_test`** — unit tests for `WalFuseOps` and `WalSegment` interaction. Exercises open/write/fsync/read/release ops against a `WalFuseOps` instance backed by a `TmpDir`. No real PostgreSQL needed.
+- **`wal_state_test`** — unit tests for `WalSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size)` tuples. No real PostgreSQL needed.
+- **`wal_shadow_test`** — integration test using `WalFuseOps` directly (via a `ShadowWalOps` subclass that mirrors writes into an in-memory buffer). Starts a real PostgreSQL instance, runs pgbench, then cross-checks the shadow buffer against the on-disk WAL bytes. Auto-skips if PostgreSQL is absent.

@@ -36,7 +36,7 @@ unit-test wal_state_test
     ../base//testing
   ;
 
-exe wal_shadow_test
+unit-test wal_shadow_test
   : wal_shadow_test.cc
     libs
     ../base//testing
