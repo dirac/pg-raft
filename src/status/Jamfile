@@ -1,0 +1,20 @@
+alias deps
+  : ../base//libs
+  ;
+
+lib status
+  : pg_client.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    status
+  ;
+
+unit-test pg_client_test
+  : pg_client_test.cc
+    libs
+    ../process//process
+    ../base//testing
+  ;

@@ -251,16 +251,6 @@ void Connection::cleanup(std::error_code ec, int fd, std::filesystem::path file)
   std::filesystem::remove(file, ec);
 }
 
-static mode_t file_mode() {
-  // S_IRUSR  00400 user has read permission
-  // S_IWUSR  00200 user has write permission
-  // S_IRGRP  00040 group has read permission
-  // S_IWGRP  00020 group has write permission
-  // S_IROTH  00004 others have read permission
-
-  return S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
-}
-
 void Connection::do_read_file(uint64_t length) {
   if (!write_file_buff_)
     write_file_buff_ = make_unique<std::array<char, kPageSize>>();

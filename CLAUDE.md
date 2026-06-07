@@ -15,11 +15,13 @@ This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake
 
 All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
+**Note:** `wal_sender` is intentionally excluded from `src/Jamfile`, so `b2` and `b2 test` do not build or test it automatically. Always target it explicitly.
+
 ```bash
-# Build everything
+# Build everything (excludes wal_sender — see note above)
 /opt/sparrow/bin/b2
 
-# Build + run all tests
+# Build + run all tests (excludes wal_sender tests — run them explicitly below)
 /opt/sparrow/bin/b2 test
 
 # Build only a module
@@ -98,7 +100,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 **`src/net/`** — Async networking layer built on Boost.Asio with optional TLS:
 
-- **`Connection`** — Async framed-message connection over TCP or SSL (`socket_type = std::variant<tcp_socket, ssl_socket>`). Messages are framed with a 4-word header. `read_data()` / `write_data()` are callback-based and safe to call from any thread; internal strand serializes all I/O. Status exchange (peer liveness) and read-timeout are managed automatically. Instantiate via `Connection::create<DerivedType>(...)`, which calls `start()` automatically. Override `on_shutdown()` to clean up.
+- **`Connection`** — Async framed-message connection over TCP or SSL (`socket_type = std::variant<tcp_socket, ssl_socket>`). Messages are framed with a 4-word header. `read_data()` / `write_data()` send `Data` objects (serialized via Boost.Serialization); `read_file()` / `write_file()` stream raw files directly from/to disk without buffering the full content in memory. All four are callback-based and safe to call from any thread; internal strand serializes all I/O. Status exchange (peer liveness) and read-timeout are managed automatically. Instantiate via `Connection::create<DerivedType>(...)`, which calls `start()` automatically. Override `on_shutdown()` to clean up.
 - **`Server`** — Abstract TCP accept loop. Subclass and implement `start()`, `new_connection()`, `on_shutdown()`. Instantiate via `Server::create<DerivedType>(...)`. `shutdown()` cancels the acceptor.
 - **`Data`** — Pool-backed scatter/gather I/O buffer (`kPageSize = 8192`). Implements `std::basic_streambuf` so it works with `std::ostream`/`std::istream`. Serialize with `to_data<T>(obj)` / deserialize with `from_data<T>(data)` using Boost.Serialization (binary by default).
 - **`HostAddress`** — Plain `{address, port}` struct with serialization support and `to_string()`.
@@ -127,7 +129,9 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`WalTracker`** — Abstract interface (virtual base) that external code implements to receive WAL events. `async_publish(file, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, file, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done. The caller (e.g. the raft layer) supplies the concrete `WalTracker` to `WalFuseOps`.
 
-**`src/raft/`** and **`src/proxy/`** — Reserved directories for future modules; currently empty and not referenced in `src/Jamfile.jam`.
+Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
+
+**`src/raft/`**, **`src/proxy/`**, and **`src/status/`** — Reserved directories for future modules; currently empty with no `Jamfile` and not referenced in `src/Jamfile`.
 
 ### Data flow (end-to-end)
 
