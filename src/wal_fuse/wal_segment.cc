@@ -99,25 +99,13 @@ std::tuple<off_t, size_t> WalSegment::WalState::update(unsigned char const* ptr,
 
 void breakpoint();
 
-bool modified(unsigned char const* m, unsigned char const* b, size_t size, off_t off) {
-  if (std::memcmp(m, b, size) == 0)
-    return false;
+void WalSegment::check_modified(unsigned char const* buf, size_t size, off_t off) {
+  if (std::memcmp(map_ + off, buf, size) == 0)
+    return;
 
-  struct fuse_context *ctx = fuse_get_context();
-  pid_t process_id = ctx->pid;
-
-  off_t sz = static_cast<off_t>(size);
-
-  bool print = false;
-  for (off_t i = 0; i < sz; ++i, m++, b++) {
-    print = print || ((sz - i) < 10) || m[5] != b[5];
-    if (print) {
-      sz = std::min(sz, i + 100);
-      log(ERROR, "[{}] off={} {:x} vs {:x}", process_id, off + i, *m, *b);
-    }
-  }
-  breakpoint();
-  return true;
+  log(INFO, "The wal-buffer got updated at {} lsn={}", off, lsn());
+  std::memcpy(map_ + off, buf, size);
+  tracker_.async_publish(shared_from_this(), off, size);
 }
 
 void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
@@ -135,16 +123,17 @@ void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
 
   // Already processed
   if ((off + i4(size)) < next_) {
-    assert(!modified(map_ + off, buf, size, off));
+    check_modified(buf, size, off);
     return;
   }
 
   // No wal records present, it is empty (zero elements).
+  // If we have content, then it will be written again.
   if (next_ < off) {
     // assert(!modified(map_ + off, buf, size, off));
     return;
   }
-  assert(!modified(map_ + off, buf, u8(next_ - off), off));
+  check_modified(buf, u8(next_ - off), off);
 
   // forward the buff for already processed bytes.
   assert(next_ >= off);
@@ -211,7 +200,6 @@ void WalTracker::async_fsync(std::promise<int> promise,
     promise.set_value(0);
 }
 
-void breakpoint()
-{
+void breakpoint() {
   log(ERROR, "Break");
 }
