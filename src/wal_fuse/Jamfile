@@ -46,3 +46,8 @@ exe debug_wal_ops
   : debug_wal_ops.cc
     libs
   ;
+
+exe wal_fuse_bench
+  : wal_fuse_bench.cc
+    libs
+  ;
