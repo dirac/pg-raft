@@ -19,11 +19,18 @@ ostream& operator<<(ostream& out, tuple<off_t, size_t> const& t) {
 using WalState = WalSegment::WalState;
 
 BOOST_AUTO_TEST_CASE(wal_state_update) {
-  WalState    s;
-  char const* ptr  = wal_data().data();
-  size_t      size = wal_data().size();
+  WalState s;
+  auto*    ptr  = reinterpret_cast<unsigned char const*>(wal_data().data());
+  size_t   size = wal_data().size();
 
   BOOST_TEST(t(0, 160) == s.update(ptr, size, 0));
   BOOST_TEST(t(160, 32) == s.update(ptr, size, 0));
   BOOST_TEST(t(192, 144) == s.update(ptr, size, 0));
+
+  size_t bytes = 0;
+  off_t next = 0;
+  do {
+    std::tie(next, bytes) = s.update(ptr, size, 0);
+    std::cout << next << "," << bytes << std::endl;
+  } while (bytes);
 }

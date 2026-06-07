@@ -70,6 +70,16 @@ uint64_t gcounter(std::optional<uint64_t> g = std::nullopt);
 std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t = std::nullopt);
 std::filesystem::path tmp_file(char const* ext = "tmp");
 
+inline mode_t file_mode() {
+  // S_IRUSR  00400 user has read permission
+  // S_IWUSR  00200 user has write permission
+  // S_IRGRP  00040 group has read permission
+  // S_IWGRP  00020 group has write permission
+  // S_IROTH  00004 others have read permission
+
+  return S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
+}
+
 constexpr unsigned kWalBlockSize   = 8192;              // wal_block_size (integer).
 constexpr unsigned kWalSegmentSize = 16 * 1024 * 1024;  /// wal_segment_size (integer) = 16MB
 

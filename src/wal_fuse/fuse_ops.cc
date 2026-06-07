@@ -323,9 +323,16 @@ int FuseOps::op_removexattr(char const* path, char const* name) {
 // Each entry is a captureless lambda that casts private_data to FuseOps*
 // and calls the virtual method, enabling subclass dispatch.
 
+static void* fuse_init(struct fuse_conn_info* conn) {
+  // 128 KB is the absolute max buffer payload allowed by libfuse v2
+  conn->max_write = 128 * 1024;
+  return ctx();
+}
+
 // clang-format off
 struct fuse_operations FuseOps::make_ops() {
   struct fuse_operations ops{};
+  ops.init        = fuse_init,
   ops.getattr     = [](const char* p, struct stat* s)                                                { return ctx()->op_getattr(p, s); };
   ops.fgetattr    = [](const char* p, struct stat* s, struct fuse_file_info* f)                      { return ctx()->op_fgetattr(p, s, f); };
   ops.access      = [](const char* p, int m)                                                         { return ctx()->op_access(p, m); };

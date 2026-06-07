@@ -9,6 +9,13 @@ static std::vector<std::string> build_postgres_args(std::string const&          
   return args;
 }
 
+static bool has_arg(std::vector<std::string> const& args, std::string_view arg) {
+  return std::accumulate(
+      std::begin(args), std::end(args), false, [arg](bool result, auto const& elem) {
+        return result || elem == arg;
+      });
+}
+
 // ── PgInstance ────────────────────────────────────────────────────────────────
 
 PgInstance::PgInstance(std::filesystem::path    pg_bin,
@@ -55,6 +62,9 @@ bool PgInstance::create_raft_wal() {
 }
 
 bool PgInstance::init(std::vector<std::string> initdb_args) {
+  if (!(has_arg(initdb_args, "-k") || has_arg(initdb_args, "--data-checksums")))
+    initdb_args.emplace_back("--data-checksums");
+
   std::vector<std::string> args = {"-D", data_dir_};
   args.insert(args.end(), initdb_args.begin(), initdb_args.end());
   Process p(pg_bin_ / "initdb", std::move(args));

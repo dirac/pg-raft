@@ -41,3 +41,8 @@ exe wal_shadow_test
     libs
     ../base//testing
   ;
+
+exe debug_wal_ops
+  : debug_wal_ops.cc
+    libs
+  ;

@@ -64,5 +64,5 @@ void Fuse::stop() {
 }
 
 void Fuse::run_loop() {
-  fuse_loop_mt(fuse_);
+  fuse_loop(fuse_);
 }

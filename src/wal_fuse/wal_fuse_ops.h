@@ -8,12 +8,20 @@ class WalFuseOps : public FuseOps {
   WalFuseOps(WalTracker& tracker, std::filesystem::path backing_dir)
       : FuseOps(std::move(backing_dir)), tracker_(tracker) {}
 
-  int op_open(char const*, struct fuse_file_info*) override;
-  int op_read(char const*, char*, size_t, off_t, struct fuse_file_info*) override;
-  int op_write(char const*, char const*, size_t, off_t, struct fuse_file_info*) override;
-  int op_fsync(char const*, int, struct fuse_file_info*) override;
+  int op_open(char const* path, struct fuse_file_info* fi) override;
+  int op_read(char const*            path,
+              char*                  buff,
+              size_t                 size,
+              off_t                  offset,
+              struct fuse_file_info* fi) override;
+  int op_write(char const*            path,
+               char const*            buff,
+               size_t                 size,
+               off_t                  offset,
+               struct fuse_file_info* fi) override;
+  int op_fsync(char const* path, int datasync, struct fuse_file_info* fi) override;
   int op_flush(char const* path, struct fuse_file_info* fi) override;
-  int op_release(char const*, struct fuse_file_info*) override;
+  int op_release(char const* path, struct fuse_file_info* fi) override;
 
  private:
   WalTracker&                                                                      tracker_;

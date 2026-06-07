@@ -21,10 +21,11 @@ static constexpr char kTextPath[] = "/readme.txt";
 // WalState::update() consumes header(40) + record(24) = 64 bytes and then
 // hits zeros at offset 64, which round_up(xl_tot_len=0) = 0, ending the loop.
 // async_publish is therefore called with offset=0, size=64.
-static void fill_wal_page(char* page) {
+template <typename C>
+static void fill_wal_page(C* page) {
   memset(page, 0, kWalBlockSize);
-  page[0] = 0x16;
-  page[1] = 0xD1;  // xlp_magic = 0xD116 LE
+  page[0]          = 0x16;
+  page[1]          = 0xD1;  // xlp_magic = 0xD116 LE
   uint32_t tot_len = 24;
   memcpy(page + 40, &tot_len, 4);  // xl_tot_len of first XLogRecord
 }
@@ -47,7 +48,7 @@ struct RecordingTracker : public WalTracker {
     size_t size;
   };
   struct Syn {
-    char*  buf;
+    unsigned char*  buf;
     size_t size;
   };
 
@@ -57,7 +58,10 @@ struct RecordingTracker : public WalTracker {
   void async_publish(shared_ptr<WalSegment>, off_t off, size_t sz) override {
     publishes.push_back({off, sz});
   }
-  void async_fsync(std::promise<int> p, shared_ptr<WalSegment>, char* b, size_t s) override {
+  void async_fsync(std::promise<int> p,
+                   shared_ptr<WalSegment>,
+                   unsigned char* b,
+                   size_t         s) override {
     fsyncs.push_back({b, s});
     p.set_value(0);
   }
@@ -88,7 +92,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentZeroPageNoUsefulData) {
 
   auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
-  char page[kWalBlockSize]{};  // all zeros — xlp_magic == 0
+  unsigned char page[kWalBlockSize]{};  // all zeros — xlp_magic == 0
   seg->write(page, kWalBlockSize, 0);
 
   // No valid WAL bytes: any publish must carry size 0.
@@ -105,7 +109,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentWriteOneRecord) {
 
   auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
-  char page[kWalBlockSize]{};
+  unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
   seg->write(page, kWalBlockSize, 0);
 
@@ -124,7 +128,7 @@ BOOST_AUTO_TEST_CASE(WalSegmentFsyncCallsTracker) {
 
   auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
-  char page[kWalBlockSize]{};
+  unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
   seg->write(page, kWalBlockSize, 0);
 
@@ -161,11 +165,11 @@ BOOST_AUTO_TEST_CASE(WalSegmentRead) {
 
   auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
-  char page[kWalBlockSize]{};
+  unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
   seg->write(page, kWalBlockSize, 0);
 
-  char buf[2]{};
+  unsigned char buf[2]{};
   seg->read(buf, 2, 0);
   BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[0]), 0x16u);
   BOOST_CHECK_EQUAL(static_cast<uint8_t>(buf[1]), 0xD1u);
@@ -180,12 +184,12 @@ BOOST_AUTO_TEST_CASE(WalSegmentReadAtOffset) {
 
   auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
 
-  char page[kWalBlockSize]{};
+  unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
   seg->write(page, kWalBlockSize, 0);
 
   // xl_tot_len is at offset 40 in the mmap.
-  char buf[4]{};
+  unsigned char buf[4]{};
   seg->read(buf, 4, 40);
   uint32_t tot_len{};
   memcpy(&tot_len, buf, 4);
@@ -209,8 +213,8 @@ BOOST_AUTO_TEST_CASE(WalSegmentLsnAccessor) {
 
 // Shared fixture: backing dir + one pre-allocated WAL segment file.
 struct WalOpsFixture {
-  TmpDir           tmp;
-  RecordingTracker tracker;
+  TmpDir                tmp;
+  RecordingTracker      tracker;
   std::filesystem::path backing;
 
   WalOpsFixture() : backing(tmp() / "backing") {

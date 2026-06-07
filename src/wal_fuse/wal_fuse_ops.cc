@@ -61,7 +61,8 @@ void set_wal_segment(struct fuse_file_info* fi, WalSegment* segment) {
     fh |= u8(0x1);
   else
     fh |= (u8(0x1) << 63);
-  fi->fh = fh;
+  fi->fh        = fh;
+  fi->direct_io = 1;
 }
 
 WalSegment* get_wal_segment(struct fuse_file_info* fi) {
@@ -139,6 +140,7 @@ int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
       if (--std::get<0>(pos->second) == 0)
         segments_.erase(pos);
     }
+    fi->fh = 0;
     return 0;
   } else
     return FuseOps::op_release(path, fi);
@@ -150,10 +152,16 @@ int WalFuseOps::op_write(char const*            path,
                          off_t                  offset,
                          struct fuse_file_info* fi) {
   if (auto* segment = get_wal_segment(fi); segment) {
-    log(DEBUG, "write {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
+    log(DEBUG,
+        "write {} size={} off={}, lsn={} buf={}",
+        path,
+        size,
+        offset,
+        segment->lsn(),
+        reinterpret_cast<void const*>(buf));
     n_write.fetch_add(1, std::memory_order_relaxed);
 
-    segment->write(buf, size, offset);
+    segment->write(reinterpret_cast<unsigned char const*>(buf), size, offset);
     return static_cast<int>(size);
   } else
     return FuseOps::op_write(path, buf, size, offset, fi);
@@ -188,7 +196,7 @@ int WalFuseOps::op_read(char const*            path,
     log(DEBUG, "read {} size={} off={}, lsn={}", path, size, offset, segment->lsn());
     n_read.fetch_add(1, std::memory_order_relaxed);
 
-    segment->read(buf, size, offset);
+    segment->read(reinterpret_cast<unsigned char*>(buf), size, offset);
     return static_cast<int>(size);
   } else
     return FuseOps::op_read(path, buf, size, offset, fi);

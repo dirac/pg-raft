@@ -10,7 +10,7 @@ struct WalTracker {
   /// Invoke msync. The args (buff and size) are page aligned.
   virtual void async_fsync(std::promise<int>      promise,
                            shared_ptr<WalSegment> segment,
-                           char*                  buff,
+                           unsigned char*         buff,
                            size_t                 size);
 };
 
@@ -20,16 +20,13 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
       : tracker_(tracker),
         lsn_(lsn),
         fd_(fd),
-        map_(reinterpret_cast<char*>(map)),
+        map_(reinterpret_cast<unsigned char*>(map)),
         prot_(prot),
         next_(0),
         synced_(0),
         state_() {}
 
-  ~WalSegment() {
-    ::munmap(map_, kWalSegmentSize);
-    ::close(fd_);
-  }
+  ~WalSegment();
 
   WalSegment(WalSegment const&)            = delete;
   WalSegment& operator=(WalSegment const&) = delete;
@@ -47,7 +44,7 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   struct WalState {
     WalState() {}
 
-    std::tuple<off_t, size_t> update(char const* ptr, size_t size, off_t offset);
+    std::tuple<off_t, size_t> update(unsigned char const* ptr, size_t size, off_t offset);
 
     off_t  curr() const { return curr_; }
     size_t rsize() const { return rsize_; }
@@ -58,21 +55,21 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   };
 
   /// Update the memory region.
-  void write(char const* buf, size_t size, off_t offset);
+  void write(unsigned char const* buf, size_t size, off_t offset);
 
   /// Read from the memory mapped region.
-  void read(char* buf, size_t size, off_t offset);
+  void read(unsigned char* buf, size_t size, off_t offset);
 
   /// msync the modified region.
   int fsync();
 
  private:
-  WalTracker&        tracker_;
-  LogSeqNumber const lsn_;
-  int const          fd_;
-  char* const        map_;
-  int const          prot_;
-  off_t              next_;
-  off_t              synced_;
-  WalState           state_;
+  WalTracker&          tracker_;
+  LogSeqNumber const   lsn_;
+  int const            fd_;
+  unsigned char* const map_;
+  int const            prot_;
+  off_t                next_;
+  off_t                synced_;
+  WalState             state_;
 };
