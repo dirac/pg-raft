@@ -24,10 +24,8 @@ struct Setup {
       return;
 
     auto data = tmp() / "pgdata";
-    auto raft = tmp() / "pgraft";
-    std::filesystem::create_directory(raft);
 
-    pg.emplace(string(kPgBin), data, raft, vector<string>{"-p", to_string(kPort)});
+    pg.emplace(string(kPgBin), data, vector<string>{"-p", to_string(kPort)});
     BOOST_REQUIRE(pg->init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
     BOOST_REQUIRE(pg->write_config({{"listen_addresses", "'127.0.0.1'"}}));
     BOOST_REQUIRE(pg->write_hba({}));

@@ -20,11 +20,9 @@ static bool has_arg(std::vector<std::string> const& args, std::string_view arg) 
 
 PgInstance::PgInstance(std::filesystem::path    pg_bin,
                        std::filesystem::path    data_dir,
-                       std::filesystem::path    raft_dir,
                        std::vector<std::string> extra_args)
     : pg_bin_(std::move(pg_bin)),
       data_dir_(std::move(data_dir)),
-      raft_dir_(std::move(raft_dir)),
       extra_args_(std::move(extra_args)),
       postgres_(pg_bin_ / "postgres", build_postgres_args(data_dir_, extra_args_)) {}
 
@@ -35,8 +33,8 @@ PgInstance::~PgInstance() {
 
 // ── initialisation ────────────────────────────────────────────────────────────
 
-bool PgInstance::create_raft_wal() {
-  std::filesystem::path const pg_raft_wal = raft_dir_ / "pg_wal";
+bool PgInstance::create_raft_wal(std::filesystem::path raft_dir) {
+  std::filesystem::path const pg_raft_wal = raft_dir / "pg_wal";
   if (mkdir(pg_raft_wal.c_str(), 0700) != 0 && errno != EEXIST)
     return false;
 

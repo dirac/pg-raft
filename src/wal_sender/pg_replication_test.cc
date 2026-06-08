@@ -294,13 +294,15 @@ BOOST_AUTO_TEST_CASE(primary_standby_with_fuse) {
   const std::string base_dir    = base;
   const std::string primary_dir = base_dir + "/primary";
   const std::string standby_dir = base_dir + "/standby";
+  const std::string raft_dir    = base_dir + "/raft";
+  mkdir(raft_dir.c_str(), 0700);
   auto cleanup = [&]() { rmrf(base_dir); };
 
   // ── initialize primary (initdb + create pg_raft_wal) ────────────────────────
   PgInstance primary(kPgBin, primary_dir);
   if (!primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}))
     { cleanup(); BOOST_FAIL("PgInstance::init() failed"); }
-  if (!primary.create_raft_wal())
+  if (!primary.create_raft_wal(raft_dir))
     { cleanup(); BOOST_FAIL("PgInstance::create_raft_wal() failed"); }
   primary.write_config({
       {"listen_addresses", "'127.0.0.1'"},
@@ -316,7 +318,7 @@ BOOST_AUTO_TEST_CASE(primary_standby_with_fuse) {
 
   // ── mount FUSE over pg_wal with WAL-capturing ops ───────────────────────────
   Fuse fuse(primary_dir + "/pg_wal",
-               std::make_unique<WalSendingOps>(primary_dir + "/pg_raft_wal"));
+               std::make_unique<WalSendingOps>(raft_dir + "/pg_wal"));
   if (!fuse.start()) { cleanup(); BOOST_FAIL("Fuse start failed"); }
   if (!wait_for_fuse_mount(primary_dir + "/pg_wal", primary_dir, 5000)) {
     fuse.stop(); cleanup(); BOOST_FAIL("FUSE mount timed out");

@@ -31,10 +31,8 @@ BOOST_AUTO_TEST_CASE(init) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_TEST(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(std::filesystem::exists(data_dir / "postgresql.conf"));
   BOOST_TEST(std::filesystem::exists(data_dir / "pg_wal"));
@@ -48,10 +46,8 @@ BOOST_AUTO_TEST_CASE(write_config_appends_defaults) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(pg.write_config({{"max_connections", "50"}}));
 
@@ -66,10 +62,8 @@ BOOST_AUTO_TEST_CASE(write_config_overrides_default) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   // wal_recycle defaults to "off"; user overrides with "on".
   BOOST_TEST(pg.write_config({{"wal_recycle", "on"}}));
@@ -86,10 +80,8 @@ BOOST_AUTO_TEST_CASE(write_hba_appends_lines_and_defaults) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(pg.write_hba({"host  replication  all  127.0.0.1/32  trust"}));
 
@@ -109,13 +101,13 @@ BOOST_AUTO_TEST_CASE(create_raft_wal_moves_segments) {
   auto raft_pg_wal = raft_dir / "pg_wal";
   std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
 
   int initial = count_regular_files(data_dir / "pg_wal");
   BOOST_REQUIRE_GT(initial, 0);
 
-  BOOST_TEST(pg.create_raft_wal());
+  BOOST_TEST(pg.create_raft_wal(raft_dir));
 
   // All segments moved to raft_dir/pg_wal.
   BOOST_TEST(count_regular_files(raft_pg_wal) == initial);
@@ -130,10 +122,8 @@ BOOST_AUTO_TEST_CASE(start_and_stop) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -152,10 +142,8 @@ BOOST_AUTO_TEST_CASE(stop_immediate) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
-  auto raft_dir = tmp() / "pgraft";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -173,11 +161,9 @@ BOOST_AUTO_TEST_CASE(backup) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir   = tmp() / "pgdata";
-  auto raft_dir   = tmp() / "pgraft";
   auto backup_dir = tmp() / "backup";
-  std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -195,14 +181,12 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
   IoThreads threads{1};
   TmpDir    tmp;
   auto data_dir    = tmp() / "pgdata";
-  auto raft_dir    = tmp() / "pgraft";
   auto backup_dir  = tmp() / "backup";
   auto restore_dir = tmp() / "restored";
-  std::filesystem::create_directory(raft_dir);
 
   // Set up a primary, let it run briefly, then back it up.
   {
-    PgInstance primary(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
+    PgInstance primary(kPgBin, data_dir, {"-p", std::to_string(kPort)});
     BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
     BOOST_REQUIRE(primary.write_config({{"listen_addresses", "'127.0.0.1'"}}));
     BOOST_REQUIRE(primary.write_hba({}));
@@ -212,7 +196,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
   }
 
   // Restore the backup and start a new instance from it.
-  PgInstance replica(kPgBin, restore_dir, raft_dir, {"-p", std::to_string(kPort)});
+  PgInstance replica(kPgBin, restore_dir, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(replica.restore_and_start(backup_dir));
   BOOST_TEST(replica.wait_ready(kPort));
   replica.stop();

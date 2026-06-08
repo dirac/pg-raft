@@ -71,7 +71,7 @@ static double run_without_fuse() {
   auto raft = root / "pgraft";
   std::filesystem::create_directory(raft);
 
-  PgInstance pg(kPgBin, data, raft, {"-p", std::to_string(kNoFusePort)});
+  PgInstance pg(kPgBin, data, {"-p", std::to_string(kNoFusePort)});
 
   if (!pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"})) {
     log(ERROR, "initdb failed");
@@ -123,14 +123,14 @@ static double run_with_fuse() {
   // Fuse must be declared before PgInstance so postgres is stopped (via
   // PgInstance destructor) before the FUSE mount is torn down.
   Fuse       fuse(data / "pg_wal", std::make_unique<WalFuseOps>(tracker, raft_pg_wal));
-  PgInstance pg(kPgBin, data, raft, {"-p", std::to_string(kFusePort)});
+  PgInstance pg(kPgBin, data, {"-p", std::to_string(kFusePort)});
 
   if (!pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"})) {
     log(ERROR, "initdb failed");
     std::filesystem::remove_all(root);
     return 0.0;
   }
-  if (!pg.create_raft_wal()) {
+  if (!pg.create_raft_wal(raft)) {
     log(ERROR, "create_raft_wal failed");
     std::filesystem::remove_all(root);
     return 0.0;

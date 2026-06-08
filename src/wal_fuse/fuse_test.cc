@@ -854,13 +854,13 @@ BOOST_AUTO_TEST_CASE(wal_moved_to_raft_dir) {
   auto      raft_dir = tmp() / "pgraft";
   std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir, raft_dir);
+  PgInstance pg(kPgBin, data_dir);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
 
   int initial = count_wal_segments(data_dir / "pg_wal");
   BOOST_REQUIRE_GT(initial, 0);
 
-  BOOST_TEST(pg.create_raft_wal());
+  BOOST_TEST(pg.create_raft_wal(raft_dir));
   BOOST_TEST(count_wal_segments(raft_dir / "pg_wal") == initial);
   BOOST_TEST(count_wal_segments(data_dir / "pg_wal") == 0);
 }
@@ -907,10 +907,10 @@ BOOST_AUTO_TEST_CASE(wal_writes_to_backing_dir) {
 
   // fuse declared before pg so pg destructs first (stops postgres before FUSE unmounts).
   Fuse    fuse(data_dir / "pg_wal", std::make_unique<FuseOps>(raft_pg_wal));
-  PgInstance pg(kPgBin, data_dir, raft_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-  BOOST_REQUIRE(pg.create_raft_wal());
+  BOOST_REQUIRE(pg.create_raft_wal(raft_dir));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({"host  all  all  127.0.0.1/32  trust"}));
 

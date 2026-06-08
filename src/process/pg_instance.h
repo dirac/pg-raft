@@ -15,7 +15,6 @@ class PgInstance {
   // |extra_args| – extra arguments forwarded to the postgres process.
   PgInstance(std::filesystem::path    pg_bin,
              std::filesystem::path    data_dir,
-             std::filesystem::path    raft_dir,
              std::vector<std::string> extra_args = {});
   ~PgInstance();
 
@@ -67,15 +66,14 @@ class PgInstance {
   // restore() then start().
   bool restore_and_start(std::filesystem::path const& backup_dir);
 
-  // Create raft_dir/pg_wal and move the WAL segments out of
+  // Create |raft_dir|/pg_wal and move the WAL segments out of
   // data_dir/pg_wal into it, leaving pg_wal as an empty directory ready
   // for a FUSE mount. Must be called after init() and before start().
-  bool create_raft_wal();
+  bool create_raft_wal(std::filesystem::path raft_dir);
 
   // ── accessors ─────────────────────────────────────────────────────────────
 
   std::filesystem::path const& data_dir() const { return data_dir_; }
-  std::filesystem::path const& raft_dir() const { return raft_dir_; }
   std::filesystem::path const& pg_bin() const { return pg_bin_; }
 
  private:
@@ -84,7 +82,6 @@ class PgInstance {
 
   std::filesystem::path    pg_bin_;
   std::filesystem::path    data_dir_;
-  std::filesystem::path    raft_dir_;
   std::vector<std::string> extra_args_;
 
   struct PostgresProcess : public Process {

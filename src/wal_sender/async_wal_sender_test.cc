@@ -62,16 +62,12 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
   IoThreads io{4};
   TmpDir    tmp;
 
-  auto primary_dir      = tmp() / "primary";
-  auto primary_raft_dir = tmp() / "primary_raft";
-  auto standby_dir      = tmp() / "standby";
-  auto standby_raft_dir = tmp() / "standby_raft";
-  auto backup_dir       = tmp() / "backup";
-  std::filesystem::create_directories(primary_raft_dir);
-  std::filesystem::create_directories(standby_raft_dir);
+  auto primary_dir = tmp() / "primary";
+  auto standby_dir = tmp() / "standby";
+  auto backup_dir  = tmp() / "backup";
 
   // ── init and start primary ────────────────────────────────────────────────
-  PgInstance primary(string(kPgBin), primary_dir, primary_raft_dir);
+  PgInstance primary(string(kPgBin), primary_dir);
   BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(primary.write_config({
       {"listen_addresses", "'127.0.0.1'"},
@@ -129,7 +125,7 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
   BOOST_REQUIRE(server->bound_port() > 0);
 
   // ── restore backup as standby ─────────────────────────────────────────────
-  PgInstance standby(string(kPgBin), standby_dir, standby_raft_dir);
+  PgInstance standby(string(kPgBin), standby_dir);
   BOOST_REQUIRE(standby.restore(backup_dir));
   std::ofstream(standby_dir / "standby.signal").close();
   BOOST_REQUIRE(standby.write_config({
