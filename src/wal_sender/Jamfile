@@ -1,19 +1,12 @@
 
 lib wal_sender
-    : wal_sender.cc
-      wal_sender_server.cc
-      async_wal_sender.cc
+    : async_wal_sender.cc
       async_wal_sender_server.cc
       ../base//libs
     ;
 
-unit-test wal_sender_test
-    : wal_sender_test.cc
-      wal_sender
-      ../..//external
-    ;
 
-exe async_wal_sender_test
+unit-test async_wal_sender_test
     : async_wal_sender_test.cc
       wal_sender
       ../base//libs
@@ -23,11 +16,3 @@ exe async_wal_sender_test
       ../..//external
     ;
 
-exe pg_replication_test
-    : pg_replication_test.cc
-      wal_sender
-      ../base//base
-      ../process//process
-      ../wal_fuse//fuse
-      ../..//external
-    ;

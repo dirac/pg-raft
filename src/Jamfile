@@ -3,3 +3,4 @@ build-project process ;
 build-project wal_fuse ;
 build-project net ;
 build-project status ;
+build-project wal_sender ;
