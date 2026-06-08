@@ -1,4 +1,4 @@
-#include "src/wal_sender/async_wal_sender.h"
+#include "src/wal_sender/wal_sender.h"
 
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -15,41 +15,41 @@ static constexpr int     kKeepaliveSeconds = 5;
 
 // ── wire helpers ──────────────────────────────────────────────────────────────
 
-void AsyncWalSender::put16(Bytes& b, uint16_t v) {
+void WalSender::put16(Bytes& b, uint16_t v) {
   v = htons(v);
   b.insert(b.end(), reinterpret_cast<uint8_t*>(&v),
            reinterpret_cast<uint8_t*>(&v) + 2);
 }
 
-void AsyncWalSender::put32(Bytes& b, uint32_t v) {
+void WalSender::put32(Bytes& b, uint32_t v) {
   v = htonl(v);
   b.insert(b.end(), reinterpret_cast<uint8_t*>(&v),
            reinterpret_cast<uint8_t*>(&v) + 4);
 }
 
-void AsyncWalSender::put64(Bytes& b, uint64_t v) {
+void WalSender::put64(Bytes& b, uint64_t v) {
   put32(b, static_cast<uint32_t>(v >> 32));
   put32(b, static_cast<uint32_t>(v & 0xFFFFFFFFu));
 }
 
-void AsyncWalSender::put_str(Bytes& b, string const& s) {
+void WalSender::put_str(Bytes& b, string const& s) {
   b.insert(b.end(), s.begin(), s.end());
   b.push_back(0);
 }
 
-uint32_t AsyncWalSender::get32(uint8_t const* p) {
+uint32_t WalSender::get32(uint8_t const* p) {
   uint32_t v;
   memcpy(&v, p, 4);
   return ntohl(v);
 }
 
-uint64_t AsyncWalSender::get64(uint8_t const* p) {
+uint64_t WalSender::get64(uint8_t const* p) {
   return (static_cast<uint64_t>(get32(p)) << 32) | get32(p + 4);
 }
 
 // ── protocol message builders ─────────────────────────────────────────────────
 
-Bytes AsyncWalSender::build_msg(char type, Bytes body) {
+Bytes WalSender::build_msg(char type, Bytes body) {
   Bytes out;
   out.push_back(static_cast<uint8_t>(type));
   put32(out, static_cast<uint32_t>(4 + body.size()));
@@ -57,33 +57,33 @@ Bytes AsyncWalSender::build_msg(char type, Bytes body) {
   return out;
 }
 
-Bytes AsyncWalSender::auth_ok() {
+Bytes WalSender::auth_ok() {
   Bytes b;
   put32(b, 0u);
   return build_msg('R', std::move(b));
 }
 
-Bytes AsyncWalSender::param_status(char const* name, char const* value) {
+Bytes WalSender::param_status(char const* name, char const* value) {
   Bytes b;
   put_str(b, name);
   put_str(b, value);
   return build_msg('S', std::move(b));
 }
 
-Bytes AsyncWalSender::backend_key_data() {
+Bytes WalSender::backend_key_data() {
   Bytes b;
   put32(b, static_cast<uint32_t>(getpid()));
   put32(b, 0u);
   return build_msg('K', std::move(b));
 }
 
-Bytes AsyncWalSender::ready_for_query() {
+Bytes WalSender::ready_for_query() {
   Bytes b;
   b.push_back('I');
   return build_msg('Z', std::move(b));
 }
 
-Bytes AsyncWalSender::row_desc(vector<std::pair<string, int32_t>> const& cols) {
+Bytes WalSender::row_desc(vector<std::pair<string, int32_t>> const& cols) {
   Bytes b;
   put16(b, static_cast<uint16_t>(cols.size()));
   for (auto const& [name, oid] : cols) {
@@ -99,7 +99,7 @@ Bytes AsyncWalSender::row_desc(vector<std::pair<string, int32_t>> const& cols) {
   return build_msg('T', std::move(b));
 }
 
-Bytes AsyncWalSender::data_row(vector<std::optional<string>> const& vals) {
+Bytes WalSender::data_row(vector<std::optional<string>> const& vals) {
   Bytes b;
   put16(b, static_cast<uint16_t>(vals.size()));
   for (auto const& v : vals) {
@@ -113,20 +113,20 @@ Bytes AsyncWalSender::data_row(vector<std::optional<string>> const& vals) {
   return build_msg('D', std::move(b));
 }
 
-Bytes AsyncWalSender::command_complete(char const* tag) {
+Bytes WalSender::command_complete(char const* tag) {
   Bytes b;
   put_str(b, tag);
   return build_msg('C', std::move(b));
 }
 
-Bytes AsyncWalSender::copy_both_response() {
+Bytes WalSender::copy_both_response() {
   Bytes b;
   put8(b, 0);    // overall format: text
   put16(b, 0u);  // no column format codes
   return build_msg('W', std::move(b));
 }
 
-Bytes AsyncWalSender::error_response(char const* m) {
+Bytes WalSender::error_response(char const* m) {
   Bytes b;
   put8(b, 'S');
   put_str(b, "ERROR");
@@ -136,7 +136,7 @@ Bytes AsyncWalSender::error_response(char const* m) {
   return build_msg('E', std::move(b));
 }
 
-Bytes AsyncWalSender::xlog_data(uint64_t lsn, Bytes const& data) const {
+Bytes WalSender::xlog_data(uint64_t lsn, Bytes const& data) const {
   Bytes payload;
   put8(payload, 'w');
   put64(payload, lsn);
@@ -146,7 +146,7 @@ Bytes AsyncWalSender::xlog_data(uint64_t lsn, Bytes const& data) const {
   return build_msg('d', std::move(payload));
 }
 
-Bytes AsyncWalSender::keepalive_msg() const {
+Bytes WalSender::keepalive_msg() const {
   Bytes payload;
   put8(payload, 'k');
   put64(payload, end_lsn_);
@@ -155,13 +155,13 @@ Bytes AsyncWalSender::keepalive_msg() const {
   return build_msg('d', std::move(payload));
 }
 
-uint64_t AsyncWalSender::parse_lsn(string const& s) {
+uint64_t WalSender::parse_lsn(string const& s) {
   uint32_t hi = 0, lo = 0;
   sscanf(s.c_str(), "%X/%X", &hi, &lo);
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
-string AsyncWalSender::format_lsn(uint64_t lsn) {
+string WalSender::format_lsn(uint64_t lsn) {
   char buf[32];
   snprintf(buf, sizeof(buf), "%X/%X",
            static_cast<uint32_t>(lsn >> 32),
@@ -169,7 +169,7 @@ string AsyncWalSender::format_lsn(uint64_t lsn) {
   return buf;
 }
 
-int64_t AsyncWalSender::now_pg_ts() {
+int64_t WalSender::now_pg_ts() {
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch())
                 .count();
@@ -178,10 +178,10 @@ int64_t AsyncWalSender::now_pg_ts() {
 
 // ── construction ──────────────────────────────────────────────────────────────
 
-AsyncWalSender::AsyncWalSender(tcp::socket socket, std::filesystem::path wal_dir,
-                               uint64_t system_id, uint32_t timeline,
-                               uint64_t flush_lsn, StatusCb status_cb,
-                               uint32_t wal_segment_size)
+WalSender::WalSender(tcp::socket socket, std::filesystem::path wal_dir,
+                     uint64_t system_id, uint32_t timeline,
+                     uint64_t flush_lsn, StatusCb status_cb,
+                     uint32_t wal_segment_size)
     : socket_(std::move(socket)),
       strand_(io_context()),
       wal_dir_(std::move(wal_dir)),
@@ -193,24 +193,24 @@ AsyncWalSender::AsyncWalSender(tcp::socket socket, std::filesystem::path wal_dir
       status_cb_(std::move(status_cb)),
       keepalive_timer_(io_context()) {}
 
-shared_ptr<AsyncWalSender> AsyncWalSender::create(
+shared_ptr<WalSender> WalSender::create(
     tcp::socket socket, std::filesystem::path wal_dir,
     uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
     StatusCb status_cb, uint32_t wal_segment_size) {
-  return shared_ptr<AsyncWalSender>(new AsyncWalSender(
+  return shared_ptr<WalSender>(new WalSender(
       std::move(socket), std::move(wal_dir), system_id, timeline, flush_lsn,
       std::move(status_cb), wal_segment_size));
 }
 
-void AsyncWalSender::start() {
+void WalSender::start() {
   asio::post(strand_, [s = self()]() { s->do_read_startup_len(); });
 }
 
-void AsyncWalSender::advance(uint64_t flush_lsn) {
+void WalSender::advance(uint64_t flush_lsn) {
   asio::post(strand_, [this, s = self(), flush_lsn]() { do_advance(flush_lsn); });
 }
 
-void AsyncWalSender::shutdown() {
+void WalSender::shutdown() {
   asio::post(strand_, [this, s = self()]() {
     if (shutdown_) return;
     shutdown_ = true;
@@ -219,14 +219,14 @@ void AsyncWalSender::shutdown() {
   });
 }
 
-void AsyncWalSender::close_socket() {
+void WalSender::close_socket() {
   error_code ec;
   socket_.close(ec);
 }
 
 // ── startup read chain ────────────────────────────────────────────────────────
 
-void AsyncWalSender::do_read_startup_len() {
+void WalSender::do_read_startup_len() {
   asio::async_read(
       socket_, asio::buffer(startup_len_buf_),
       asio::bind_executor(strand_, [this, s = self()](error_code ec, size_t) {
@@ -240,7 +240,7 @@ void AsyncWalSender::do_read_startup_len() {
       }));
 }
 
-void AsyncWalSender::do_read_startup_body(uint32_t total_len) {
+void WalSender::do_read_startup_body(uint32_t total_len) {
   uint32_t body_len = total_len - 4;
   body_buf_.resize(body_len);
   asio::async_read(
@@ -267,7 +267,7 @@ void AsyncWalSender::do_read_startup_body(uint32_t total_len) {
       }));
 }
 
-void AsyncWalSender::handle_startup_body(Bytes /*body*/) {
+void WalSender::handle_startup_body(Bytes /*body*/) {
   // Build and send: AuthOk + ParameterStatus×3 + BackendKeyData + ReadyForQuery
   Bytes resp;
   auto app = [&resp](Bytes b) { resp.insert(resp.end(), b.begin(), b.end()); };
@@ -284,7 +284,7 @@ void AsyncWalSender::handle_startup_body(Bytes /*body*/) {
 
 // ── command loop ──────────────────────────────────────────────────────────────
 
-void AsyncWalSender::do_read_msg_hdr() {
+void WalSender::do_read_msg_hdr() {
   asio::async_read(
       socket_, asio::buffer(hdr_buf_),
       asio::bind_executor(strand_, [this, s = self()](error_code ec, size_t) {
@@ -299,7 +299,7 @@ void AsyncWalSender::do_read_msg_hdr() {
       }));
 }
 
-void AsyncWalSender::do_read_msg_body(char type, uint32_t body_len) {
+void WalSender::do_read_msg_body(char type, uint32_t body_len) {
   body_buf_.resize(body_len);
   if (body_len == 0) {
     handle_msg(type, {});
@@ -313,7 +313,7 @@ void AsyncWalSender::do_read_msg_body(char type, uint32_t body_len) {
       }));
 }
 
-void AsyncWalSender::handle_msg(char type, Bytes body) {
+void WalSender::handle_msg(char type, Bytes body) {
   if (type == 'X') {
     close_socket();
     return;
@@ -413,7 +413,7 @@ void AsyncWalSender::handle_msg(char type, Bytes body) {
 
 // ── streaming read chain ──────────────────────────────────────────────────────
 
-void AsyncWalSender::do_read_copy_hdr() {
+void WalSender::do_read_copy_hdr() {
   asio::async_read(
       socket_, asio::buffer(hdr_buf_),
       asio::bind_executor(strand_, [this, s = self()](error_code ec, size_t) {
@@ -428,7 +428,7 @@ void AsyncWalSender::do_read_copy_hdr() {
       }));
 }
 
-void AsyncWalSender::do_read_copy_body(char type, uint32_t body_len) {
+void WalSender::do_read_copy_body(char type, uint32_t body_len) {
   body_buf_.resize(body_len);
   if (body_len == 0) {
     handle_copy_msg(type, {});
@@ -442,7 +442,7 @@ void AsyncWalSender::do_read_copy_body(char type, uint32_t body_len) {
       }));
 }
 
-void AsyncWalSender::handle_copy_msg(char type, Bytes const& body) {
+void WalSender::handle_copy_msg(char type, Bytes const& body) {
   switch (type) {
     case 'd': {  // CopyData from standby
       if (!body.empty() && body[0] == 'r' && body.size() >= 34) {
@@ -471,12 +471,12 @@ void AsyncWalSender::handle_copy_msg(char type, Bytes const& body) {
 
 // ── write side ────────────────────────────────────────────────────────────────
 
-void AsyncWalSender::enqueue_send(Bytes buf) {
+void WalSender::enqueue_send(Bytes buf) {
   send_queue_.push_back(std::move(buf));
   drain_sends();
 }
 
-void AsyncWalSender::drain_sends() {
+void WalSender::drain_sends() {
   if (writing_ || send_queue_.empty()) return;
   writing_    = true;
   writing_buf_ = std::move(send_queue_.front());
@@ -492,7 +492,7 @@ void AsyncWalSender::drain_sends() {
 
 // ── WAL reading ───────────────────────────────────────────────────────────────
 
-void AsyncWalSender::do_advance(uint64_t new_flush) {
+void WalSender::do_advance(uint64_t new_flush) {
   if (new_flush > flush_lsn_) {
     flush_lsn_ = new_flush;
     end_lsn_   = std::max(end_lsn_, new_flush);
@@ -539,7 +539,7 @@ void AsyncWalSender::do_advance(uint64_t new_flush) {
 
 // ── keepalive ─────────────────────────────────────────────────────────────────
 
-void AsyncWalSender::schedule_keepalive() {
+void WalSender::schedule_keepalive() {
   keepalive_timer_.expires_after(std::chrono::seconds(kKeepaliveSeconds));
   keepalive_timer_.async_wait(
       asio::bind_executor(strand_, [this, s = self()](error_code ec) {

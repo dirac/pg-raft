@@ -9,11 +9,11 @@ struct StandbyStatus {
 
 // Asio-based WAL sender.  Handles one physical replication connection.
 // Reads WAL from |wal_dir| as advance() notifications arrive.
-class AsyncWalSender : public std::enable_shared_from_this<AsyncWalSender> {
+class WalSender : public std::enable_shared_from_this<WalSender> {
  public:
   using StatusCb = std::function<void(StandbyStatus const&)>;
 
-  static shared_ptr<AsyncWalSender> create(
+  static shared_ptr<WalSender> create(
       asio::ip::tcp::socket  socket,
       std::filesystem::path  wal_dir,
       uint64_t               system_id,
@@ -33,11 +33,11 @@ class AsyncWalSender : public std::enable_shared_from_this<AsyncWalSender> {
   using tcp = asio::ip::tcp;
   enum class Phase { kStartup, kCommand, kStreaming };
 
-  AsyncWalSender(tcp::socket socket, std::filesystem::path wal_dir,
-                 uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
-                 StatusCb status_cb, uint32_t wal_segment_size);
+  WalSender(tcp::socket socket, std::filesystem::path wal_dir,
+            uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
+            StatusCb status_cb, uint32_t wal_segment_size);
 
-  shared_ptr<AsyncWalSender> self() { return shared_from_this(); }
+  shared_ptr<WalSender> self() { return shared_from_this(); }
 
   // Startup packet (no type byte: length + body).
   void do_read_startup_len();

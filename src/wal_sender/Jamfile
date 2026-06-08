@@ -1,13 +1,13 @@
 
 lib wal_sender
-    : async_wal_sender.cc
-      async_wal_sender_server.cc
+    : wal_sender.cc
+      wal_sender_server.cc
       ../base//libs
     ;
 
 
-unit-test async_wal_sender_test
-    : async_wal_sender_test.cc
+unit-test wal_sender_test
+    : wal_sender_test.cc
       wal_sender
       ../base//libs
       ../base//testing
@@ -15,4 +15,3 @@ unit-test async_wal_sender_test
       ../status//status
       ../..//external
     ;
-

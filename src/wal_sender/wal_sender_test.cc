@@ -1,10 +1,10 @@
-#define BOOST_TEST_MODULE async_wal_sender
+#define BOOST_TEST_MODULE wal_sender
 
 #include "src/base/io_threads.h"
 #include "src/base/testing.h"
 #include "src/process/pg_instance.h"
 #include "src/status/pg_client.h"
-#include "src/wal_sender/async_wal_sender_server.h"
+#include "src/wal_sender/wal_sender_server.h"
 
 static constexpr char const* kPgBin       = "/opt/pg_raft/postgresql/17/bin";
 static constexpr uint16_t    kPrimaryPort = 15445;
@@ -110,13 +110,13 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
       static_cast<uint32_t>(initial_lsn));
 
   // ── set up WAL sender server ──────────────────────────────────────────────
-  std::mutex                   sender_mu;
-  shared_ptr<AsyncWalSender>   active_sender;
+  std::mutex              sender_mu;
+  shared_ptr<WalSender>   active_sender;
 
   auto wal_dir = primary_dir / "pg_wal";
-  auto server = AsyncWalSenderServer::create(
+  auto server = WalSenderServer::create(
       kSenderPort, wal_dir, system_id, /*timeline=*/1, initial_lsn,
-      [&sender_mu, &active_sender](shared_ptr<AsyncWalSender> s) {
+      [&sender_mu, &active_sender](shared_ptr<WalSender> s) {
         std::lock_guard lk(sender_mu);
         active_sender = s;
         log(INFO, "new WAL sender connection");
@@ -155,7 +155,7 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
 
       uint64_t lsn = parse_lsn(*rows->at(0)[0]);
 
-      shared_ptr<AsyncWalSender> s;
+      shared_ptr<WalSender> s;
       {
         std::lock_guard lk(sender_mu);
         s = active_sender;

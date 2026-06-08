@@ -1,15 +1,15 @@
 #pragma once
 #include "src/base/base.h"
-#include "src/wal_sender/async_wal_sender.h"
+#include "src/wal_sender/wal_sender.h"
 
-// Asio-based TCP accept loop.  Creates one AsyncWalSender per connection and
+// Asio-based TCP accept loop.  Creates one WalSender per connection and
 // calls on_sender with it immediately after start() is called on the sender.
-class AsyncWalSenderServer
-    : public std::enable_shared_from_this<AsyncWalSenderServer> {
+class WalSenderServer
+    : public std::enable_shared_from_this<WalSenderServer> {
  public:
-  using SenderCb = std::function<void(shared_ptr<AsyncWalSender>)>;
+  using SenderCb = std::function<void(shared_ptr<WalSender>)>;
 
-  static shared_ptr<AsyncWalSenderServer> create(
+  static shared_ptr<WalSenderServer> create(
       uint16_t              port,
       std::filesystem::path wal_dir,
       uint64_t              system_id,
@@ -29,11 +29,11 @@ class AsyncWalSenderServer
  private:
   using tcp = asio::ip::tcp;
 
-  AsyncWalSenderServer(uint16_t port, std::filesystem::path wal_dir,
-                       uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
-                       SenderCb on_sender, uint32_t wal_segment_size);
+  WalSenderServer(uint16_t port, std::filesystem::path wal_dir,
+                  uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
+                  SenderCb on_sender, uint32_t wal_segment_size);
 
-  shared_ptr<AsyncWalSenderServer> self() { return shared_from_this(); }
+  shared_ptr<WalSenderServer> self() { return shared_from_this(); }
   void do_accept();
 
   uint16_t              port_;
