@@ -1,0 +1,66 @@
+
+
+alias deps
+  : ../../base//base
+    ../../base//deps
+    ../../net//libs
+  ;
+
+lib zookeeper_server
+  : raft_client_connection.cpp
+    raft_follower_connection.cpp
+    raft_peer_connection.cpp
+    peer_connection_mgr.cpp
+    match_indexes.cpp
+    vote_tally.cpp
+    raft_server.cpp
+    snapshot.cpp
+    zk_state.cpp
+    raft_log.cpp
+    raft_types.cpp
+    deps
+  ;
+
+lib zookeeper_client
+  : raft_server_connection.cpp
+    raft_ensemble_connection.cpp
+    deps
+  ;
+
+lib zk_test
+  : zk_test_service.cpp
+    zookeeper_server
+  ;
+
+unit-test raft_ensemble_test
+  : raft_ensemble_test.cpp
+    zk_test
+    zookeeper_client
+    zookeeper_server
+    deps
+    ../../base//testing
+  ;
+
+unit-test zk_types_test
+  : zk_types_test.cpp
+    ../../base//testing
+    deps
+  ;
+
+unit-test zk_state_test
+  : zk_state_test.cpp
+    zookeeper_server
+    ../../base//testing
+  ;
+
+unit-test raft_log_test
+  : raft_log_test.cpp
+    zookeeper_server
+    ../../base//testing
+  ;
+
+unit-test raft_log_snapshot_test
+  : raft_log_snapshot_test.cpp
+    zookeeper_server
+    ../../base//testing
+  ;

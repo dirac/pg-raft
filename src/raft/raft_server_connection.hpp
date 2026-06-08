@@ -1,0 +1,79 @@
+#ifndef LIB_SERVERS_ZOOKEEPER_RAFT_SERVER_CONNECTION_HPP_
+#define LIB_SERVERS_ZOOKEEPER_RAFT_SERVER_CONNECTION_HPP_
+
+#include "lib/net/connection.hpp"
+#include "lib/servers/zookeeper/zk_types.hpp"
+
+namespace banyandb::servers::zookeeper {
+using namespace banyandb::base;
+using namespace banyandb::net;
+
+/// A raft server creates a connection to the Raft Server. The other end if RaftClientConnection.
+class RaftServerConnection : public Connection<> {
+ public:
+  static Logger logger;
+
+  RaftServerConnection(string const&             self,
+                       RaftNodeId                node_id,
+                       std::chrono::milliseconds timeout,
+                       socket_type               socket)
+      : Connection<>(to_string(Role::kZookeeper),
+                     fn::format("{0}", INT(node_id)),
+                     std::move(socket),
+                     std::filesystem::path(),
+                     timeout,
+                     logger),
+        id_(node_id),
+        leader_(false) {
+    set_log_prefix(fn::format("({0} -> Zk-{1}) ", self, INT(id_)));
+  }
+
+  void close() { shutdown(); }
+
+  Result<ZkResponse> exec(ZkRequest const& request);
+
+  void set_peer_status(uint8_t l) final { set_leader(l ? true : false); }
+
+  void async_leadership_check(std::function<void(Result<bool>)> check) {
+    {
+      auto lk = std::unique_lock{leadership_checks_mtx_};
+      leadership_checks_.emplace_back(std::move(check));
+    }
+    request_peer_status();
+  }
+
+  bool is_leader() const { return leader_.load(std::memory_order_relaxed) && !closed(); }
+
+  RaftNodeId node_id() const { return id_; }
+
+ private:
+  void write_request(ZkRequest const& request, std::function<void(Result<Data>)> result_cb);
+
+  void set_leader(Result<bool> v) {
+    bool new_v = v && v.value();
+    bool old_v = leader_.exchange(new_v, std::memory_order_relaxed);
+
+    if (old_v != new_v)
+      LOG_INFO << log_prefix() << "Leadership for " << id_ << " changed from " << old_v << " to "
+               << new_v;
+
+    std::unique_lock<std::mutex> lk{leadership_checks_mtx_};
+    std::for_each(
+        std::begin(leadership_checks_), std::end(leadership_checks_), [v](auto& c) { c(v); });
+    leadership_checks_.clear();
+  }
+
+ private:
+  RaftNodeId const id_;
+
+  std::atomic<bool> leader_;
+
+  std::deque<std::function<void(Result<bool>)>> leadership_checks_;
+  std::mutex                                    leadership_checks_mtx_;
+
+  mutable std::mutex mtx_;  /// Make sure there is only one outstanding request.
+};
+
+}  // namespace banyandb::servers::zookeeper
+
+#endif
