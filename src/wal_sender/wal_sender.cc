@@ -332,6 +332,7 @@ void WalSender::handle_msg(char type, Bytes body) {
   while (!query.empty() && query.back() == '\0')
     query.pop_back();
 
+  log(INFO, "From standby: {}", query);
   string upper = query;
   for (char& c : upper)
     c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
