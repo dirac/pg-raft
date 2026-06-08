@@ -2,11 +2,24 @@
 lib wal_sender
     : wal_sender.cc
       wal_sender_server.cc
+      async_wal_sender.cc
+      async_wal_sender_server.cc
+      ../base//libs
     ;
 
 unit-test wal_sender_test
     : wal_sender_test.cc
       wal_sender
+      ../..//external
+    ;
+
+exe async_wal_sender_test
+    : async_wal_sender_test.cc
+      wal_sender
+      ../base//libs
+      ../base//testing
+      ../process//process
+      ../status//status
       ../..//external
     ;
 
