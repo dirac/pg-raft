@@ -104,7 +104,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 **`src/process/`** — Two classes:
 
 - **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
-- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, raft_dir, extra_args)`. Provides: `init()` (runs `initdb`), `create_raft_wal()` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, extra_args={})`. Provides: `init(initdb_args)` (runs `initdb`), `create_raft_wal(raft_dir)` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
 
 **`src/wal_sender/`** — Two cooperating Asio-based classes:
 
@@ -116,13 +116,13 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
-- **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. All ops expose `std::atomic<uint64_t> n_<opname>` counters (relaxed, observation-only) for testing. Tests supply a derived class that overrides `op_write` and `op_fsync` to capture WAL.
+- **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. All ops expose `std::atomic<uint64_t> n_<opname>` counters (relaxed, observation-only) for testing.
 
-- **`WalFuseOps`** (in `wal_fuse_ops.h/cc`) — `FuseOps` subclass that identifies WAL segment files by their 24-hex-char filename (TLI+LOGID+LOGSEG), memory-maps them via `mmap`, and routes writes/reads through `WalSegment` objects stored per `LogSeqNumber` in `segments_`. Non-WAL files fall through to the `FuseOps` passthrough. Stores a raw tagged `WalSegment*` in `fuse_file_info::fh` (bit 63 set = WAL file) to avoid a map lookup on every I/O call.
+- **`WalFuseOps`** (in `wal_fuse_ops.h/cc`) — `FuseOps` subclass that identifies WAL segment files by their 24-hex-char filename (TLI+LOGID+LOGSEG), memory-maps them via `mmap`, and routes writes/reads through `WalSegment` objects stored per `(prot, LogSeqNumber)` in `segments_`. Non-WAL files fall through to the `FuseOps` passthrough. Stores a raw tagged `WalSegment*` in `fuse_file_info::fh` (bit 63 set = WAL file) to avoid a map lookup on every I/O call.
 
-- **`WalSegment`** (in `wal_segment.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer (`map_`), an fd, parse cursor (`next_`), sync cursor (`synced_`), and a `WalState` that tracks completed XLogRecord bytes. `write()` advances the cursor via `WalState::update()` (parses XLog page and record headers inline) and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result via `std::future`.
+- **`WalSegment`** (in `wal_segment.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer (`map_`), an fd, parse cursor (`next_`), sync cursor (`synced_`), and a `WalState` that tracks completed XLogRecord bytes. `write()` advances the cursor via `WalState::update()` (returns `tuple<off_t, size_t, bool>` — offset, size, and whether a full record was completed) and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result via `std::future`.
 
-- **`WalTracker`** — Abstract interface (virtual base) that external code implements to receive WAL events. `async_publish(file, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, file, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done. The caller (e.g. the raft layer) supplies the concrete `WalTracker` to `WalFuseOps`.
+- **`WalTracker`** — Interface that external code implements to receive WAL events. Has default (non-pure-virtual) no-op implementations. `async_publish(segment, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, segment, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done.
 
 Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
@@ -130,31 +130,33 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 
 - **`PgClient`** — Async PostgreSQL extended-protocol client over a raw TCP socket (not libpq). `connect(port)` synchronously establishes a connection. `prepare(sql)` synchronously sends a `Parse`/`Describe`/`Sync` sequence and returns a `PgStmt` handle. `async_exec(stmt, cb)` executes a prepared statement asynchronously and delivers `Result<Rows>` to the callback; multiple calls queue up and run one at a time. `close()` tears down the socket. Used in tests to verify replication state (e.g. row counts, LSNs) without needing an external psql binary.
 
-**`src/raft/`** and **`src/proxy/`** — Reserved directories for future modules; currently empty with no `Jamfile`.
+**`src/proxy/`** — Reserved directory for a future module; currently empty with no `Jamfile`.
 
 ### Data flow (end-to-end)
 
 ```
 initdb
-  └─▶  PgInstance::create_raft_wal()  ──(moves WAL)──▶  pg_raft_wal/
-                                                               │
-                 Fuse (FUSE)  ◀──(backs)────────────────────┘
-                    │  mounted at pg_wal
+  └─▶  PgInstance::create_raft_wal(raft_dir)  ──(moves WAL)──▶  raft_dir/pg_wal/
+                                                                        │
+                 Fuse (FUSE)  ◀──(backed by)──────────────────────────┘
+                    │  mounted at data_dir/pg_wal
                     ▼
-               postgres write(WAL) ──▶ FUSE op_write (WalSendingOps subclass)
-                                             │  accumulates bytes in WalFileAccum
-                                             │  (per WAL segment file, keyed by FUSE path)
+               postgres write(WAL) ──▶ WalFuseOps::op_write
+                                             │  WalSegment::write() — validates XLog
+                                             │  page headers (magic 0xD116, xlp_pageaddr)
+                                             │  and calls WalTracker::async_publish()
                                              ▼
-                                       postgres fsync ──▶ FUSE op_fsync → flush_wal_accum()
-                                             │  validates XLog page header magic (0xD116)
-                                             │  and xlp_pageaddr before building WalSegment
+                                       postgres fsync ──▶ WalFuseOps::op_fsync
+                                             │  WalSegment::fsync() — msync dirty pages
+                                             │  calls WalTracker::async_fsync() and
+                                             │  blocks on std::future result
                                              ▼
-                                       WalSender.advance(flush_lsn)
+                                       WalSender::advance(flush_lsn)
                                              │  reads WAL from wal_dir on disk
                                        WalSenderServer  ──(wire protocol TCP)──▶  PostgreSQL standby
 ```
 
-WAL bytes are accumulated per-file in `WalFileAccum` on each FUSE `write`, then validated and delivered as a single `WalSegment` on `fsync`. Validation walks pages checking magic (`0xD116`) and `xlp_pageaddr`; it stops at the first stale or pre-zeroed page. macOS `F_FULLFSYNC` is not intercepted by FUSE, but regular `fsync` is — which is sufficient for PostgreSQL's WAL flush path.
+WAL segment files are memory-mapped on first open. `WalSegment::write()` parses XLog page and record headers inline and stops at the first stale or pre-zeroed page. macOS `F_FULLFSYNC` is not intercepted by FUSE, but regular `fsync` is — which is sufficient for PostgreSQL's WAL flush path.
 
 
 ### Key data types
@@ -190,9 +192,9 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 
 - **`process_test`** — unit tests for `Process`.
 - **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
-- **`wal_sender_test`** — integration test for `WalSender`/`WalSenderServer`. Starts a real primary and standby PostgreSQL, configures the standby to replicate via `WalSenderServer`, runs pgbench, and verifies the standby catches up by LSN and row count. Uses `PgClient` internally to query both instances. Requires PostgreSQL at `/opt/pg_raft/postgresql/17/bin`; auto-skips if absent.
-- **`wal_fuse_test`** — integration test. Uses `PgInstance::create_raft_wal()` + `Fuse` to start a real postgres instance with the FUSE layer active, generates WAL, and verifies WAL files land in `pg_raft_wal` rather than `pg_wal`. Note: `WalMovedToRaftDir` and `WalWritesToBackingDir` are marked `*boost::unit_test::disabled()` and never run automatically; only `ReadDirLargeDirectory` (no PostgreSQL needed) runs in CI.
+- **`wal_sender_test`** — integration test for `WalSender`/`WalSenderServer`. Starts a real primary and standby PostgreSQL, configures the standby to replicate via `WalSenderServer`, runs pgbench, and verifies the standby catches up by LSN and row count. Uses `PgClient` internally to query both instances. Requires PostgreSQL; auto-skips if absent.
+- **`fuse_test`** — tests for `Fuse` and `FuseOps`. The majority of cases (lifecycle, passthrough reads/writes, getattr, xattr, rename, concurrency, etc.) run without PostgreSQL. Two cases (`wal_moved_to_raft_dir`, `wal_writes_to_backing_dir`) start a real PostgreSQL instance and skip if it's absent.
 - **`wal_fuse_ops_test`** — unit tests for `WalFuseOps` and `WalSegment` interaction. Exercises open/write/fsync/read/release ops against a `WalFuseOps` instance backed by a `TmpDir`. No real PostgreSQL needed.
-- **`wal_state_test`** — unit tests for `WalSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size)` tuples. No real PostgreSQL needed.
+- **`wal_state_test`** — unit tests for `WalSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size, complete)` tuples. No real PostgreSQL needed.
 - **`wal_shadow_test`** — integration test using `WalFuseOps` directly (via a `ShadowWalOps` subclass that mirrors writes into an in-memory buffer). Starts a real PostgreSQL instance, runs pgbench, then cross-checks the shadow buffer against the on-disk WAL bytes. Auto-skips if PostgreSQL is absent.
-- **`pg_client_test`** — integration tests for `PgClient`. Starts a real PostgreSQL instance, exercises `connect`/`prepare`/`async_exec`. Requires PostgreSQL at `/opt/pg_raft/postgresql/17/bin`; auto-skips if absent.
+- **`pg_client_test`** — integration tests for `PgClient`. Starts a real PostgreSQL instance, exercises `connect`/`prepare`/`async_exec`. Requires PostgreSQL; auto-skips if absent.
