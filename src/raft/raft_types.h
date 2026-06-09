@@ -1,7 +1,7 @@
 #pragma once
 
 #include "src/base/base.h"
-#include "src/raft/zk_types.h"
+#include "src/raft/wal_types.h"
 
 struct RequestElection {
   std::tuple<RaftTerm, RaftIndex> last_entry;
@@ -47,7 +47,7 @@ struct Entry {
   std::time_t time;  // The timestamp when the entry was created.
   RaftTerm    term;  // The term this entry was created.
 
-  std::variant<std::monostate, ZkRequest> cmd;
+  std::variant<std::monostate, WalCommand> cmd;
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
