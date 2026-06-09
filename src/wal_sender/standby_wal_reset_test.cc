@@ -74,9 +74,9 @@ static bool wait_for_catchup(uint16_t standby_port, uint64_t target) {
 
 // ── test ──────────────────────────────────────────────────────────────────────
 
-// Runs a first pgbench batch and waits for the standby to catch up, then stops
-// the standby and deletes all WAL segment files from its pg_wal directory.
-// Runs a second pgbench batch while the standby is down, then restarts it.
+// Starts a first pgbench batch, then stops the standby and deletes all WAL
+// segment files from its pg_wal directory while pgbench is still running.
+// Waits for pgbench to finish, runs a second batch, then restarts the standby.
 // Verifies that WalSenderServer re-streams the missing WAL from the earlier
 // position and the standby converges to the final primary LSN.
 BOOST_AUTO_TEST_CASE(standby_wal_reset) {
@@ -191,27 +191,18 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
     (*conn)->close();
   });
 
-  // ── first pgbench batch ───────────────────────────────────────────────────
-  {
-    Process p(string(kPgBin) + "/pgbench",
-              {"-h", "127.0.0.1", "-p", std::to_string(kPrimaryPort),
-               "-t", "100", "-c", "4", "postgres"});
-    BOOST_REQUIRE(p.start());
-    BOOST_REQUIRE_EQUAL(p.wait(), 0);
-  }
+  // ── start first pgbench batch in the background ──────────────────────────
+  Process pgbench1(string(kPgBin) + "/pgbench",
+                   {"-h", "127.0.0.1", "-p", std::to_string(kPrimaryPort),
+                    "-t", "200", "-c", "4", "postgres"});
+  BOOST_REQUIRE(pgbench1.start());
 
-  // Wait for standby to catch up before stopping it.
-  auto mid_conn = PgClient::connect(kPrimaryPort).value();
-  uint64_t mid_lsn =
-      parse_lsn(exec_one(mid_conn, "SELECT pg_current_wal_flush_lsn()::text"));
-  mid_conn->close();
-  log(INFO, "mid_lsn={:x}/{:x}",
-      static_cast<uint32_t>(mid_lsn >> 32), static_cast<uint32_t>(mid_lsn));
-  BOOST_REQUIRE(wait_for_catchup(kStandbyPort, mid_lsn));
+  // Let pgbench generate some WAL before stopping the standby.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  // ── stop standby and delete its WAL segment files ────────────────────────
+  // ── stop standby and delete its WAL segment files while pgbench runs ─────
   standby.stop(PgInstance::StopMode::Fast);
-  log(INFO, "standby stopped; deleting WAL files");
+  log(INFO, "standby stopped mid-replication; deleting WAL files");
 
   int deleted = 0;
   for (auto const& entry : std::filesystem::directory_iterator(standby_dir / "pg_wal")) {
@@ -223,7 +214,10 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   log(INFO, "deleted {} WAL file(s) from standby", deleted);
   BOOST_REQUIRE_GT(deleted, 0);
 
-  // ── second pgbench batch while standby is down ────────────────────────────
+  // Wait for the first pgbench batch to finish.
+  BOOST_REQUIRE_EQUAL(pgbench1.wait(), 0);
+
+  // ── second pgbench batch while standby is still down ─────────────────────
   {
     Process p(string(kPgBin) + "/pgbench",
               {"-h", "127.0.0.1", "-p", std::to_string(kPrimaryPort),
