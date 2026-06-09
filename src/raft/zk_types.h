@@ -52,8 +52,8 @@ struct FlushOp {
 };
 
 struct WalCommand {
-  uint64_t                                        flushed_lsn;
-  std::variant<OpenOp, WriteOp, FlushOp, CloseOp> command;
+  uint64_t                                                flushed_lsn;
+  std::variant<TestOp, OpenOp, WriteOp, FlushOp, CloseOp> command;
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
