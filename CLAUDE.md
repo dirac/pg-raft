@@ -33,6 +33,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/process//process_test
 /opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
+/opt/sparrow/bin/b2 src/wal_sender//pg_wal_switch_test
 /opt/sparrow/bin/b2 src/wal_fuse//fuse_test
 /opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_ops_test
 /opt/sparrow/bin/b2 src/wal_fuse//wal_state_test
@@ -193,6 +194,7 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 - **`process_test`** — unit tests for `Process`.
 - **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
 - **`wal_sender_test`** — integration test for `WalSender`/`WalSenderServer`. Starts a real primary and standby PostgreSQL, configures the standby to replicate via `WalSenderServer`, runs pgbench, and verifies the standby catches up by LSN and row count. Uses `PgClient` internally to query both instances. Requires PostgreSQL; auto-skips if absent.
+- **`pg_wal_switch_test`** — integration test for WAL segment boundary handling. Same setup as `wal_sender_test` but calls `pg_switch_wal()` four times concurrently while pgbench is running, forcing the WalSender to follow WAL across multiple forced segment transitions. Requires PostgreSQL; auto-skips if absent.
 - **`fuse_test`** — tests for `Fuse` and `FuseOps`. The majority of cases (lifecycle, passthrough reads/writes, getattr, xattr, rename, concurrency, etc.) run without PostgreSQL. Two cases (`wal_moved_to_raft_dir`, `wal_writes_to_backing_dir`) start a real PostgreSQL instance and skip if it's absent.
 - **`wal_fuse_ops_test`** — unit tests for `WalFuseOps` and `WalSegment` interaction. Exercises open/write/fsync/read/release ops against a `WalFuseOps` instance backed by a `TmpDir`. No real PostgreSQL needed.
 - **`wal_state_test`** — unit tests for `WalSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size, complete)` tuples. No real PostgreSQL needed.
