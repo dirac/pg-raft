@@ -15,3 +15,13 @@ unit-test wal_sender_test
       ../status//status
       ../..//external
     ;
+
+unit-test pg_wal_switch_test
+    : pg_wal_switch_test.cc
+      wal_sender
+      ../base//libs
+      ../base//testing
+      ../process//process
+      ../status//status
+      ../..//external
+    ;

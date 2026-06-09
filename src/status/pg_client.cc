@@ -58,7 +58,7 @@ Bytes make_startup(string const& user) {
   put_str(body, user);
   put_str(body, "database");
   put_str(body, "postgres");  // always connect to the default maintenance database
-  body.push_back(0);  // terminator
+  body.push_back(0);          // terminator
 
   Bytes out;
   put32(out, static_cast<uint32_t>(body.size()) + 4u);
@@ -121,7 +121,7 @@ Result<void> PgClient::sync_drain() {
   for (;;) {
     auto r = sync_read_msg();
     if (!r)
-      return r.error();
+      return elog(r.error(), "Error reading the next packet");
     auto [type, body] = std::move(*r);
 
     if (type == 'Z')
@@ -146,16 +146,16 @@ Result<shared_ptr<PgClient>> PgClient::connect(uint16_t port) {
   tcp::socket socket(io_context());
   socket.connect(tcp::endpoint(asio::ip::address_v4::loopback(), port), ec);
   if (ec)
-    return ec;
+    return elog(ec, "Connect failed for port={}", port);
   socket.set_option(tcp::no_delay(true), ec);
 
   auto client = shared_ptr<PgClient>(new PgClient(std::move(socket)));
 
   char const* user = getenv("USER");
   if (auto r = client->sync_write(make_startup(user ? user : "postgres")); !r)
-    return r.error();
+    return elog(r.error(), "startup failed");
   if (auto r = client->sync_drain(); !r)
-    return r.error();
+    return elog(r.error(), "failure waiting for ReadyForQuery message");
 
   return client;
 }
@@ -247,11 +247,11 @@ void PgClient::start_exec(shared_ptr<PgClient> self) {
   send_buf_.clear();
 
   Bytes bind_body;
-  put_str(bind_body, "");        // portal name (unnamed)
-  put_str(bind_body, req.name);  // statement name
-  put16(bind_body, uint16_t{0}); // no parameter format codes
-  put16(bind_body, uint16_t{0}); // no parameters
-  put16(bind_body, uint16_t{0}); // no result-column format codes (text)
+  put_str(bind_body, "");         // portal name (unnamed)
+  put_str(bind_body, req.name);   // statement name
+  put16(bind_body, uint16_t{0});  // no parameter format codes
+  put16(bind_body, uint16_t{0});  // no parameters
+  put16(bind_body, uint16_t{0});  // no result-column format codes (text)
   append_msg(send_buf_, 'B', bind_body);
 
   Bytes exec_body;
@@ -272,8 +272,8 @@ void PgClient::do_send(shared_ptr<PgClient> self) {
     }
     do_read_hdr(std::move(s));
   };
-  asio::async_write(socket_, asio::buffer(send_buf_),
-                    asio::bind_executor(strand_, std::move(handler)));
+  asio::async_write(
+      socket_, asio::buffer(send_buf_), asio::bind_executor(strand_, std::move(handler)));
 }
 
 void PgClient::do_read_hdr(shared_ptr<PgClient> self) {
@@ -290,8 +290,8 @@ void PgClient::do_read_hdr(shared_ptr<PgClient> self) {
     }
     do_read_body(std::move(s), type, len - 4);
   };
-  asio::async_read(socket_, asio::buffer(hdr_.data(), 5),
-                   asio::bind_executor(strand_, std::move(handler)));
+  asio::async_read(
+      socket_, asio::buffer(hdr_.data(), 5), asio::bind_executor(strand_, std::move(handler)));
 }
 
 void PgClient::do_read_body(shared_ptr<PgClient> self, char type, uint32_t body_len) {
@@ -307,8 +307,7 @@ void PgClient::do_read_body(shared_ptr<PgClient> self, char type, uint32_t body_
     }
     on_msg(std::move(s), type);
   };
-  asio::async_read(socket_, asio::buffer(body_),
-                   asio::bind_executor(strand_, std::move(handler)));
+  asio::async_read(socket_, asio::buffer(body_), asio::bind_executor(strand_, std::move(handler)));
 }
 
 void PgClient::on_msg(shared_ptr<PgClient> self, char type) {

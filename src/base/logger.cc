@@ -5,15 +5,34 @@
 
 namespace logger {
 
-static std::atomic<Level> g_level{Level::Info};
-static std::mutex         g_mu;
+namespace {
 
-void set_level(Level level) {
-  g_level.store(level, std::memory_order_relaxed);
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+__attribute__((no_sanitize("address")))
+#endif
+#endif
+std::mutex& g_mu() {
+  // Intential leak.
+  static std::mutex* mtx = new std::mutex;
+  return *mtx;
+}
+}  // namespace
+
+Level level(std::optional<Level> l) {
+  static std::atomic<Level> lvl;
+
+  if (l) [[unlikely]]
+    lvl.store(*l, std::memory_order_relaxed);
+  return lvl.load(std::memory_order_relaxed);
+}
+
+void set_level(Level lvl) {
+  level(lvl);
 }
 
 Level get_level() {
-  return g_level.load(std::memory_order_relaxed);
+  return level(std::nullopt);
 }
 
 string& log_buffer() {
@@ -46,7 +65,7 @@ void plog(char const* process, std::string_view line) {
 
   std::format_to(std::back_inserter(buffer), "[{}] {}\n", process, line);
 
-  std::lock_guard lock{g_mu};
+  std::lock_guard lock{g_mu()};
   ::write(STDERR_FILENO, buffer.data(), buffer.size());
 }
 
@@ -79,7 +98,7 @@ void _log(Level level, std::string_view msg, std::source_location const& loc) {
                  msg);
 
   {
-    std::lock_guard lock{g_mu};
+    std::lock_guard lock{g_mu()};
     ::write(STDERR_FILENO, buffer.data(), buffer.size());
   }
 
