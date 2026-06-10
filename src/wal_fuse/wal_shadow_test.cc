@@ -172,7 +172,7 @@ std::vector<char> load_file(std::filesystem::path filename) {
 
 // ── test ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(shadow_verification_with_pgbench) {
+BOOST_AUTO_TEST_CASE(shadow_verification_with_pgbench, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found at " + kPgBin + "; skipping");
     return;

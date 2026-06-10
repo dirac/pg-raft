@@ -16,7 +16,7 @@ struct T {
 };
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(text_serialization) {
+BOOST_AUTO_TEST_CASE(text_serialization, * boost::unit_test::timeout(60)) {
   T v;
   v.elements.reserve(kPageSize * 3);
 
@@ -29,7 +29,7 @@ BOOST_AUTO_TEST_CASE(text_serialization) {
   }
 }
 
-BOOST_AUTO_TEST_CASE(binary_serialization) {
+BOOST_AUTO_TEST_CASE(binary_serialization, * boost::unit_test::timeout(60)) {
   T v;
   v.elements.reserve(kPageSize * 3);
 

@@ -63,7 +63,7 @@ size_t round_up(size_t len) {
   return ((len + n - 1) / n) * n;
 }
 
-BOOST_AUTO_TEST_CASE(wal_state_update) {
+BOOST_AUTO_TEST_CASE(wal_state_update, * boost::unit_test::timeout(60)) {
   WalState s;
   auto*    ptr  = reinterpret_cast<unsigned char const*>(wal_data().data());
   size_t   size = wal_data().size();
@@ -74,7 +74,7 @@ BOOST_AUTO_TEST_CASE(wal_state_update) {
   BOOST_TEST(r(192, 144) == s.update(ptr, size, 0));
 }
 
-BOOST_AUTO_TEST_CASE(compare_with_pg_waldump) {
+BOOST_AUTO_TEST_CASE(compare_with_pg_waldump, * boost::unit_test::timeout(60)) {
   auto exp = expected("01000000");
 
   WalState s;
@@ -95,7 +95,7 @@ BOOST_AUTO_TEST_CASE(compare_with_pg_waldump) {
   } while (bytes && !exp.empty());
 }
 
-BOOST_AUTO_TEST_CASE(compare_with_pg_waldump_2) {
+BOOST_AUTO_TEST_CASE(compare_with_pg_waldump_2, * boost::unit_test::timeout(60)) {
   auto exp = expected("01000000");
 
   WalState s;

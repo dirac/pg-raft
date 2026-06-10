@@ -52,7 +52,7 @@ static uint64_t read_system_id(string const& data_dir) {
 
 // ── test ──────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(primary_standby_async) {
+BOOST_AUTO_TEST_CASE(primary_standby_async, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not available at " + string(kPgBin) + "; skipping");
     return;

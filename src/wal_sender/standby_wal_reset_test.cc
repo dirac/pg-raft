@@ -78,7 +78,7 @@ static bool wait_for_catchup(uint16_t standby_port, uint64_t target) {
 // Waits for pgbench to finish, runs a second batch, then restarts the standby.
 // Verifies that WalSenderServer re-streams the missing WAL from the earlier
 // position and the standby converges to the final primary LSN.
-BOOST_AUTO_TEST_CASE(standby_wal_reset) {
+BOOST_AUTO_TEST_CASE(standby_wal_reset, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not available at " + string(kPgBin) + "; skipping");
     return;

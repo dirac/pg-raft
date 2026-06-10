@@ -31,7 +31,7 @@ struct TestServer : public Server {
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(non_ssl) {
+BOOST_AUTO_TEST_CASE(non_ssl, * boost::unit_test::timeout(60)) {
   TmpDir tmpdir;
 
   auto io_context = ::boost::asio::io_context{};

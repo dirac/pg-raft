@@ -66,7 +66,7 @@ static std::string read_file(std::filesystem::path const& path) {
 
 // ── lifecycle ─────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(mount_and_unmount) {
+BOOST_AUTO_TEST_CASE(mount_and_unmount, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -91,7 +91,7 @@ BOOST_AUTO_TEST_CASE(mount_and_unmount) {
   BOOST_CHECK_EQUAL(st_mp.st_dev, st_parent.st_dev);
 }
 
-BOOST_AUTO_TEST_CASE(destructor_unmounts) {
+BOOST_AUTO_TEST_CASE(destructor_unmounts, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -109,7 +109,7 @@ BOOST_AUTO_TEST_CASE(destructor_unmounts) {
   BOOST_CHECK_EQUAL(st_mp.st_dev, st_parent.st_dev);
 }
 
-BOOST_AUTO_TEST_CASE(stop_idempotent) {
+BOOST_AUTO_TEST_CASE(stop_idempotent, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -125,7 +125,7 @@ BOOST_AUTO_TEST_CASE(stop_idempotent) {
 
 // ── passthrough ───────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(backing_file_visible_through_mount) {
+BOOST_AUTO_TEST_CASE(backing_file_visible_through_mount, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -139,7 +139,7 @@ BOOST_AUTO_TEST_CASE(backing_file_visible_through_mount) {
   BOOST_CHECK_EQUAL(read_file(mount / "hello.txt"), "world");
 }
 
-BOOST_AUTO_TEST_CASE(write_goes_to_backing_dir) {
+BOOST_AUTO_TEST_CASE(write_goes_to_backing_dir, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -155,7 +155,7 @@ BOOST_AUTO_TEST_CASE(write_goes_to_backing_dir) {
 
 // ── getattr / fgetattr ────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(getattr_matches_backing) {
+BOOST_AUTO_TEST_CASE(getattr_matches_backing, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -175,7 +175,7 @@ BOOST_AUTO_TEST_CASE(getattr_matches_backing) {
   BOOST_CHECK_GE(fuse.ops().n_getattr.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(getattr_non_existent_returns_enoent) {
+BOOST_AUTO_TEST_CASE(getattr_non_existent_returns_enoent, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -190,7 +190,7 @@ BOOST_AUTO_TEST_CASE(getattr_non_existent_returns_enoent) {
   BOOST_CHECK_EQUAL(errno, ENOENT);
 }
 
-BOOST_AUTO_TEST_CASE(fgetattr_open_file) {
+BOOST_AUTO_TEST_CASE(fgetattr_open_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -214,7 +214,7 @@ BOOST_AUTO_TEST_CASE(fgetattr_open_file) {
 
 // ── access ────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(access_existing_file) {
+BOOST_AUTO_TEST_CASE(access_existing_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -231,7 +231,7 @@ BOOST_AUTO_TEST_CASE(access_existing_file) {
   BOOST_CHECK_GE(fuse.ops().n_access.load(), 3u);
 }
 
-BOOST_AUTO_TEST_CASE(access_non_existent_returns_enoent) {
+BOOST_AUTO_TEST_CASE(access_non_existent_returns_enoent, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -247,7 +247,7 @@ BOOST_AUTO_TEST_CASE(access_non_existent_returns_enoent) {
 
 // ── create / open / read / write ──────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(create_file) {
+BOOST_AUTO_TEST_CASE(create_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -265,7 +265,7 @@ BOOST_AUTO_TEST_CASE(create_file) {
   BOOST_CHECK_GE(fuse.ops().n_create.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(write_and_read_back) {
+BOOST_AUTO_TEST_CASE(write_and_read_back, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -282,7 +282,7 @@ BOOST_AUTO_TEST_CASE(write_and_read_back) {
   // macOS VFS may serve reads from the page cache, bypassing op_read.
 }
 
-BOOST_AUTO_TEST_CASE(write_at_offset) {
+BOOST_AUTO_TEST_CASE(write_at_offset, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -307,7 +307,7 @@ BOOST_AUTO_TEST_CASE(write_at_offset) {
 
 // ── truncate ─────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(truncate_file) {
+BOOST_AUTO_TEST_CASE(truncate_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -326,7 +326,7 @@ BOOST_AUTO_TEST_CASE(truncate_file) {
   BOOST_CHECK_GE(fuse.ops().n_truncate.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(ftruncate_file) {
+BOOST_AUTO_TEST_CASE(ftruncate_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -350,7 +350,7 @@ BOOST_AUTO_TEST_CASE(ftruncate_file) {
 
 // ── unlink ────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(unlink_file) {
+BOOST_AUTO_TEST_CASE(unlink_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -366,7 +366,7 @@ BOOST_AUTO_TEST_CASE(unlink_file) {
   BOOST_CHECK_GE(fuse.ops().n_unlink.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(unlink_non_existent_returns_enoent) {
+BOOST_AUTO_TEST_CASE(unlink_non_existent_returns_enoent, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -382,7 +382,7 @@ BOOST_AUTO_TEST_CASE(unlink_non_existent_returns_enoent) {
 
 // ── rename ────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(rename_file) {
+BOOST_AUTO_TEST_CASE(rename_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -401,7 +401,7 @@ BOOST_AUTO_TEST_CASE(rename_file) {
 
 // ── hard link ─────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(hard_link) {
+BOOST_AUTO_TEST_CASE(hard_link, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -423,7 +423,7 @@ BOOST_AUTO_TEST_CASE(hard_link) {
 
 // ── symlink / readlink ────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(symlink_and_readlink) {
+BOOST_AUTO_TEST_CASE(symlink_and_readlink, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -447,7 +447,7 @@ BOOST_AUTO_TEST_CASE(symlink_and_readlink) {
 
 // ── chmod ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(chmod_file) {
+BOOST_AUTO_TEST_CASE(chmod_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -468,7 +468,7 @@ BOOST_AUTO_TEST_CASE(chmod_file) {
 
 // ── utimens ───────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(utimens_file) {
+BOOST_AUTO_TEST_CASE(utimens_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -494,7 +494,7 @@ BOOST_AUTO_TEST_CASE(utimens_file) {
 
 // ── mkdir / rmdir ─────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(mkdir_and_rmdir) {
+BOOST_AUTO_TEST_CASE(mkdir_and_rmdir, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -515,7 +515,7 @@ BOOST_AUTO_TEST_CASE(mkdir_and_rmdir) {
 
 // ── readdir ───────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(read_dir_empty) {
+BOOST_AUTO_TEST_CASE(read_dir_empty, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -531,7 +531,7 @@ BOOST_AUTO_TEST_CASE(read_dir_empty) {
   BOOST_CHECK_EQUAL(n, 0);
 }
 
-BOOST_AUTO_TEST_CASE(read_dir_small) {
+BOOST_AUTO_TEST_CASE(read_dir_small, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -553,7 +553,7 @@ BOOST_AUTO_TEST_CASE(read_dir_small) {
 
 // ── fsync ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(fsync_file) {
+BOOST_AUTO_TEST_CASE(fsync_file, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -575,7 +575,7 @@ BOOST_AUTO_TEST_CASE(fsync_file) {
 
 // ── statfs ────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(statfs_mount) {
+BOOST_AUTO_TEST_CASE(statfs_mount, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -593,7 +593,7 @@ BOOST_AUTO_TEST_CASE(statfs_mount) {
 
 // ── op counters ───────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(op_counters_increment) {
+BOOST_AUTO_TEST_CASE(op_counters_increment, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -629,7 +629,7 @@ BOOST_AUTO_TEST_CASE(op_counters_increment) {
 
 // ── xattr ─────────────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(set_get_xattr) {
+BOOST_AUTO_TEST_CASE(set_get_xattr, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -650,7 +650,7 @@ BOOST_AUTO_TEST_CASE(set_get_xattr) {
   BOOST_CHECK_GE(fuse.ops().n_getxattr.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(list_xattr) {
+BOOST_AUTO_TEST_CASE(list_xattr, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -670,7 +670,7 @@ BOOST_AUTO_TEST_CASE(list_xattr) {
   BOOST_CHECK_GE(fuse.ops().n_listxattr.load(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(remove_xattr) {
+BOOST_AUTO_TEST_CASE(remove_xattr, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -725,7 +725,7 @@ struct InterceptOps : public FuseOps {
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(subclass_intercepts_write_and_fsync) {
+BOOST_AUTO_TEST_CASE(subclass_intercepts_write_and_fsync, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -751,7 +751,7 @@ BOOST_AUTO_TEST_CASE(subclass_intercepts_write_and_fsync) {
   BOOST_CHECK_EQUAL(read_file(backing / "wal.seg"), "waldata");
 }
 
-BOOST_AUTO_TEST_CASE(subclass_can_suppress_write) {
+BOOST_AUTO_TEST_CASE(subclass_can_suppress_write, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -778,7 +778,7 @@ BOOST_AUTO_TEST_CASE(subclass_can_suppress_write) {
 
 // ── concurrency ───────────────────────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(concurrent_writes) {
+BOOST_AUTO_TEST_CASE(concurrent_writes, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -811,7 +811,7 @@ BOOST_AUTO_TEST_CASE(concurrent_writes) {
   BOOST_CHECK_EQUAL(count, kThreads * kFiles);
 }
 
-BOOST_AUTO_TEST_CASE(concurrent_read_write) {
+BOOST_AUTO_TEST_CASE(concurrent_read_write, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
   auto   mount   = tmp() / "mount";
@@ -843,7 +843,7 @@ BOOST_AUTO_TEST_CASE(concurrent_read_write) {
 
 // ── existing PG integration tests ─────────────────────────────────────────────
 
-BOOST_AUTO_TEST_CASE(wal_moved_to_raft_dir) {
+BOOST_AUTO_TEST_CASE(wal_moved_to_raft_dir, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
     return;
@@ -865,7 +865,7 @@ BOOST_AUTO_TEST_CASE(wal_moved_to_raft_dir) {
   BOOST_TEST(count_wal_segments(data_dir / "pg_wal") == 0);
 }
 
-BOOST_AUTO_TEST_CASE(read_dir_large_directory) {
+BOOST_AUTO_TEST_CASE(read_dir_large_directory, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing_dir = tmp() / "backing";
   auto   mount_point = tmp() / "mount";
@@ -893,7 +893,7 @@ BOOST_AUTO_TEST_CASE(read_dir_large_directory) {
   log(INFO, "op_readdir {}", fuse.ops().n_readdir.load());
 }
 
-BOOST_AUTO_TEST_CASE(wal_writes_to_backing_dir) {
+BOOST_AUTO_TEST_CASE(wal_writes_to_backing_dir, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
     return;

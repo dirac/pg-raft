@@ -25,7 +25,7 @@ class LineCapture : public Process {
   std::mutex mu_;
 };
 
-BOOST_AUTO_TEST_CASE(start_and_wait) {
+BOOST_AUTO_TEST_CASE(start_and_wait, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   Process   p("/bin/echo", {"hello"});
   BOOST_TEST(p.start());
@@ -34,7 +34,7 @@ BOOST_AUTO_TEST_CASE(start_and_wait) {
   BOOST_TEST(!p.is_running());
 }
 
-BOOST_AUTO_TEST_CASE(cannot_start_while_running) {
+BOOST_AUTO_TEST_CASE(cannot_start_while_running, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -43,7 +43,7 @@ BOOST_AUTO_TEST_CASE(cannot_start_while_running) {
   p.wait();
 }
 
-BOOST_AUTO_TEST_CASE(stop) {
+BOOST_AUTO_TEST_CASE(stop, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -51,7 +51,7 @@ BOOST_AUTO_TEST_CASE(stop) {
   BOOST_TEST(!p.is_running());
 }
 
-BOOST_AUTO_TEST_CASE(try_wait_before_exit) {
+BOOST_AUTO_TEST_CASE(try_wait_before_exit, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   Process   p("/bin/sleep", {"10"});
   BOOST_TEST(p.start());
@@ -60,7 +60,7 @@ BOOST_AUTO_TEST_CASE(try_wait_before_exit) {
   p.wait();
 }
 
-BOOST_AUTO_TEST_CASE(try_wait_after_exit) {
+BOOST_AUTO_TEST_CASE(try_wait_after_exit, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   Process   p("/bin/echo", {"hello"});
   BOOST_TEST(p.start());
@@ -70,7 +70,7 @@ BOOST_AUTO_TEST_CASE(try_wait_after_exit) {
   BOOST_TEST(*result == 0);
 }
 
-BOOST_AUTO_TEST_CASE(destructor_kills_running_process) {
+BOOST_AUTO_TEST_CASE(destructor_kills_running_process, * boost::unit_test::timeout(60)) {
   IoThreads threads{1};
   pid_t     pid;
   {
@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(destructor_kills_running_process) {
   BOOST_TEST(kill(pid, 0) != 0);
 }
 
-BOOST_AUTO_TEST_CASE(capture_stdout) {
+BOOST_AUTO_TEST_CASE(capture_stdout, * boost::unit_test::timeout(60)) {
   IoThreads   threads{1};
   LineCapture p("/bin/echo", {"hello world"});
   BOOST_TEST(p.start());
@@ -91,7 +91,7 @@ BOOST_AUTO_TEST_CASE(capture_stdout) {
   BOOST_TEST(p.err.empty());
 }
 
-BOOST_AUTO_TEST_CASE(capture_stderr) {
+BOOST_AUTO_TEST_CASE(capture_stderr, * boost::unit_test::timeout(60)) {
   IoThreads   threads{1};
   LineCapture p("/bin/sh", {"-c", "echo err >&2"});
   BOOST_TEST(p.start());
@@ -101,7 +101,7 @@ BOOST_AUTO_TEST_CASE(capture_stderr) {
   BOOST_TEST(p.out.empty());
 }
 
-BOOST_AUTO_TEST_CASE(capture_multiple_lines) {
+BOOST_AUTO_TEST_CASE(capture_multiple_lines, * boost::unit_test::timeout(60)) {
   IoThreads   threads{1};
   LineCapture p("/bin/sh", {"-c", "printf 'line1\\nline2\\nline3'"});
   BOOST_TEST(p.start());

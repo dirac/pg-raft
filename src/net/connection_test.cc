@@ -152,7 +152,7 @@ struct TestSetup {
   shared_ptr<TestConnection> client;
 };
 
-BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup) {
+BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_REQUIRE(conn);
@@ -214,7 +214,7 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(messages, TestSetup) {
+BOOST_FIXTURE_TEST_CASE(messages, TestSetup, * boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_REQUIRE(conn);
@@ -326,7 +326,7 @@ BOOST_FIXTURE_TEST_CASE(messages, TestSetup) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(status, TestSetup) {
+BOOST_FIXTURE_TEST_CASE(status, TestSetup, * boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_TEST(conn);
@@ -344,7 +344,7 @@ BOOST_FIXTURE_TEST_CASE(status, TestSetup) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup) {
+BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup, * boost::unit_test::timeout(60)) {
   auto conn = connect(std::chrono::milliseconds(1000));
 
   BOOST_TEST(conn);
@@ -362,7 +362,7 @@ BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(files, TestSetup) {
+BOOST_FIXTURE_TEST_CASE(files, TestSetup, * boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_TEST(conn);

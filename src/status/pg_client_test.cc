@@ -48,7 +48,7 @@ static Result<Rows> exec_sync(shared_ptr<PgClient> conn, PgStmt const& stmt) {
 
 // ---- tests ----
 
-BOOST_FIXTURE_TEST_CASE(basic_query, Setup) {
+BOOST_FIXTURE_TEST_CASE(basic_query, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();
@@ -66,7 +66,7 @@ BOOST_FIXTURE_TEST_CASE(basic_query, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(null_column, Setup) {
+BOOST_FIXTURE_TEST_CASE(null_column, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();
@@ -83,7 +83,7 @@ BOOST_FIXTURE_TEST_CASE(null_column, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(multiple_rows, Setup) {
+BOOST_FIXTURE_TEST_CASE(multiple_rows, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();
@@ -100,7 +100,7 @@ BOOST_FIXTURE_TEST_CASE(multiple_rows, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(queued_execs, Setup) {
+BOOST_FIXTURE_TEST_CASE(queued_execs, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();
@@ -124,7 +124,7 @@ BOOST_FIXTURE_TEST_CASE(queued_execs, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(multiple_stmts, Setup) {
+BOOST_FIXTURE_TEST_CASE(multiple_stmts, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();
@@ -155,7 +155,7 @@ BOOST_FIXTURE_TEST_CASE(multiple_stmts, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(exec_error_then_recover, Setup) {
+BOOST_FIXTURE_TEST_CASE(exec_error_then_recover, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn      = PgClient::connect(kPort).value();
@@ -175,7 +175,7 @@ BOOST_FIXTURE_TEST_CASE(exec_error_then_recover, Setup) {
   conn->close();
 }
 
-BOOST_FIXTURE_TEST_CASE(wal_lsn_query, Setup) {
+BOOST_FIXTURE_TEST_CASE(wal_lsn_query, Setup, * boost::unit_test::timeout(60)) {
   if (!pg) { BOOST_TEST_MESSAGE("PostgreSQL not available, skipping"); return; }
 
   auto conn = PgClient::connect(kPort).value();

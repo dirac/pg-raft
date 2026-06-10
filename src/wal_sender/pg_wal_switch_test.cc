@@ -55,7 +55,7 @@ static uint64_t read_system_id(string const& data_dir) {
 // Runs pgbench transactions on the primary while periodically calling
 // pg_switch_wal() to force WAL segment boundaries.  Verifies that the standby
 // replicated through WalSenderServer still catches up correctly.
-BOOST_AUTO_TEST_CASE(wal_switch_during_replication) {
+BOOST_AUTO_TEST_CASE(wal_switch_during_replication, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not available at " + string(kPgBin) + "; skipping");
     return;
