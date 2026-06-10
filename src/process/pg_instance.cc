@@ -20,10 +20,12 @@ static bool has_arg(std::vector<std::string> const& args, std::string_view arg) 
 
 PgInstance::PgInstance(std::filesystem::path    pg_bin,
                        std::filesystem::path    data_dir,
+                       Role                     role,
                        std::vector<std::string> extra_args)
     : pg_bin_(std::move(pg_bin)),
       data_dir_(std::move(data_dir)),
       extra_args_(std::move(extra_args)),
+      role_(role),
       postgres_(pg_bin_ / "postgres", build_postgres_args(data_dir_, extra_args_)) {}
 
 PgInstance::~PgInstance() {
@@ -34,6 +36,7 @@ PgInstance::~PgInstance() {
 // ── initialisation ────────────────────────────────────────────────────────────
 
 bool PgInstance::create_raft_wal(std::filesystem::path raft_dir) {
+  std::lock_guard lk(mu_);
   std::filesystem::path const pg_raft_wal = raft_dir / "pg_wal";
   if (mkdir(pg_raft_wal.c_str(), 0700) != 0 && errno != EEXIST)
     return false;
@@ -60,6 +63,7 @@ bool PgInstance::create_raft_wal(std::filesystem::path raft_dir) {
 }
 
 bool PgInstance::init(std::vector<std::string> initdb_args) {
+  std::lock_guard lk(mu_);
   if (!(has_arg(initdb_args, "-k") || has_arg(initdb_args, "--data-checksums")))
     initdb_args.emplace_back("--data-checksums");
 
@@ -90,6 +94,7 @@ static std::vector<std::string> const kDefaultHbaConfig = {
 };
 
 bool PgInstance::write_config(std::map<std::string, std::string> const& settings) {
+  std::lock_guard lk(mu_);
   std::map<std::string, std::string> merged = kDefaultConfig;
   for (auto const& [k, v] : settings)
     merged[k] = v;
@@ -101,6 +106,7 @@ bool PgInstance::write_config(std::map<std::string, std::string> const& settings
 }
 
 bool PgInstance::write_hba(std::vector<std::string> const& lines) {
+  std::lock_guard lk(mu_);
   std::string content;
   for (auto const& line : lines)
     content += line + "\n";
@@ -112,10 +118,12 @@ bool PgInstance::write_hba(std::vector<std::string> const& lines) {
 // ── process control ───────────────────────────────────────────────────────────
 
 bool PgInstance::start() {
+  std::lock_guard lk(mu_);
   return postgres_.start();
 }
 
 void PgInstance::stop(StopMode mode, int timeout_ms) {
+  std::lock_guard lk(mu_);
   if (!postgres_.is_running())
     return;
 
@@ -145,20 +153,31 @@ void PgInstance::stop(StopMode mode, int timeout_ms) {
 }
 
 void PgInstance::reload() {
+  std::lock_guard lk(mu_);
   if (postgres_.is_running())
     ::kill(postgres_.pid(), SIGHUP);
 }
 
 void PgInstance::promote() {
-  if (postgres_.is_running())
+  std::lock_guard lk(mu_);
+  if (postgres_.is_running()) {
     ::kill(postgres_.pid(), SIGUSR1);
+    role_ = Role::kPrimary;
+  }
+}
+
+PgInstance::Role PgInstance::role() const {
+  std::lock_guard lk(mu_);
+  return role_;
 }
 
 bool PgInstance::is_running() const {
+  std::lock_guard lk(mu_);
   return postgres_.is_running();
 }
 
 bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
+  std::lock_guard lk(mu_);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
   while (std::chrono::steady_clock::now() < deadline) {
     Process p(pg_bin_ / "pg_isready",
@@ -174,17 +193,20 @@ bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
 // ── backup / restore ──────────────────────────────────────────────────────────
 
 bool PgInstance::backup(std::filesystem::path const& dest_dir, StopMode mode) {
-  if (is_running())
+  std::lock_guard lk(mu_);
+  if (postgres_.is_running())
     stop(mode);
   return copy_dir(data_dir_, dest_dir);
 }
 
 bool PgInstance::restore(std::filesystem::path const& backup_dir) {
+  std::lock_guard lk(mu_);
   return copy_dir(backup_dir, data_dir_);
 }
 
 bool PgInstance::restore_and_start(std::filesystem::path const& backup_dir) {
-  return restore(backup_dir) && start();
+  std::lock_guard lk(mu_);
+  return copy_dir(backup_dir, data_dir_) && postgres_.start();
 }
 
 // ── private helpers ───────────────────────────────────────────────────────────

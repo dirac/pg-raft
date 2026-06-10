@@ -10,11 +10,15 @@ class PgInstance {
   // Maps to the three PostgreSQL shutdown modes (SIGTERM / SIGINT / SIGQUIT).
   enum class StopMode { Smart, Fast, Immediate };
 
+  enum class Role { kPrimary, kStandby };
+
   // |pg_bin|    – directory containing postgres, initdb, pg_isready, etc.
   // |data_dir|  – PGDATA path (need not exist yet; created by init()).
+  // |role|      – starting role; defaults to kStandby.
   // |extra_args| – extra arguments forwarded to the postgres process.
   PgInstance(std::filesystem::path    pg_bin,
              std::filesystem::path    data_dir,
+             Role                     role       = Role::kStandby,
              std::vector<std::string> extra_args = {});
   ~PgInstance();
 
@@ -47,6 +51,7 @@ class PgInstance {
   void reload();
 
   // SIGUSR1 — promote a standby to primary (PostgreSQL 12+).
+  // Updates role() to kPrimary.
   void promote();
 
   bool is_running() const;
@@ -75,6 +80,7 @@ class PgInstance {
 
   std::filesystem::path const& data_dir() const { return data_dir_; }
   std::filesystem::path const& pg_bin() const { return pg_bin_; }
+  Role                         role() const;
 
  private:
   static bool copy_dir(std::filesystem::path const& src, std::filesystem::path const& dst);
@@ -83,6 +89,9 @@ class PgInstance {
   std::filesystem::path    pg_bin_;
   std::filesystem::path    data_dir_;
   std::vector<std::string> extra_args_;
+  Role                     role_;
+
+  mutable std::recursive_mutex mu_;
 
   struct PostgresProcess : public Process {
     using Process::Process;

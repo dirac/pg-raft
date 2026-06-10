@@ -123,7 +123,7 @@ BOOST_AUTO_TEST_CASE(start_and_stop) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -143,7 +143,7 @@ BOOST_AUTO_TEST_CASE(stop_immediate) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -163,7 +163,7 @@ BOOST_AUTO_TEST_CASE(backup) {
   auto data_dir   = tmp() / "pgdata";
   auto backup_dir = tmp() / "backup";
 
-  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -186,7 +186,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
 
   // Set up a primary, let it run briefly, then back it up.
   {
-    PgInstance primary(kPgBin, data_dir, {"-p", std::to_string(kPort)});
+    PgInstance primary(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
     BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
     BOOST_REQUIRE(primary.write_config({{"listen_addresses", "'127.0.0.1'"}}));
     BOOST_REQUIRE(primary.write_hba({}));
@@ -196,7 +196,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
   }
 
   // Restore the backup and start a new instance from it.
-  PgInstance replica(kPgBin, restore_dir, {"-p", std::to_string(kPort)});
+  PgInstance replica(kPgBin, restore_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
   BOOST_REQUIRE(replica.restore_and_start(backup_dir));
   BOOST_TEST(replica.wait_ready(kPort));
   replica.stop();
