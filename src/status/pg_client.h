@@ -32,9 +32,9 @@ class PgClient : public std::enable_shared_from_this<PgClient> {
   explicit PgClient(tcp::socket socket);
 
   // Synchronous helpers used by connect() and prepare().
-  Result<void>                  sync_write(Bytes const& buf);
+  Result<void>                   sync_write(Bytes const& buf);
   Result<std::pair<char, Bytes>> sync_read_msg();
-  Result<void>                  sync_drain();
+  Result<void>                   sync_drain();
 
   // Async exec chain.
   void enqueue(Req r);
@@ -50,15 +50,15 @@ class PgClient : public std::enable_shared_from_this<PgClient> {
   int                      next_id_{0};
 
   // Exec state — accessed only from strand.
-  ExecCb           exec_cb_;
-  Rows             rows_;
-  Bytes            send_buf_;
+  ExecCb            exec_cb_;
+  Rows              rows_;
+  Bytes             send_buf_;
   array<uint8_t, 5> hdr_;
-  Bytes            body_;
-  bool             exec_failed_{false};
+  Bytes             body_;
+  bool              exec_failed_{false};
 
   // Pending request queue — protected by mu_.
-  std::mutex       mu_;
-  std::deque<Req>  queue_;
-  bool             running_{false};
+  std::mutex      mu_;
+  std::deque<Req> queue_;
+  bool            running_{false};
 };

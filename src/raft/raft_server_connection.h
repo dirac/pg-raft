@@ -6,8 +6,6 @@
 /// A raft server creates a connection to the Raft Server. The other end if RaftClientConnection.
 class RaftServerConnection : public Connection<> {
  public:
-  static Logger logger;
-
   RaftServerConnection(string const&             self,
                        RaftNodeId                node_id,
                        std::chrono::milliseconds timeout,
@@ -40,6 +38,8 @@ class RaftServerConnection : public Connection<> {
   bool is_leader() const { return leader_.load(std::memory_order_relaxed) && !closed(); }
 
   RaftNodeId node_id() const { return id_; }
+
+  void backup (std::filesystem::path dir);
 
  private:
   void write_request(ZkRequest const& request, std::function<void(Result<Data>)> result_cb);

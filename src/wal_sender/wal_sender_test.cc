@@ -78,7 +78,6 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
   }));
   BOOST_REQUIRE(primary.write_hba({
       "host  all         all  127.0.0.1/32  trust",
-      "host  replication all  127.0.0.1/32  trust",
   }));
   BOOST_REQUIRE(primary.start());
   BOOST_REQUIRE(primary.wait_ready(kPrimaryPort));

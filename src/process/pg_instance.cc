@@ -75,7 +75,6 @@ static std::map<std::string, std::string> const kDefaultConfig = {
     {"wal_sync_method", "fsync"},
     {"wal_recycle", "off"},
     {"listen_addresses", "'*'"},
-    {"wal_keep_size", "5GB"},
 };
 
 static std::vector<std::string> const kDefaultHbaConfig = {
@@ -84,6 +83,10 @@ static std::vector<std::string> const kDefaultHbaConfig = {
     "host    all             all             0.0.0.0/0               scram-sha-256",
     // Allow all IPv6 connections
     "host    all             all             ::/0                    scram-sha-256",
+    // Allow and trust local connections
+    "host    all             all              127.0.0.1/32           trust",
+    "host    all             all             ::1/128                 trust",
+
 };
 
 bool PgInstance::write_config(std::map<std::string, std::string> const& settings) {

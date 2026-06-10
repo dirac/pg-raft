@@ -1,8 +1,8 @@
 #include "src/raft/raft_server_connection.h"
 
-Logger RaftServerConnection::logger{"raft-server-conn"};
 
-Result<ZkResponse> RaftServerConnection::exec(ZkRequest const& request) {
+
+Result<void> RaftServerConnection::snapshot(ZkRequest const& request) {
   if (!is_leader()) {
     return ZkResponse{
         .status = ResultStatus::kInvalidLeader,
