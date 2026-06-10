@@ -66,11 +66,10 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
   auto backup_dir  = tmp() / "backup";
 
   // ── init and start primary ────────────────────────────────────────────────
-  PgInstance primary(string(kPgBin), primary_dir);
+  PgInstance primary(string(kPgBin), primary_dir, kPrimaryPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(primary.write_config({
       {"listen_addresses", "'127.0.0.1'"},
-      {"port",             std::to_string(kPrimaryPort)},
       {"wal_level",        "replica"},
       {"max_wal_senders",  "3"},
       {"log_min_messages", "warning"},
@@ -125,12 +124,11 @@ BOOST_AUTO_TEST_CASE(primary_standby_async) {
   BOOST_REQUIRE(std::filesystem::exists(server->socket_path()));
 
   // ── restore backup as standby ─────────────────────────────────────────────
-  PgInstance standby(string(kPgBin), standby_dir);
+  PgInstance standby(string(kPgBin), standby_dir, kStandbyPort);
   BOOST_REQUIRE(standby.restore(backup_dir));
   std::ofstream(standby_dir / "standby.signal").close();
   BOOST_REQUIRE(standby.write_config({
       {"listen_addresses", "'127.0.0.1'"},
-      {"port",             std::to_string(kStandbyPort)},
       {"primary_conninfo", "'host=" + sock_dir.string() + " port=" + std::to_string(server->bound_port()) +
                            " application_name=standby'"},
       {"hot_standby",      "on"},

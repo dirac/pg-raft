@@ -32,7 +32,7 @@ BOOST_AUTO_TEST_CASE(init) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_TEST(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(std::filesystem::exists(data_dir / "postgresql.conf"));
   BOOST_TEST(std::filesystem::exists(data_dir / "pg_wal"));
@@ -47,7 +47,7 @@ BOOST_AUTO_TEST_CASE(write_config_appends_defaults) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(pg.write_config({{"max_connections", "50"}}));
 
@@ -63,7 +63,7 @@ BOOST_AUTO_TEST_CASE(write_config_overrides_default) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   // wal_recycle defaults to "off"; user overrides with "on".
   BOOST_TEST(pg.write_config({{"wal_recycle", "on"}}));
@@ -81,7 +81,7 @@ BOOST_AUTO_TEST_CASE(write_hba_appends_lines_and_defaults) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_TEST(pg.write_hba({"host  replication  all  127.0.0.1/32  trust"}));
 
@@ -101,7 +101,7 @@ BOOST_AUTO_TEST_CASE(create_raft_wal_moves_segments) {
   auto raft_pg_wal = raft_dir / "pg_wal";
   std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
 
   int initial = count_regular_files(data_dir / "pg_wal");
@@ -123,7 +123,7 @@ BOOST_AUTO_TEST_CASE(start_and_stop) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -143,7 +143,7 @@ BOOST_AUTO_TEST_CASE(stop_immediate) {
   TmpDir    tmp;
   auto data_dir = tmp() / "pgdata";
 
-  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -163,7 +163,7 @@ BOOST_AUTO_TEST_CASE(backup) {
   auto data_dir   = tmp() / "pgdata";
   auto backup_dir = tmp() / "backup";
 
-  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
   BOOST_REQUIRE(pg.write_hba({}));
@@ -186,7 +186,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
 
   // Set up a primary, let it run briefly, then back it up.
   {
-    PgInstance primary(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+    PgInstance primary(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
     BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
     BOOST_REQUIRE(primary.write_config({{"listen_addresses", "'127.0.0.1'"}}));
     BOOST_REQUIRE(primary.write_hba({}));
@@ -196,7 +196,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
   }
 
   // Restore the backup and start a new instance from it.
-  PgInstance replica(kPgBin, restore_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+  PgInstance replica(kPgBin, restore_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(replica.restore_and_start(backup_dir));
   BOOST_TEST(replica.wait_ready(kPort));
   replica.stop();

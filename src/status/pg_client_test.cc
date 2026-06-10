@@ -25,7 +25,7 @@ struct Setup {
 
     auto data = tmp() / "pgdata";
 
-    pg.emplace(string(kPgBin), data, PgInstance::Role::kPrimary, vector<string>{"-p", to_string(kPort)});
+    pg.emplace(string(kPgBin), data, kPort, PgInstance::Role::kPrimary);
     BOOST_REQUIRE(pg->init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
     BOOST_REQUIRE(pg->write_config({{"listen_addresses", "'127.0.0.1'"}}));
     BOOST_REQUIRE(pg->write_hba({}));

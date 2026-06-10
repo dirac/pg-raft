@@ -106,7 +106,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 **`src/process/`** — Two classes:
 
 - **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
-- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, extra_args={})`. Provides: `init(initdb_args)` (runs `initdb`), `create_raft_wal(raft_dir)` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, role=Role::kStandby, extra_args={})`. `Role` is `kPrimary` or `kStandby`; `promote()` updates it to `kPrimary`. Provides: `init(initdb_args)` (runs `initdb`), `create_raft_wal(raft_dir)` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
 
 **`src/wal_sender/`** — Two cooperating Asio-based classes:
 
@@ -140,8 +140,6 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 
 - **`PgClient`** — Async PostgreSQL extended-protocol client over a raw TCP socket (not libpq). `connect(port)` synchronously establishes a connection. `prepare(sql)` synchronously sends a `Parse`/`Describe`/`Sync` sequence and returns a `PgStmt` handle. `async_exec(stmt, cb)` executes a prepared statement asynchronously and delivers `Result<Rows>` to the callback; multiple calls queue up and run one at a time. `close()` tears down the socket. Used in tests to verify replication state (e.g. row counts, LSNs) without needing an external psql binary.
 
-The codebase also contains `src/raft/` (a Raft consensus implementation) which is not documented here.
-
 ### Data flow (end-to-end)
 
 ```
@@ -174,7 +172,7 @@ WAL segment files are memory-mapped on first open. `WalSegment::write()` parses 
 ```cpp
 // In src/base/base.h
 struct LogSeqNumber { uint32_t timeline; uint64_t lsn; };
-// lsn encoding: high 32 bits = logid (segment file high word), low 32 bits = logseg * kWalSegmentSize
+// lsn encoding: high 32 bits = segment number, low 32 bits = offset within segment
 
 // In src/wal_sender/wal_sender.h
 struct StandbyStatus { uint64_t written_lsn, flushed_lsn, applied_lsn; };

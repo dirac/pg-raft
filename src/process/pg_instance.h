@@ -12,14 +12,14 @@ class PgInstance {
 
   enum class Role { kPrimary, kStandby };
 
-  // |pg_bin|    – directory containing postgres, initdb, pg_isready, etc.
-  // |data_dir|  – PGDATA path (need not exist yet; created by init()).
-  // |role|      – starting role; defaults to kStandby.
-  // |extra_args| – extra arguments forwarded to the postgres process.
-  PgInstance(std::filesystem::path    pg_bin,
-             std::filesystem::path    data_dir,
-             Role                     role       = Role::kStandby,
-             std::vector<std::string> extra_args = {});
+  // |pg_bin|   – directory containing postgres, initdb, pg_isready, etc.
+  // |data_dir| – PGDATA path (need not exist yet; created by init()).
+  // |port|     – TCP port passed as -p to postgres; 0 means use PostgreSQL's default.
+  // |role|     – starting role; defaults to kStandby.
+  PgInstance(std::filesystem::path pg_bin,
+             std::filesystem::path data_dir,
+             uint16_t              port,
+             Role                  role = Role::kStandby);
   ~PgInstance();
 
   PgInstance(PgInstance const&)            = delete;
@@ -86,10 +86,10 @@ class PgInstance {
   static bool copy_dir(std::filesystem::path const& src, std::filesystem::path const& dst);
   static bool append_file(std::filesystem::path const& path, std::string const& content);
 
-  std::filesystem::path    pg_bin_;
-  std::filesystem::path    data_dir_;
-  std::vector<std::string> extra_args_;
-  Role                     role_;
+  std::filesystem::path pg_bin_;
+  std::filesystem::path data_dir_;
+  uint16_t              port_;
+  Role                  role_;
 
   mutable std::recursive_mutex mu_;
 

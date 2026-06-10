@@ -2,11 +2,8 @@
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-static std::vector<std::string> build_postgres_args(std::string const&              data_dir,
-                                                    std::vector<std::string> const& extra) {
-  std::vector<std::string> args = {"-D", data_dir};
-  args.insert(args.end(), extra.begin(), extra.end());
-  return args;
+static std::vector<std::string> build_postgres_args(std::string const& data_dir, uint16_t port) {
+  return {"-D", data_dir, "-p", std::to_string(port)};
 }
 
 static bool has_arg(std::vector<std::string> const& args, std::string_view arg) {
@@ -18,15 +15,15 @@ static bool has_arg(std::vector<std::string> const& args, std::string_view arg) 
 
 // ── PgInstance ────────────────────────────────────────────────────────────────
 
-PgInstance::PgInstance(std::filesystem::path    pg_bin,
-                       std::filesystem::path    data_dir,
-                       Role                     role,
-                       std::vector<std::string> extra_args)
+PgInstance::PgInstance(std::filesystem::path pg_bin,
+                       std::filesystem::path data_dir,
+                       uint16_t              port,
+                       Role                  role)
     : pg_bin_(std::move(pg_bin)),
       data_dir_(std::move(data_dir)),
-      extra_args_(std::move(extra_args)),
+      port_(port),
       role_(role),
-      postgres_(pg_bin_ / "postgres", build_postgres_args(data_dir_, extra_args_)) {}
+      postgres_(pg_bin_ / "postgres", build_postgres_args(data_dir_, port_)) {}
 
 PgInstance::~PgInstance() {
   if (is_running())
@@ -36,7 +33,7 @@ PgInstance::~PgInstance() {
 // ── initialisation ────────────────────────────────────────────────────────────
 
 bool PgInstance::create_raft_wal(std::filesystem::path raft_dir) {
-  std::lock_guard lk(mu_);
+  std::lock_guard             lk(mu_);
   std::filesystem::path const pg_raft_wal = raft_dir / "pg_wal";
   if (mkdir(pg_raft_wal.c_str(), 0700) != 0 && errno != EEXIST)
     return false;
@@ -78,6 +75,7 @@ bool PgInstance::init(std::vector<std::string> initdb_args) {
 static std::map<std::string, std::string> const kDefaultConfig = {
     {"wal_sync_method", "fsync"},
     {"wal_recycle", "off"},
+    {"wal_level", "replica"},
     {"listen_addresses", "'*'"},
 };
 
@@ -94,7 +92,7 @@ static std::vector<std::string> const kDefaultHbaConfig = {
 };
 
 bool PgInstance::write_config(std::map<std::string, std::string> const& settings) {
-  std::lock_guard lk(mu_);
+  std::lock_guard                    lk(mu_);
   std::map<std::string, std::string> merged = kDefaultConfig;
   for (auto const& [k, v] : settings)
     merged[k] = v;
@@ -107,7 +105,7 @@ bool PgInstance::write_config(std::map<std::string, std::string> const& settings
 
 bool PgInstance::write_hba(std::vector<std::string> const& lines) {
   std::lock_guard lk(mu_);
-  std::string content;
+  std::string     content;
   for (auto const& line : lines)
     content += line + "\n";
   for (auto const& line : kDefaultHbaConfig)
@@ -178,7 +176,7 @@ bool PgInstance::is_running() const {
 
 bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
   std::lock_guard lk(mu_);
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+  auto            deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
   while (std::chrono::steady_clock::now() < deadline) {
     Process p(pg_bin_ / "pg_isready",
               {"-h", "localhost", "-p", std::to_string(port), "-d", "postgres", "-q"});

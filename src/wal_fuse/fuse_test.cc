@@ -854,7 +854,7 @@ BOOST_AUTO_TEST_CASE(wal_moved_to_raft_dir) {
   auto      raft_dir = tmp() / "pgraft";
   std::filesystem::create_directory(raft_dir);
 
-  PgInstance pg(kPgBin, data_dir);
+  PgInstance pg(kPgBin, data_dir, kPort);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
 
   int initial = count_wal_segments(data_dir / "pg_wal");
@@ -907,7 +907,7 @@ BOOST_AUTO_TEST_CASE(wal_writes_to_backing_dir) {
 
   // fuse declared before pg so pg destructs first (stops postgres before FUSE unmounts).
   Fuse    fuse(data_dir / "pg_wal", std::make_unique<FuseOps>(raft_pg_wal));
-  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.create_raft_wal(raft_dir));
