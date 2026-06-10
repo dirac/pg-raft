@@ -62,7 +62,7 @@ class PgInstance {
   // ── backup / restore ──────────────────────────────────────────────────────
 
   // Stop the instance (if running), then copy data_dir recursively to
-  // |dest_dir|. |dest_dir| must not exist.
+  // |dest_dir|.
   bool backup(std::filesystem::path const& dest_dir, StopMode mode = StopMode::Fast);
 
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).

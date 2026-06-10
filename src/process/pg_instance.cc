@@ -77,6 +77,8 @@ static std::map<std::string, std::string> const kDefaultConfig = {
     {"wal_recycle", "off"},
     {"wal_level", "replica"},
     {"listen_addresses", "'*'"},
+    {"fsync", "on"},
+    {"synchronous_commit", "on"},
 };
 
 static std::vector<std::string> const kDefaultHbaConfig = {

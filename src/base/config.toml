@@ -2,20 +2,6 @@
 dir = "/tmp"
 
 
-[[s3]]
-service       = "s3.us-east-1.amazonaws.com"
-access_id     = "AKIATBZWJUK7V6DBYET7"
-access_key    = "haECK0RrGqAod8i4MXckOsg50CYWYvWIe8+tTc2Z"
-bucket        = "us-east-1.sparrowdb.com"
-region        = "us-east-1"
-
-[[s3]]
-service       = "storage.googleapis.com"
-access_id     = "GOOG1EM24E4U6LP3QE4VHUT25H35KW6E6KNAPUJTMKQYN3AJI6ATA7AC2BSS4"
-access_key    = "FqWOuu2qgNPBDZa7qn5Aj8sQlkSr+CZ5zPT37e3b"
-bucket        = "us-east1.sparrowdb.com"
-region        = "us-east-1"
-
 [[server]]
 hostname      = "localhost"
 pg_port       = 0
@@ -23,4 +9,4 @@ ha_port       = 0
 
 [pg_config]
 max_connections  = 100
-shared_buffer_mb = 124
+shared_buffer    = "124M"

@@ -11,7 +11,7 @@ struct Config {
   /// The temp, data and raft directories will reside as subdirs.
   string wdir;
 
-  /// All the postgresql installations. Current and next.
+  /// All the postgresql installations. Current and future.
   string install_dir = "/opt/pg_raft/postgresql";
 
   /// The desired pg_version. If the data directory belongs to a previous version, then the leader
@@ -26,25 +26,12 @@ struct Config {
   };
   vector<Server> servers;  ///< Postgres servers
 
-  struct PgConfig {
-    std::optional<unsigned> max_connections;
-    std::optional<unsigned> shared_buffers_mb;
-  };
-  PgConfig pg_config;
+  /// Values in postgresql.conf
+  map<string, string> pg_config;
 
   /// Proxy configuration
   uint16_t proxy_pg_port   = 5432;  // For client connections, that will be forwarded to the leader.
   uint16_t proxy_http_port = 8080;  // Proxy listens to a few admin commands on http port.
-
-  /// Backups.
-  struct S3 {
-    string service;
-    string access_id;
-    string access_key;
-    string region;
-    string bucket;
-  };
-  vector<S3> s3_endpoints;
 
   Config() = default;
   Config(string const& filename);
