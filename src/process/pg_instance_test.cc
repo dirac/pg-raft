@@ -125,7 +125,7 @@ BOOST_AUTO_TEST_CASE(start_and_stop) {
 
   PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-  BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+  BOOST_REQUIRE(pg.write_config({}));
   BOOST_REQUIRE(pg.write_hba({}));
 
   BOOST_TEST(!pg.is_running());
@@ -145,7 +145,7 @@ BOOST_AUTO_TEST_CASE(stop_immediate) {
 
   PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-  BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+  BOOST_REQUIRE(pg.write_config({}));
   BOOST_REQUIRE(pg.write_hba({}));
   BOOST_REQUIRE(pg.start());
   BOOST_REQUIRE(pg.wait_ready(kPort));
@@ -165,7 +165,7 @@ BOOST_AUTO_TEST_CASE(backup) {
 
   PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-  BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+  BOOST_REQUIRE(pg.write_config({}));
   BOOST_REQUIRE(pg.write_hba({}));
   BOOST_REQUIRE(pg.start());
   BOOST_REQUIRE(pg.wait_ready(kPort));
@@ -188,7 +188,7 @@ BOOST_AUTO_TEST_CASE(restore_and_start) {
   {
     PgInstance primary(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
     BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-    BOOST_REQUIRE(primary.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+    BOOST_REQUIRE(primary.write_config({}));
     BOOST_REQUIRE(primary.write_hba({}));
     BOOST_REQUIRE(primary.start());
     BOOST_REQUIRE(primary.wait_ready(kPort));

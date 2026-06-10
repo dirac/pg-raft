@@ -40,7 +40,7 @@ static bool is_wal_name(char const* path) {
 // to the mmap before async_publish returns, so by the time we read them back
 // the mmap is stable for those offsets.
 
-bool capture = false;
+constexpr bool capture = false;
 
 struct WriteRequest {
   char   path[32];
@@ -196,11 +196,13 @@ BOOST_AUTO_TEST_CASE(shadow_verification_with_pgbench) {
   PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust"}));
-  std::filesystem::copy_file(data_dir / "pg_wal" / "000000010000000000000001",
-                             "/tmp/000000010000000000000001");
+
+  if (capture)
+    std::filesystem::copy_file(data_dir / "pg_wal" / "000000010000000000000001",
+                               "/tmp/000000010000000000000001");
 
   BOOST_REQUIRE(pg.create_raft_wal(raft_dir));
-  BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+  BOOST_REQUIRE(pg.write_config({}));
   BOOST_REQUIRE(pg.write_hba({"host  all  all  127.0.0.1/32  trust"}));
 
   BOOST_REQUIRE(fuse.start());

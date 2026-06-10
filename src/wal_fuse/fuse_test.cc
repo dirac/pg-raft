@@ -911,7 +911,7 @@ BOOST_AUTO_TEST_CASE(wal_writes_to_backing_dir) {
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.create_raft_wal(raft_dir));
-  BOOST_REQUIRE(pg.write_config({{"listen_addresses", "'127.0.0.1'"}}));
+  BOOST_REQUIRE(pg.write_config({}));
   BOOST_REQUIRE(pg.write_hba({"host  all  all  127.0.0.1/32  trust"}));
 
   BOOST_REQUIRE_GT(count_wal_segments(raft_pg_wal), 0);

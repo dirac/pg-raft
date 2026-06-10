@@ -95,7 +95,6 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   PgInstance primary(string(kPgBin), primary_dir, kPrimaryPort, PgInstance::Role::kPrimary);
   BOOST_REQUIRE(primary.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(primary.write_config({
-      {"listen_addresses", "'127.0.0.1'"},
       {"wal_level",        "replica"},
       {"max_wal_senders",  "3"},
       {"log_min_messages", "warning"},
@@ -155,7 +154,6 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   BOOST_REQUIRE(standby.restore(backup_dir));
   std::ofstream(standby_dir / "standby.signal").close();
   BOOST_REQUIRE(standby.write_config({
-      {"listen_addresses", "'127.0.0.1'"},
       {"primary_conninfo", "'host=" + sock_dir.string() + " port=" + std::to_string(server->bound_port()) +
                            " application_name=standby'"},
       {"hot_standby",      "on"},

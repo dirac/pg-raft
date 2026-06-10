@@ -78,7 +78,7 @@ static double run_without_fuse() {
     std::filesystem::remove_all(root);
     return 0.0;
   }
-  pg.write_config({{"listen_addresses", "'127.0.0.1'"}, {"fsync", "on"}});
+  pg.write_config({{"fsync", "on"}});
   pg.write_hba({"host  all  all  127.0.0.1/32  trust"});
 
   if (!pg.start()) {
@@ -135,7 +135,7 @@ static double run_with_fuse() {
     std::filesystem::remove_all(root);
     return 0.0;
   }
-  pg.write_config({{"listen_addresses", "'127.0.0.1'"}, {"fsync", "on"}});
+  pg.write_config({{"fsync", "on"}});
   pg.write_hba({"host  all  all  127.0.0.1/32  trust"});
 
   if (!fuse.start()) {

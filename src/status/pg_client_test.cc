@@ -27,7 +27,7 @@ struct Setup {
 
     pg.emplace(string(kPgBin), data, kPort, PgInstance::Role::kPrimary);
     BOOST_REQUIRE(pg->init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
-    BOOST_REQUIRE(pg->write_config({{"listen_addresses", "'127.0.0.1'"}}));
+    BOOST_REQUIRE(pg->write_config({}));
     BOOST_REQUIRE(pg->write_hba({}));
     BOOST_REQUIRE(pg->start());
     BOOST_REQUIRE(pg->wait_ready(kPort));
