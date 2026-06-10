@@ -178,7 +178,7 @@ int64_t WalSender::now_pg_ts() {
 
 // ── construction ──────────────────────────────────────────────────────────────
 
-WalSender::WalSender(tcp::socket socket, std::filesystem::path wal_dir,
+WalSender::WalSender(stream_socket socket, std::filesystem::path wal_dir,
                      uint64_t system_id, uint32_t timeline,
                      uint64_t flush_lsn, StatusCb status_cb,
                      uint32_t wal_segment_size)
@@ -194,7 +194,7 @@ WalSender::WalSender(tcp::socket socket, std::filesystem::path wal_dir,
       keepalive_timer_(io_context()) {}
 
 shared_ptr<WalSender> WalSender::create(
-    tcp::socket socket, std::filesystem::path wal_dir,
+    stream_socket socket, std::filesystem::path wal_dir,
     uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
     StatusCb status_cb, uint32_t wal_segment_size) {
   return shared_ptr<WalSender>(new WalSender(

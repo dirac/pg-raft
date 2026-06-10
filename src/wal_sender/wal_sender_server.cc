@@ -6,10 +6,12 @@
 using error_code = boost::system::error_code;
 
 WalSenderServer::WalSenderServer(
-    uint16_t port, std::filesystem::path wal_dir,
-    uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
+    std::filesystem::path socket_dir, uint16_t port,
+    std::filesystem::path wal_dir, uint64_t system_id,
+    uint32_t timeline, uint64_t flush_lsn,
     SenderCb on_sender, uint32_t wal_segment_size)
-    : port_(port),
+    : socket_dir_(std::move(socket_dir)),
+      port_(port),
       wal_dir_(std::move(wal_dir)),
       system_id_(system_id),
       timeline_(timeline),
@@ -20,29 +22,30 @@ WalSenderServer::WalSenderServer(
       next_socket_(io_context()) {}
 
 shared_ptr<WalSenderServer> WalSenderServer::create(
-    uint16_t port, std::filesystem::path wal_dir,
-    uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
+    std::filesystem::path socket_dir, uint16_t port,
+    std::filesystem::path wal_dir, uint64_t system_id,
+    uint32_t timeline, uint64_t flush_lsn,
     SenderCb on_sender, uint32_t wal_segment_size) {
   return shared_ptr<WalSenderServer>(new WalSenderServer(
-      port, std::move(wal_dir), system_id, timeline, flush_lsn,
-      std::move(on_sender), wal_segment_size));
+      std::move(socket_dir), port, std::move(wal_dir), system_id, timeline,
+      flush_lsn, std::move(on_sender), wal_segment_size));
 }
 
 bool WalSenderServer::start() {
   error_code ec;
 
-  acceptor_.open(tcp::v4(), ec);
+  socket_path_ = socket_dir_ / (".s.PGSQL." + std::to_string(port_));
+  std::filesystem::remove(socket_path_, ec);  // clear any stale socket
+
+  acceptor_.open(unix_proto(), ec);
   if (ec) {
     log(ERROR, "wal_sender_server: open: {}", ec.message());
     return false;
   }
 
-  acceptor_.set_option(tcp::acceptor::reuse_address(true), ec);
-  acceptor_.set_option(tcp::no_delay(true), ec);
-
-  acceptor_.bind(tcp::endpoint(asio::ip::address_v4::any(), port_), ec);
+  acceptor_.bind(unix_proto::endpoint(socket_path_.string()), ec);
   if (ec) {
-    log(ERROR, "wal_sender_server: bind: {}", ec.message());
+    log(ERROR, "wal_sender_server: bind {}: {}", socket_path_.string(), ec.message());
     return false;
   }
 
@@ -52,8 +55,6 @@ bool WalSenderServer::start() {
     return false;
   }
 
-  bound_port_ = acceptor_.local_endpoint(ec).port();
-
   do_accept();
   return true;
 }
@@ -61,14 +62,12 @@ bool WalSenderServer::start() {
 void WalSenderServer::shutdown() {
   error_code ec;
   acceptor_.close(ec);
+  std::filesystem::remove(socket_path_, ec);
 }
 
 void WalSenderServer::do_accept() {
   acceptor_.async_accept(next_socket_, [this, s = self()](error_code ec) {
     if (ec) return;  // acceptor was closed
-
-    error_code ec2;
-    next_socket_.set_option(tcp::no_delay(true), ec2);
 
     auto sender = WalSender::create(std::move(next_socket_), wal_dir_,
                                     system_id_, timeline_, flush_lsn_,
@@ -76,7 +75,7 @@ void WalSenderServer::do_accept() {
     sender->start();
     on_sender_(sender);
 
-    next_socket_ = tcp::socket(io_context());
+    next_socket_ = unix_proto::socket(io_context());
     do_accept();
   });
 }

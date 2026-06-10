@@ -139,16 +139,18 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   std::mutex            sender_mu;
   shared_ptr<WalSender> active_sender;
 
-  auto wal_dir = primary_dir / "pg_wal";
-  auto server  = WalSenderServer::create(
-      kSenderPort, wal_dir, system_id, /*timeline=*/1, initial_lsn,
+  // Unix domain socket paths on macOS are limited to 104 bytes; use /tmp.
+  auto sock_dir = std::filesystem::path("/tmp");
+  auto wal_dir  = primary_dir / "pg_wal";
+  auto server   = WalSenderServer::create(
+      sock_dir, kSenderPort, wal_dir, system_id, /*timeline=*/1, initial_lsn,
       [&sender_mu, &active_sender](shared_ptr<WalSender> s) {
         std::lock_guard lk(sender_mu);
         active_sender = s;
         log(INFO, "new WAL sender connection");
       });
   BOOST_REQUIRE(server->start());
-  BOOST_REQUIRE(server->bound_port() > 0);
+  BOOST_REQUIRE(std::filesystem::exists(server->socket_path()));
 
   // ── restore backup as standby ─────────────────────────────────────────────
   PgInstance standby(string(kPgBin), standby_dir);
@@ -157,7 +159,7 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   BOOST_REQUIRE(standby.write_config({
       {"listen_addresses", "'127.0.0.1'"},
       {"port",             std::to_string(kStandbyPort)},
-      {"primary_conninfo", "'host=127.0.0.1 port=" + std::to_string(kSenderPort) +
+      {"primary_conninfo", "'host=" + sock_dir.string() + " port=" + std::to_string(kSenderPort) +
                            " application_name=standby'"},
       {"hot_standby",      "on"},
       {"log_min_messages", "warning"},

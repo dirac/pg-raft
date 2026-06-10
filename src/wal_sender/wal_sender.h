@@ -11,10 +11,11 @@ struct StandbyStatus {
 // Reads WAL from |wal_dir| as advance() notifications arrive.
 class WalSender : public std::enable_shared_from_this<WalSender> {
  public:
-  using StatusCb = std::function<void(StandbyStatus const&)>;
+  using stream_socket = asio::generic::stream_protocol::socket;
+  using StatusCb      = std::function<void(StandbyStatus const&)>;
 
   static shared_ptr<WalSender> create(
-      asio::ip::tcp::socket  socket,
+      stream_socket          socket,
       std::filesystem::path  wal_dir,
       uint64_t               system_id,
       uint32_t               timeline,
@@ -30,10 +31,9 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   void shutdown();
 
  private:
-  using tcp = asio::ip::tcp;
   enum class Phase { kStartup, kCommand, kStreaming };
 
-  WalSender(tcp::socket socket, std::filesystem::path wal_dir,
+  WalSender(stream_socket socket, std::filesystem::path wal_dir,
             uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
             StatusCb status_cb, uint32_t wal_segment_size);
 
@@ -90,7 +90,7 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   static uint32_t get32(uint8_t const* p);
   static uint64_t get64(uint8_t const* p);
 
-  tcp::socket              socket_;
+  stream_socket            socket_;
   asio::io_context::strand strand_;
   std::filesystem::path    wal_dir_;
   uint64_t                 system_id_;

@@ -110,9 +110,17 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 **`src/wal_sender/`** — Two cooperating Asio-based classes:
 
-- **`WalSender`** — Handles a single physical replication connection. Speaks the PostgreSQL frontend/backend wire protocol (startup handshake, `IDENTIFY_SYSTEM`, `START_REPLICATION`). Reads WAL directly from `wal_dir` on disk. Call `advance(flush_lsn)` from any thread to notify that WAL has been flushed; the sender reads and streams the new bytes. An optional `StatusCb` fires on each `StandbyStatusUpdate` message received from the standby. Internally uses an Asio strand for all I/O (no dedicated thread per connection). `shutdown()` cancels pending I/O.
+- **`WalSender`** — Handles a single physical replication connection. Internally goes through three phases: **Startup** (handles PostgreSQL startup packet, SSL decline, auth-ok, parameter status); **Command** (responds to `IDENTIFY_SYSTEM`, `START_REPLICATION`, `TIMELINE_HISTORY`, `SHOW`, `SET`, simple `SELECT`); **Streaming** (enters `CopyBoth` mode, streams `XLogData` messages, sends keepalives every 5 s, handles `StandbyStatusUpdate`). Reads WAL directly from `wal_dir` on disk using `pread`; segment filenames are derived from the LSN as `%08X%08X%08X` (timeline, seg-high, seg-low). Call `advance(flush_lsn)` from any thread (posted onto the strand) to notify that WAL is available. The caller is responsible for driving `advance()` — e.g. from a `WalFuseOps` fsync hook or by polling `pg_current_wal_flush_lsn()`. An optional `StatusCb` fires on each `StandbyStatusUpdate`. `shutdown()` cancels pending I/O.
 
-- **`WalSenderServer`** — Async TCP accept loop built on Asio. Binds a port, creates one `WalSender` per incoming connection, and calls a user-supplied `SenderCb` with each. `bound_port()` returns the actual port (useful when port `0` is passed for OS-assigned ephemeral ports). `shutdown()` cancels the acceptor; existing senders keep running.
+- **`WalSenderServer`** — Async TCP accept loop. Creates one `WalSender` per incoming connection and calls a user-supplied `SenderCb` with it. `bound_port()` returns the actual port (useful when port `0` is passed). `shutdown()` cancels the acceptor; existing senders keep running.
+
+  ```cpp
+  auto server = WalSenderServer::create(
+      port, wal_dir, system_id, timeline, initial_flush_lsn,
+      [](shared_ptr<WalSender> s) { /* store s, call s->advance() later */ });
+  server->start();
+  server->shutdown();
+  ```
 
 **`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Primary classes:
 
@@ -124,7 +132,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`WalSegment`** (in `wal_segment.h/cc`) — Memory-mapped WAL segment. Holds the mmap'd buffer (`map_`), an fd, parse cursor (`next_`), sync cursor (`synced_`), and a `WalState` that tracks completed XLogRecord bytes. `write()` advances the cursor via `WalState::update()` (returns `tuple<off_t, size_t, bool>` — offset, size, and whether a full record was completed) and calls `WalTracker::async_publish()`; `fsync()` calls `WalTracker::async_fsync()` on the dirty page range and blocks for the result via `std::future`.
 
-- **`WalTracker`** — Interface that external code implements to receive WAL events. Has default (non-pure-virtual) no-op implementations. `async_publish(segment, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, segment, buf, size)` is called on `fsync` with a page-aligned dirty range and a promise the implementor resolves when the sync is done.
+- **`WalTracker`** — Interface for receiving WAL events. Has default (non-pure-virtual) no-op implementations. `async_publish(segment, offset, size)` is called as new WAL bytes are validated; `async_fsync(promise, segment, buf, size)` is called on `fsync` with a page-aligned dirty range; the implementor resolves the promise when the data is durable.
 
 Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
@@ -132,7 +140,7 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 
 - **`PgClient`** — Async PostgreSQL extended-protocol client over a raw TCP socket (not libpq). `connect(port)` synchronously establishes a connection. `prepare(sql)` synchronously sends a `Parse`/`Describe`/`Sync` sequence and returns a `PgStmt` handle. `async_exec(stmt, cb)` executes a prepared statement asynchronously and delivers `Result<Rows>` to the callback; multiple calls queue up and run one at a time. `close()` tears down the socket. Used in tests to verify replication state (e.g. row counts, LSNs) without needing an external psql binary.
 
-**`src/proxy/`** — Reserved directory for a future module; currently empty with no `Jamfile`.
+The codebase also contains `src/raft/` (a Raft consensus implementation) which is not documented here.
 
 ### Data flow (end-to-end)
 
