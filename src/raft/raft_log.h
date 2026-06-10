@@ -2,7 +2,6 @@
 
 #include "src/base/base.h"
 #include "src/raft/raft_types.h"
-#include "src/raft/zk_state.h"
 
 class RaftLog {
  public:
@@ -52,18 +51,6 @@ class RaftLog {
   /// The term of the entry at the index.
   Result<std::optional<RaftTerm>> get_term(RaftIndex idx) const;
 
-  /// Copy the state and truncate the old logs.
-  Result<void> save_snapshot(ZkState snapshot, unsigned log_size = 4096);
-
-  /// Restore snapshot.
-  Result<ZkState> load_snapshot() const;
-
-  /// Create an LMDB copy.
-  Result<void> take_db_snapshot(std::filesystem::path filename) const;
-
-  /// Apply snapshot
-  Result<void> apply_db_snapshot(std::filesystem::path filename);
-
   /// The current term
   Result<RaftTerm> current_term() const;
 
@@ -104,48 +91,6 @@ class RaftLog {
   virtual void cursor_close(MDB_cursor* cursor) const;
 
  private:
-  /// Delete all entries after prev_log_idx, if the term matches.
-  Result<bool> reset_entries(RaftIndex prev_log_idx, RaftTerm prev_log_term);
-
-  Result<bool> load(std::array<uint8_t, 8> const&                 prefix,
-                    MDB_dbi                                       dbi,
-                    std::function<Result<bool>(MDB_val, MDB_val)> func) const;
-
-  template <typename K, typename V>
-  Result<void> save(std::array<uint8_t, 8> const& prefix,
-                    MDB_dbi                       dbi,
-                    ZkState const&                snapshot,
-                    size_t const                  offset,
-                    size_t const                  limit);
-
-  Result<void> save_strings(std::array<uint8_t, 8> const& prefix,
-                            ZkState const&                snapshot,
-                            size_t                        offset,
-                            size_t                        limit);
-  Result<bool> load_strings(std::array<uint8_t, 8> const& prefix, ZkState& state) const;
-
-  Result<void> save_nodes(std::array<uint8_t, 8> const& prefix,
-                          ZkState const&                snapshot,
-                          size_t                        offset,
-                          size_t                        limit);
-  Result<bool> load_nodes(std::array<uint8_t, 8> const& prefix, ZkState& state) const;
-
-  Result<void> save_ttl_nodes(std::array<uint8_t, 8> const& prefix,
-                              ZkState const&                snapshot,
-                              size_t                        offset,
-                              size_t                        limit);
-  Result<bool> load_ttl_nodes(std::array<uint8_t, 8> const& prefix, ZkState& state) const;
-
-  Result<void> save_sessions(std::array<uint8_t, 8> const& prefix,
-                             ZkState const&                snapshot,
-                             size_t                        offset,
-                             size_t                        limit);
-  Result<bool> load_sessions(std::array<uint8_t, 8> const& prefix, ZkState& state) const;
-
-  Result<void> save_meta(std::array<uint8_t, 8> prefix, ZkState const& snapshot);
-
-  Result<std::tuple<Zxid, std::time_t, uint64_t>> read_meta() const;
-
   Result<void> append_entries(RaftIndex const idx, vector<Entry> const& entries);
 
   Result<void> resize_logs();
@@ -176,13 +121,6 @@ class RaftLog {
 
   /// Log db
   MDB_dbi logs_;  // {RaftIndex, RaftTerm} -> Entry
-
-  /// Snapshot databases.
-  MDB_dbi meta_;       // Meta data from snapshot.
-  MDB_dbi strings_;    // PathId -> value
-  MDB_dbi nodes_;      // Path -> NodeData
-  MDB_dbi ttl_nodes_;  // Path -> time
-  MDB_dbi sessions_;   // session_id -> Session
 
   size_t mmap_size_{0x1ULL << 30};
 };
@@ -230,4 +168,3 @@ std::tuple<V, uint8_t const*> from_mem(uint8_t const* ptr) {
 
   return {v, ptr};
 }
-

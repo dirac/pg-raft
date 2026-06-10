@@ -61,3 +61,4 @@ struct WalCommand {
     ar & command;
   }
 };
+
