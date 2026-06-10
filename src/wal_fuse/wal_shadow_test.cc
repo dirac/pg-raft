@@ -193,7 +193,7 @@ BOOST_AUTO_TEST_CASE(shadow_verification_with_pgbench) {
   // fuse must be declared before pg so that pg's destructor runs first:
   // postgres is stopped before the FUSE mount is torn down.
   Fuse       fuse(data_dir / "pg_wal", std::make_unique<ShadowWalOps>(tracker, raft_pg_wal));
-  PgInstance pg(kPgBin, data_dir, {"-p", std::to_string(kPort)});
+  PgInstance pg(kPgBin, data_dir, PgInstance::Role::kPrimary, {"-p", std::to_string(kPort)});
 
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust"}));
   std::filesystem::copy_file(data_dir / "pg_wal" / "000000010000000000000001",
