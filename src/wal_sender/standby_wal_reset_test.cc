@@ -9,7 +9,6 @@
 static constexpr char const* kPgBin       = "/opt/pg_raft/postgresql/17/bin";
 static constexpr uint16_t    kPrimaryPort = 15451;
 static constexpr uint16_t    kStandbyPort = 15452;
-static constexpr uint16_t    kSenderPort  = 15453;
 
 static bool pg_available() {
   return access((string(kPgBin) + "/postgres").c_str(), X_OK) == 0;
@@ -143,7 +142,7 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   auto sock_dir = std::filesystem::path("/tmp");
   auto wal_dir  = primary_dir / "pg_wal";
   auto server   = WalSenderServer::create(
-      sock_dir, kSenderPort, wal_dir, system_id, /*timeline=*/1, initial_lsn,
+      sock_dir, 15453, wal_dir, system_id, /*timeline=*/1, initial_lsn,
       [&sender_mu, &active_sender](shared_ptr<WalSender> s) {
         std::lock_guard lk(sender_mu);
         active_sender = s;
@@ -159,7 +158,7 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset) {
   BOOST_REQUIRE(standby.write_config({
       {"listen_addresses", "'127.0.0.1'"},
       {"port",             std::to_string(kStandbyPort)},
-      {"primary_conninfo", "'host=" + sock_dir.string() + " port=" + std::to_string(kSenderPort) +
+      {"primary_conninfo", "'host=" + sock_dir.string() + " port=" + std::to_string(server->bound_port()) +
                            " application_name=standby'"},
       {"hot_standby",      "on"},
       {"log_min_messages", "warning"},

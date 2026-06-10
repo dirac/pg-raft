@@ -34,19 +34,25 @@ shared_ptr<WalSenderServer> WalSenderServer::create(
 bool WalSenderServer::start() {
   error_code ec;
 
-  socket_path_ = socket_dir_ / (".s.PGSQL." + std::to_string(port_));
-  std::filesystem::remove(socket_path_, ec);  // clear any stale socket
+  for (uint16_t try_port = port_; ; ++try_port) {
+    auto candidate = socket_dir_ / (".s.PGSQL." + std::to_string(try_port));
+    if (std::filesystem::exists(candidate))
+      continue;
 
-  acceptor_.open(unix_proto(), ec);
-  if (ec) {
-    log(ERROR, "wal_sender_server: open: {}", ec.message());
-    return false;
-  }
+    acceptor_.open(unix_proto(), ec);
+    if (ec) {
+      log(ERROR, "wal_sender_server: open: {}", ec.message());
+      return false;
+    }
 
-  acceptor_.bind(unix_proto::endpoint(socket_path_.string()), ec);
-  if (ec) {
-    log(ERROR, "wal_sender_server: bind {}: {}", socket_path_.string(), ec.message());
-    return false;
+    acceptor_.bind(unix_proto::endpoint(candidate.string()), ec);
+    if (!ec) {
+      socket_path_ = candidate;
+      bound_port_  = try_port;
+      break;
+    }
+
+    acceptor_.close(ec);
   }
 
   acceptor_.listen(16, ec);
