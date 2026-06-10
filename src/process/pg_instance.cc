@@ -173,8 +173,7 @@ bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
 bool PgInstance::backup(std::filesystem::path const& dest_dir, StopMode mode) {
   if (is_running())
     stop(mode);
-  Process p("/bin/cp", {"-Rp", data_dir_.string(), dest_dir.string()});
-  return p.start() && p.wait() == 0;
+  return copy_dir(data_dir_, dest_dir);
 }
 
 bool PgInstance::restore(std::filesystem::path const& backup_dir) {
@@ -188,9 +187,9 @@ bool PgInstance::restore_and_start(std::filesystem::path const& backup_dir) {
 // ── private helpers ───────────────────────────────────────────────────────────
 
 bool PgInstance::copy_dir(std::filesystem::path const& src, std::filesystem::path const& dst) {
-  // -R: recursive, -p: preserve mode/timestamps.  When dst does not exist,
-  // cp creates it as a replica of src (not as a subdirectory inside it).
-  Process p("/bin/cp", {"-Rp", src.string(), dst.string()});
+  // -a: archive (recursive + preserve permissions/timestamps/symlinks).
+  // Trailing slash on src copies contents into dst, not src itself into dst.
+  Process p("/usr/bin/rsync", {"-a", src.string() + "/", dst.string()});
   return p.start() && p.wait() == 0;
 }
 
