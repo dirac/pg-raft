@@ -31,3 +31,9 @@ alias libs
   : deps
     base
   ;
+
+unit-test semaphore_lock_test
+  : semaphore_lock_test.cc
+    libs
+    testing
+  ;

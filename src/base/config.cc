@@ -52,11 +52,12 @@ std::string to_string(toml::value const& v) {
     case toml::value_t::integer:
       return format("{}", v.as_integer());
     case toml::value_t::floating:
-      return format("{}", v.as_float());
+      return format("{}", v.as_floating());
     case toml::value_t::string:
       return v.as_string();
+    default:
+      throw "unsupported type";
   }
-  throw "unsupported type";
 }
 
 template <typename T>
@@ -64,11 +65,8 @@ void parse_pg_config(T& data, Config& config) {
   if (!data.contains("pg_config") || !data.at("pg_config").is_table())
     return;
 
-  auto const& pg_config = data.at("pg_config");
-  for (auto const& [key, val] : pg_config) {
-    std::cout << key << "=" << toml::visit(type_name_of{}, val) << " " << to_string(val)
-              << std::endl;
-  }
+  for (auto const& [key, val] : data.at("pg_config").as_table())
+    config.pg_config[key] = to_string(val);
 }
 
 }  // namespace

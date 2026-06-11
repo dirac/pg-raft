@@ -194,9 +194,16 @@ bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
 
 bool PgInstance::backup(std::filesystem::path const& dest_dir, StopMode mode) {
   std::lock_guard lk(mu_);
-  if (postgres_.is_running())
-    stop(mode);
-  return copy_dir(data_dir_, dest_dir);
+  if (role_ == Role::kStandby) {
+    if (postgres_.is_running())
+      stop(mode);
+    return copy_dir(data_dir_, dest_dir);
+  }
+  std::filesystem::remove_all(dest_dir);
+  Process p(pg_bin_ / "pg_basebackup",
+            {"-h", "127.0.0.1", "-p", std::to_string(port_), "-D", dest_dir,
+             "--checkpoint=fast", "-X", "stream"});
+  return p.start() && p.wait() == 0;
 }
 
 bool PgInstance::restore(std::filesystem::path const& backup_dir) {

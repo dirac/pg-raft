@@ -21,20 +21,7 @@ char const* top_dir() {
 }
 
 Config test_config() {
-  auto config = Config{std::format("{0}/src/base/config.toml", top_dir())};
-
-  {
-    auto s3 = std::filesystem::path{std::string{getenv("HOME")} + "/.pg_raft/testing.toml"};
-
-    std::error_code ec;
-    if (!std::filesystem::exists(s3, ec) || ec)
-      log(FATAL, "The file {}/.pg_raft/testing.toml doesn't exist", getenv("HOME"));
-
-    if (!std::filesystem::is_regular_file(s3, ec) || ec)
-      log(FATAL, "The file {}/.pg_raft/testing.toml isn't a regular file.", getenv("HOME"));
-    config.s3_endpoints = Config{s3.c_str()}.s3_endpoints;
-  }
-  return config;
+  return Config{std::format("{0}/src/base/config.toml", top_dir())};
 }
 
 string test_name() {
