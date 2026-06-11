@@ -1,8 +1,7 @@
 #pragma once
 
 #include "src/base/base.h"
-
-class WalSegment;
+#include "src/base/wal_segment.h"
 
 struct WalTracker {
   virtual void async_publish(shared_ptr<WalSegment> segment, off_t offset, size_t size);
@@ -14,31 +13,24 @@ struct WalTracker {
                            size_t                 size);
 };
 
-class WalSegment : public std::enable_shared_from_this<WalSegment> {
+class WalFuseSegment {
  public:
-  WalSegment(WalTracker& tracker, LogSeqNumber lsn, int fd, void* map, int prot)
-      : tracker_(tracker),
-        lsn_(lsn),
-        fd_(fd),
-        map_(reinterpret_cast<unsigned char*>(map)),
-        prot_(prot),
-        next_(0),
-        synced_(0),
-        state_() {}
+  WalFuseSegment(WalTracker& tracker, shared_ptr<WalSegment> map)
+      : tracker_(tracker), map_(map), next_(0), synced_(0), state_() {}
 
-  ~WalSegment();
+  ~WalFuseSegment();
 
-  WalSegment(WalSegment const&)            = delete;
-  WalSegment& operator=(WalSegment const&) = delete;
+  WalFuseSegment(WalFuseSegment const&)            = delete;
+  WalFuseSegment& operator=(WalFuseSegment const&) = delete;
 
-  WalSegment(WalSegment&&)            = delete;
-  WalSegment& operator=(WalSegment&&) = delete;
+  WalFuseSegment(WalFuseSegment&&)            = delete;
+  WalFuseSegment& operator=(WalFuseSegment&&) = delete;
 
-  int                 prot() const { return prot_; }
-  LogSeqNumber const& lsn() const { return lsn_; }
+  LogSeqNumber const& lsn() const { return map_->lsn(); }
+  unsigned char*      mapping() const { return map_->mapping(); }
 
   asio::const_buffer buffer(off_t offset, size_t size) const {
-    return asio::const_buffer{map_ + offset, size};
+    return asio::const_buffer{mapping() + offset, size};
   }
 
   struct WalState {
@@ -67,12 +59,10 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   /// The expectation is the data has not been modified.
   void check_modified(unsigned char const* buf, size_t size, off_t off);
 
-  WalTracker&          tracker_;
-  LogSeqNumber const   lsn_;
-  int const            fd_;
-  unsigned char* const map_;
-  int const            prot_;
-  off_t                next_;
-  off_t                synced_;
-  WalState             state_;
+  WalTracker&            tracker_;
+  shared_ptr<WalSegment> map_;
+
+  off_t    next_;
+  off_t    synced_;
+  WalState state_;
 };

@@ -13,6 +13,7 @@ lib base
     io_threads.cc
     logger.cc
     base.cc
+    wal_segment.cc
     deps
   ;
 

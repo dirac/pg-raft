@@ -42,6 +42,50 @@ uint64_t gcounter(std::optional<uint64_t> g) {
   return v.load(std::memory_order_relaxed);
 }
 
+std::optional<LogSeqNumber> log_seq_number(char const* path) {
+  if (*path == '/')
+    ++path;
+
+  for (auto i = 0; i < 24; ++i) {
+    char c = path[i];
+    if (c >= '0' && c <= '9')
+      continue;
+    if (c >= 'A' && c <= 'F')
+      continue;
+    if (c >= 'a' && c <= 'f')
+      continue;
+
+    return std::nullopt;
+  }
+  if (path[25] != '\0')
+    return std::nullopt;
+
+  // Zero-allocation slicing using std::string_view
+  auto timeline_sv = std::string_view{path, 8};
+  auto logid_sv    = std::string_view{path + 8, 8};
+  auto logseg_sv   = std::string_view{path + 16, 8};
+
+  auto hex_to_int = [](std::string_view hex_sv) -> uint32_t {
+    uint32_t          value = 0;
+    std::stringstream ss;
+    ss << std::hex << hex_sv;
+    ss >> value;
+    return value;
+  };
+
+  // Convert hex segments to integers
+  uint32_t timeline = hex_to_int(timeline_sv);
+  uint32_t logid    = hex_to_int(logid_sv);
+  uint32_t logseg   = hex_to_int(logseg_sv);
+
+  // Reconstruct the 64-bit LSN value
+  // Internal formula: LSN = (logid * 0x100000000) + (logseg * WAL_SEGMENT_SIZE)
+  uint64_t lsn =
+      (static_cast<uint64_t>(logid) << 32) + (static_cast<uint64_t>(logseg) * kWalSegmentSize);
+
+  return LogSeqNumber{.timeline = timeline, .lsn = lsn};
+}
+
 std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t) {
   static std::mutex            mtx;
   static std::filesystem::path tmp{"/tmp/pg_raft"};

@@ -38,6 +38,9 @@ inline Result<void> ok() {
   return Result<void>(std::expected<void, std::error_code>{});
 }
 
+constexpr unsigned kWalBlockSize   = 8192;              // wal_block_size (integer).
+constexpr unsigned kWalSegmentSize = 16 * 1024 * 1024;  /// wal_segment_size (integer) = 16MB
+
 struct LogSeqNumber {
   uint32_t timeline;
   uint64_t lsn;
@@ -59,6 +62,13 @@ struct LogSeqNumber {
   }
 };
 
+std::optional<LogSeqNumber> log_seq_number(char const* path);
+
+inline std::string filename(LogSeqNumber const& lsn) {
+  return std::format(
+      "{:08X}{:08X}{:08X}", lsn.timeline, lsn.lsn >> 32, (lsn.lsn & 0xFFFFFFFFU) / kWalSegmentSize);
+}
+
 std::error_code system_error_code(int err);
 
 bool is_system_error_code(std::error_code const& ec);
@@ -79,9 +89,6 @@ inline mode_t file_mode() {
 
   return S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
 }
-
-constexpr unsigned kWalBlockSize   = 8192;              // wal_block_size (integer).
-constexpr unsigned kWalSegmentSize = 16 * 1024 * 1024;  /// wal_segment_size (integer) = 16MB
 
 #include "src/base/convert.h"
 #include "src/base/formatter.h"

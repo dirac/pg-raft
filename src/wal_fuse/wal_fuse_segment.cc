@@ -1,4 +1,4 @@
-#include "src/wal_fuse/wal_segment.h"
+#include "src/wal_fuse/wal_fuse_segment.h"
 
 #include "src/base/logger.h"
 
@@ -36,15 +36,13 @@ uint32_t round_up(uint32_t len) {
 
 }  // namespace
 
-WalSegment::~WalSegment() {
+WalFuseSegment::~WalFuseSegment() {
   log(INFO, "The file {} has data upto {}", lsn(), next_);
-  ::munmap(map_, kWalSegmentSize);
-  ::close(fd_);
 }
 
-std::tuple<off_t, size_t, bool> WalSegment::WalState::update(unsigned char const* ptr,
-                                                             size_t               size,
-                                                             off_t                off) {
+std::tuple<off_t, size_t, bool> WalFuseSegment::WalState::update(unsigned char const* ptr,
+                                                                 size_t               size,
+                                                                 off_t                off) {
   bool rec_start = false;
 
   assert(off <= curr_);
@@ -66,10 +64,7 @@ std::tuple<off_t, size_t, bool> WalSegment::WalState::update(unsigned char const
     if (xlp_magic(ptr) == 0)
       return {curr_, 0U, rec_start};
 
-    /// Start of the file, initialize rsize_ from the header.
-    if (curr_ == 0)
-      rsize_ = round_up(xlp_rem_len(ptr));
-    assert(rsize_ == round_up(xlp_rem_len(ptr)));
+    rsize_ = round_up(xlp_rem_len(ptr));
 
     log(DEBUG, "xlp_rem_len = {} at {}", rsize_, next);
 
@@ -106,22 +101,22 @@ std::tuple<off_t, size_t, bool> WalSegment::WalState::update(unsigned char const
 
 void breakpoint();
 
-void WalSegment::check_modified(unsigned char const* buf, size_t size, off_t off) {
-  if (std::memcmp(map_ + off, buf, size) == 0)
+void WalFuseSegment::check_modified(unsigned char const* buf, size_t size, off_t off) {
+  if (std::memcmp(mapping() + off, buf, size) == 0)
     return;
 
   log(INFO, "The wal-buffer got updated at {} lsn={}", off, lsn());
-  std::memcpy(map_ + off, buf, size);
-  tracker_.async_publish(shared_from_this(), off, size);
+  std::memcpy(mapping() + off, buf, size);
+  tracker_.async_publish(map_, off, size);
 }
 
-void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
+void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
   bool rec_start;
 
   if (!next_) [[unlikely]] {
     size_t bytes = 0;
     do {
-      std::tie(next_, bytes, rec_start) = state_.update(map_, kWalSegmentSize, 0);
+      std::tie(next_, bytes, rec_start) = state_.update(mapping(), kWalSegmentSize, 0);
     } while (bytes);
 
     log(INFO, "The file {} has data upto {}", lsn(), next_);
@@ -139,7 +134,7 @@ void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
   // No wal records present, it is empty (zero elements).
   // If we have content, then it will be written again.
   if (next_ < off) {
-    // assert(!modified(map_ + off, buf, size, off));
+    // assert(!modified(mapping() + off, buf, size, off));
     return;
   }
   check_modified(buf, u8(next_ - off), off);
@@ -159,14 +154,11 @@ void WalSegment::write(unsigned char const* buf, size_t size, off_t off) {
     std::tie(next_, bytes, rec_start) = state_.update(buf, size, off);
   } while (bytes);
 
-  std::memcpy(map_ + begin, buf, u8(next_ - begin));
-  tracker_.async_publish(shared_from_this(), begin, u8(next_ - begin));
+  std::memcpy(mapping() + begin, buf, u8(next_ - begin));
+  tracker_.async_publish(map_, begin, u8(next_ - begin));
 }
 
-int WalSegment::fsync() {
-  if (!(prot_ & PROT_WRITE))
-    return 0;
-
+int WalFuseSegment::fsync() {
   // page aligned size.
   auto size = (((next_ - synced_) + (getpagesize() - 1)) / getpagesize()) * getpagesize();
   if (size == 0)
@@ -175,7 +167,7 @@ int WalSegment::fsync() {
   auto promise = std::promise<int>{};
   auto future  = promise.get_future();
 
-  tracker_.async_fsync(std::move(promise), shared_from_this(), map_ + synced_, u8(size));
+  tracker_.async_fsync(std::move(promise), map_, mapping() + synced_, u8(size));
 
   if (auto r = future.get(); r)
     return r;
@@ -186,8 +178,8 @@ int WalSegment::fsync() {
   return 0;
 }
 
-void WalSegment::read(unsigned char* buf, size_t size, off_t off) {
-  std::memcpy(buf, map_ + off, size);
+void WalFuseSegment::read(unsigned char* buf, size_t size, off_t off) {
+  std::memcpy(buf, mapping() + off, size);
 }
 
 void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}

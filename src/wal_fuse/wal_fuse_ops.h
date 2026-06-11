@@ -1,7 +1,7 @@
 #pragma once
 
 #include "src/wal_fuse/fuse_ops.h"
-#include "src/wal_fuse/wal_segment.h"
+#include "src/wal_fuse/wal_fuse_segment.h"
 
 class WalFuseOps : public FuseOps {
  public:
@@ -24,6 +24,5 @@ class WalFuseOps : public FuseOps {
   int op_release(char const* path, struct fuse_file_info* fi) override;
 
  private:
-  WalTracker&                                                                      tracker_;
-  map<std::tuple<int, LogSeqNumber>, std::tuple<unsigned, shared_ptr<WalSegment>>> segments_;
+  WalTracker& tracker_;
 };
