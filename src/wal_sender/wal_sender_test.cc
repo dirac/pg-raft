@@ -88,13 +88,10 @@ BOOST_AUTO_TEST_CASE(primary_standby_async, * boost::unit_test::timeout(60)) {
     BOOST_REQUIRE_EQUAL(p.wait(), 0);
   }
 
-  // ── cold backup: stop primary, copy, read system_id, restart ─────────────
+  // ── pg_basebackup: take backup while primary stays running ───────────────
   BOOST_REQUIRE(primary.backup(backup_dir));
   uint64_t system_id = read_system_id(primary_dir);
   BOOST_REQUIRE(system_id != 0);
-
-  BOOST_REQUIRE(primary.start());
-  BOOST_REQUIRE(primary.wait_ready(kPrimaryPort));
 
   // ── query initial flush LSN ───────────────────────────────────────────────
   auto primary_conn = PgClient::connect(kPrimaryPort).value();
