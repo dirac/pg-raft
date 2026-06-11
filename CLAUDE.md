@@ -30,6 +30,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/status
 
 # Build + run a specific unit-test target (auto-runs after build)
+/opt/sparrow/bin/b2 src/base//semaphore_lock_test
 /opt/sparrow/bin/b2 src/process//process_test
 /opt/sparrow/bin/b2 src/process//pg_instance_test
 /opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
@@ -94,6 +95,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 - **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, `Bytes`, etc.) and `asio` as an alias for `boost::asio`.
 - **`base.h`** — Also exposes: `kWalBlockSize` (8192), `kWalSegmentSize` (16 MiB), `epoch_msec()` (wall-clock ms), `pcounter()`/`gcounter()` (monotonic counters), `tmp_dir()`/`tmp_file()` (temp path helpers), `system_error_code(errno)`.
 - **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
+- **`SemaphoreLock`** (`semaphore_lock.h`) — RAII guard for `std::binary_semaphore`, analogous to `std::unique_lock`. Constructor does a non-blocking `try_acquire`; call `acquire()` to block if needed. `owns()` / `operator bool()` test ownership. Explicit `release()` available before destruction.
 
 **`src/net/`** — Async networking layer built on Boost.Asio with optional TLS:
 
@@ -106,7 +108,9 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 **`src/process/`** — Two classes:
 
 - **`Process`** — wraps `fork`/`exec`. Manages child process lifecycle: `start()`, `stop()` (SIGTERM → SIGKILL), `kill()`, `wait()`, `try_wait()`.
-- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, port, role=Role::kStandby)`. `port` is always required and passed as `-p` to postgres. `Role` is `kPrimary` or `kStandby`; `promote()` updates it to `kPrimary`. Provides: `init(initdb_args)` (runs `initdb`), `create_raft_wal(raft_dir)` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`), and `backup()` / `restore()` / `restore_and_start()` (recursive copy). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+- **`PgInstance`** — higher-level wrapper around `Process` for a full PostgreSQL instance. Constructor: `PgInstance(pg_bin, data_dir, port, role=Role::kStandby)`. `port` is always required and passed as `-p` to postgres. `Role` is `kPrimary` or `kStandby`; `promote()` updates it to `kPrimary`. Provides: `init(initdb_args)` (runs `initdb`), `create_raft_wal(raft_dir)` (creates `raft_dir/pg_wal`, moves initial WAL segments from `data_dir/pg_wal` into it, leaves `pg_wal` empty for the FUSE mount — call after `init()`, before `start()`), `write_config(map)` / `write_hba(lines)` (append to `postgresql.conf` / `pg_hba.conf`; `write_config` also injects required pg-raft defaults like `wal_sync_method` and `wal_recycle=off` unless overridden), `start()` / `stop(StopMode)` / `reload()` (SIGHUP) / `promote()` (SIGUSR1), `wait_ready(port)` (polls `pg_isready`). `StopMode` maps to `SIGTERM` (Smart), `SIGINT` (Fast), `SIGQUIT` (Immediate).
+
+  Backup/restore: `backup(dest_dir)` runs a backup and returns a `SemaphoreLock` (true = success, false = failure). On primary it uses `pg_basebackup` (live); on standby it stops the instance and copies the data directory. At most one backup runs at a time — a concurrent call blocks until the in-progress backup finishes and then returns the same lock without re-running. `verify_backup(backup_dir, lk)` takes the lock returned by `backup()`, inspects `pg_controldata` output to determine backup type (shut-down state → `pg_checksums --check`; in-production state → `pg_verifybackup`), and returns the lock on success or releases it and returns a non-owning lock on failure. `restore(src)` / `restore_and_start(src)` copy a backup into `data_dir`.
 
 **`src/wal_sender/`** — Two cooperating Asio-based classes:
 
@@ -198,6 +202,7 @@ LSNs in `wal_sender` are `uint64_t` (high 32 bits = segment number, low 32 bits 
 
 Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-skip if the binaries are absent.
 
+- **`semaphore_lock_test`** — unit tests for `SemaphoreLock`. No PostgreSQL needed.
 - **`process_test`** — unit tests for `Process`.
 - **`pg_instance_test`** — integration tests for `PgInstance`: init, write_config, write_hba, create_raft_wal, start/stop, backup/restore.
 - **`wal_sender_test`** — integration test for `WalSender`/`WalSenderServer`. Starts a real primary and standby PostgreSQL, configures the standby to replicate via `WalSenderServer`, runs pgbench, and verifies the standby catches up by LSN and row count. Uses `PgClient` internally to query both instances. Requires PostgreSQL; auto-skips if absent.
