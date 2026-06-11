@@ -79,7 +79,7 @@ class PgInstance {
   //   hot backup (in production state)  → pg_verifybackup (PostgreSQL 13+)
   // Takes the lock returned by backup(). Returns the lock as-is on success;
   // releases it and returns a non-owning lock on any verification failure.
-  SemaphoreLock verify_backup(std::filesystem::path const& backup_dir, SemaphoreLock lk);
+  SemaphoreLock verify_backup(std::filesystem::path const& backup_dir, SemaphoreLock lk) const;
 
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
   bool restore(std::filesystem::path const& backup_dir);
@@ -101,6 +101,8 @@ class PgInstance {
  private:
   static bool copy_dir(std::filesystem::path const& src, std::filesystem::path const& dst);
   static bool append_file(std::filesystem::path const& path, std::string const& content);
+
+  std::map<std::string, std::string> controldata(std::filesystem::path const& dir) const;
 
   std::filesystem::path pg_bin_;
   std::filesystem::path data_dir_;

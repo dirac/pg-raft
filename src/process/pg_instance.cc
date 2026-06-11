@@ -207,8 +207,15 @@ SemaphoreLock PgInstance::backup(std::filesystem::path const& dest_dir) {
   } else {
     std::filesystem::remove_all(dest_dir);
     Process p(pg_bin_ / "pg_basebackup",
-              {"-h", "127.0.0.1", "-p", std::to_string(port_), "-D", dest_dir,
-               "--checkpoint=fast", "-X", "stream"});
+              {"-h",
+               "127.0.0.1",
+               "-p",
+               std::to_string(port_),
+               "-D",
+               dest_dir,
+               "--checkpoint=fast",
+               "-X",
+               "stream"});
     ok = p.start() && p.wait() == 0;
   }
   if (!ok)
@@ -216,37 +223,62 @@ SemaphoreLock PgInstance::backup(std::filesystem::path const& dest_dir) {
   return lk;
 }
 
+std::map<std::string, std::string> PgInstance::controldata(std::filesystem::path const& dir) const {
+  struct CapProc : public Process, public std::map<std::string, std::string> {
+    using Process::Process;
+
+    void on_stdout_line(std::string_view line) override {
+      Process::on_stdout_line(line);
+      if (auto pos = line.find(':'); pos != std::string_view::npos) {
+        auto key = std::string{line.substr(0, pos)};
+        auto val = std::string{line.substr(pos + 1)};
+
+        while (!val.empty() && std::isspace(val.at(0)))
+          val.erase(val.begin());
+
+        emplace(key, val);
+      }
+    }
+  };
+  CapProc cp(pg_bin_ / "pg_controldata", {dir});
+  cp.start();
+  cp.wait();
+
+  for (auto k : {
+           "Database cluster state",
+           "Database system identifier",
+       })
+    if (cp.find(k) == cp.end())
+      return {};
+
+  return cp;
+}
+
 SemaphoreLock PgInstance::verify_backup(std::filesystem::path const& backup_dir,
-                                        SemaphoreLock                lk) {
+                                        SemaphoreLock                lk) const {
   if (!lk)
     return lk;
+  auto server = controldata(data_dir_);
+  auto backup = controldata(backup_dir);
+
+  if (server.empty() || backup.empty()) {
+    lk.release();
+    return lk;
+  }
+  if (server["Database system identifier"] != backup["Database system identifier"]) {
+    lk.release();
+    return lk;
+  }
+
+  auto cluster_state = backup["Database cluster state"];
+
   auto run = [](std::filesystem::path bin, std::vector<std::string> args) {
     Process p(std::move(bin), std::move(args));
     return p.start() && p.wait() == 0;
   };
-  if (!run(pg_bin_ / "pg_controldata", {data_dir_})) {
-    lk.release();
-    return lk;
-  }
-  // Run pg_controldata on the backup and capture output; ignore the return
-  // code since a hot backup (pg_basebackup) is in "in production" state.
-  struct CapProc : Process {
-    using Process::Process;
-    std::string out;
-    void on_stdout_line(std::string_view line) override { out += line; out += '\n'; }
-  };
-  CapProc cp(pg_bin_ / "pg_controldata", {backup_dir});
-  cp.start();
-  cp.wait();
-  if (cp.out.empty()) {
-    lk.release();
-    return lk;
-  }
-  // Choose the right verifier based on cluster state in the backup:
-  //   "shut down"    → standby backup (stop + copy): use pg_checksums (offline tool)
-  //   "in production" → hot backup (pg_basebackup): use pg_verifybackup (PG 13+)
+
   bool integrity_ok;
-  if (cp.out.find("shut down") != std::string::npos)
+  if (cluster_state == "shut down" || cluster_state == "shut down in recovery")
     integrity_ok = run(pg_bin_ / "pg_checksums", {"-D", backup_dir, "--check"});
   else
     integrity_ok = run(pg_bin_ / "pg_verifybackup", {backup_dir});
