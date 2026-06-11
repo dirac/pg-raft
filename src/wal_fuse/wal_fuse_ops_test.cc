@@ -67,30 +67,28 @@ struct RecordingTracker : public WalTracker {
   }
 };
 
-// Open a fresh mmap'd segment, return (fd, map). Caller must use make_shared<WalSegment>
-// which takes ownership and will close+unmap on destruction.
-static std::pair<int, void*> open_seg_mmap(std::filesystem::path const& path) {
-  int fd = alloc_seg(path);
+// Create a WalFuseSegment backed by a fresh 16 MiB file at dir/filename(lsn).
+static shared_ptr<WalFuseSegment> make_fuse_segment(std::filesystem::path const& dir,
+                                                    LogSeqNumber                  lsn,
+                                                    RecordingTracker&             tracker) {
+  int fd = alloc_seg(dir / filename(lsn));
   if (fd < 0)
-    return {-1, MAP_FAILED};
-  void* map = ::mmap(nullptr, kWalSegmentSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if (map == MAP_FAILED) {
-    ::close(fd);
-    return {-1, MAP_FAILED};
-  }
-  return {fd, map};
+    return nullptr;
+  ::close(fd);
+  auto seg = make_shared<WalSegment>(dir, lsn);
+  if (!seg->open())
+    return nullptr;
+  return make_shared<WalFuseSegment>(tracker, std::move(seg));
 }
 
-// ── WalSegment ────────────────────────────────────────────────────────────────
+// ── WalFuseSegment ────────────────────────────────────────────────────────────
 
 BOOST_AUTO_TEST_CASE(wal_segment_zero_page_no_useful_data, * boost::unit_test::timeout(60)) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   unsigned char page[kWalBlockSize]{};  // all zeros — xlp_magic == 0
   seg->write(page, kWalBlockSize, 0);
@@ -104,10 +102,8 @@ BOOST_AUTO_TEST_CASE(wal_segment_write_one_record, * boost::unit_test::timeout(6
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -123,10 +119,8 @@ BOOST_AUTO_TEST_CASE(wal_segment_fsync_calls_tracker, * boost::unit_test::timeou
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -144,14 +138,11 @@ BOOST_AUTO_TEST_CASE(wal_segment_fsync_without_write_is_noop, * boost::unit_test
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   // No write → next_==synced_==0 → dirty range size rounds to 0.
   BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
-  // async_fsync is still invoked (with size 0 / empty range).
   BOOST_CHECK_EQUAL(tracker.fsyncs.size(), 0u);
 }
 
@@ -159,10 +150,8 @@ BOOST_AUTO_TEST_CASE(wal_segment_read, * boost::unit_test::timeout(60)) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -178,10 +167,8 @@ BOOST_AUTO_TEST_CASE(wal_segment_read_at_offset, * boost::unit_test::timeout(60)
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
-  auto seg = make_shared<WalSegment>(tracker, LogSeqNumber{1, 0}, fd, map, PROT_READ | PROT_WRITE);
+  auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
+  BOOST_REQUIRE(seg);
 
   unsigned char page[kWalBlockSize]{};
   fill_wal_page(page);
@@ -199,11 +186,9 @@ BOOST_AUTO_TEST_CASE(wal_segment_lsn_accessor, * boost::unit_test::timeout(60)) 
   TmpDir           tmp;
   RecordingTracker tracker;
 
-  auto [fd, map] = open_seg_mmap(tmp() / "seg");
-  BOOST_REQUIRE_GE(fd, 0);
-
   LogSeqNumber lsn{3, 42};
-  auto         seg = make_shared<WalSegment>(tracker, lsn, fd, map, PROT_READ | PROT_WRITE);
+  auto         seg = make_fuse_segment(tmp(), lsn, tracker);
+  BOOST_REQUIRE(seg);
   BOOST_CHECK_EQUAL(seg->lsn().timeline, 3u);
   BOOST_CHECK_EQUAL(seg->lsn().lsn, 42u);
 }

@@ -1,7 +1,7 @@
 #define BOOST_TEST_MODULE wal_state
 
 #include "src/base/testing.h"
-#include "src/wal_fuse/wal_segment.h"
+#include "src/wal_fuse/wal_fuse_segment.h"
 
 std::string_view         wal_data();
 std::vector<std::string> wal_data_exp();
@@ -25,7 +25,7 @@ ostream& operator<<(ostream& out, tuple<off_t, size_t, int> const& t) {
 }
 }  // namespace std
 
-using WalState = WalSegment::WalState;
+using WalState = WalFuseSegment::WalState;
 
 std::vector<std::tuple<off_t, size_t, int>> expected(std::string base) {
   std::vector<std::tuple<off_t, size_t, int>> result;
