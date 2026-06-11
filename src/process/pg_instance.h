@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/base/logger.h"
+#include "src/base/semaphore_lock.h"
 #include "src/process/process.h"
 
 // Manages the lifecycle of a single PostgreSQL data directory: initialisation,
@@ -61,9 +62,15 @@ class PgInstance {
 
   // ── backup / restore ──────────────────────────────────────────────────────
 
-  // Stop the instance (if running), then copy data_dir recursively to
-  // |dest_dir|.
-  bool backup(std::filesystem::path const& dest_dir, StopMode mode = StopMode::Fast);
+  // Perform a backup to |dest_dir|. At most one backup runs at a time (guarded
+  // by a binary semaphore). If a backup is already in progress, blocks until it
+  // finishes and returns an owning SemaphoreLock without re-running the backup.
+  // On success the returned lock owns the semaphore and evaluates to true.
+  // On error the lock is released and evaluates to false.
+  //
+  // Primary: runs pg_basebackup (instance stays running).
+  // Standby: stops the instance and copies data_dir.
+  SemaphoreLock backup(std::filesystem::path const& dest_dir);
 
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
   bool restore(std::filesystem::path const& backup_dir);
@@ -92,6 +99,7 @@ class PgInstance {
   Role                  role_;
 
   mutable std::recursive_mutex mu_;
+  std::binary_semaphore        backup_sem_{1};
 
   struct PostgresProcess : public Process {
     using Process::Process;

@@ -170,7 +170,7 @@ BOOST_AUTO_TEST_CASE(backup, * boost::unit_test::timeout(60)) {
   BOOST_REQUIRE(pg.start());
   BOOST_REQUIRE(pg.wait_ready(kPort));
 
-  BOOST_TEST(pg.backup(backup_dir));
+  BOOST_REQUIRE(pg.backup(backup_dir));
   BOOST_TEST(pg.is_running());
   BOOST_TEST(std::filesystem::exists(backup_dir / "postgresql.conf"));
   BOOST_TEST(std::filesystem::exists(backup_dir / "pg_wal"));

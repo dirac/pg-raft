@@ -46,6 +46,14 @@ class SemaphoreLock {
     }
   }
 
+  // Explicitly release the semaphore before destruction. No-op if not owned.
+  void release() {
+    if (acquired_) {
+      sem_->release();
+      acquired_ = false;
+    }
+  }
+
   bool owns() const { return acquired_; }
   explicit operator bool() const { return acquired_; }
 
