@@ -180,11 +180,11 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::tim
 
     p++;
     for (unsigned i = 0; i < 2; ++i) {
-      conn->self()->write_data(to_data(t1), buf1, [&c](Result<void> r) {
+      conn->self()->write_data(to_data(t1), {buf1}, [&c](Result<void> r) {
         BOOST_TEST(!r.has_error());
         c.fetch_add(1);
       });
-      conn->self()->write_data(to_data(t2), buf2, [&c](Result<void> r) {
+      conn->self()->write_data(to_data(t2), {buf2}, [&c](Result<void> r) {
         BOOST_TEST(!r.has_error());
         c.fetch_add(1);
       });

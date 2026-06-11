@@ -73,6 +73,9 @@ using concurrent_unordered_map = ::boost::unordered::concurrent_flat_map<K, V, H
 template <typename K, typename Hash = boost::hash<K>, typename KeyEqual = std::equal_to<K>>
 using concurrent_unordered_set = ::boost::unordered::concurrent_flat_set<K, Hash, KeyEqual>;
 
+template <typename T, size_t N>
+using inplace_vector = ::boost::container::static_vector<T, N>;
+
 template <typename T>
 using stack = std::stack<T, std::deque<T>>;
 

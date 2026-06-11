@@ -42,11 +42,11 @@ class Connection : public std::enable_shared_from_this<Connection> {
   void read_data(std::function<void(Result<Data>)> handler);
   void read_file(std::function<void(Result<std::filesystem::path>)> handler);
 
-  void write_data(Data                              data,
-                  boost::asio::const_buffer         buff,
-                  std::function<void(Result<void>)> handler);
+  void write_data(Data                                         data,
+                  inplace_vector<boost::asio::const_buffer, 2> buff,
+                  std::function<void(Result<void>)>            handler);
   void write_data(Data data, std::function<void(Result<void>)> handler) {
-    write_data(std::move(data), boost::asio::const_buffer{}, std::move(handler));
+    write_data(std::move(data), {}, std::move(handler));
   }
   void write_file(std::filesystem::path file, std::function<void(Result<void>)> handler);
 
@@ -111,7 +111,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
   };
 
   /// Data and the subsequent buffer.
-  using WriteData = std::tuple<Data, boost::asio::const_buffer>;
+  using WriteData = std::tuple<Data, inplace_vector<boost::asio::const_buffer, 2>>;
 
   std::mutex                    write_mtx_;
   std::deque<WriteToken>        write_queue_;
@@ -140,7 +140,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
   template <typename F>
   void do_write_header(boost::asio::const_buffer buff, F h);
 
-  void do_write_data(shared_ptr<Connection> self, Data data, boost::asio::const_buffer buff);
+  void do_write_data(shared_ptr<Connection>                       self,
+                     Data                                         data,
+                     inplace_vector<boost::asio::const_buffer, 2> buff);
   void do_write_file(shared_ptr<Connection>    self,
                      int                       fd,
                      size_t                    size,

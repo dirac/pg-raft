@@ -399,9 +399,9 @@ void Connection::dequeue(Result<void> r, std::unique_lock<std::mutex> lk) {
     do_write(std::move(lk));
 }
 
-void Connection::write_data(Data                              data,
-                            boost::asio::const_buffer         buff,
-                            std::function<void(Result<void>)> handler) {
+void Connection::write_data(Data                                         data,
+                            inplace_vector<boost::asio::const_buffer, 2> buff,
+                            std::function<void(Result<void>)>            handler) {
   if (closed()) {
     error_code ec = boost::asio::error::connection_aborted;
     handler(ec);
@@ -474,8 +474,13 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
     case WriteToken::kData: {
       auto [data, buff] = std::move(write_data_q_.queue.front());
 
+      auto bsize = std::accumulate(
+          std::begin(buff), std::end(buff), static_cast<size_t>(0), [](auto result, auto const& b) {
+            return result + b.size();
+          });
+
       // The high bit is b0
-      uint32_t h       = u4(data.capacity() + buff.size());
+      uint32_t h       = u4(data.capacity() + bsize);
       write_header_[2] = hton(h);
 
       assert(h < (0x1ULL << 31));
@@ -527,12 +532,15 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
   }
 }
 
-void Connection::do_write_data(shared_ptr<Connection>    self,
-                               Data                      data,
-                               boost::asio::const_buffer buff) {
+void Connection::do_write_data(shared_ptr<Connection>                       self,
+                               Data                                         data,
+                               inplace_vector<boost::asio::const_buffer, 2> buff) {
+  while (!buff.empty() && (buff.at(0).size() == 0))
+    buff.erase(buff.begin());
+
   auto buffs = data.const_buffer();
-  if (buffs.capacity() > buffs.size() && buff.size())
-    buffs.emplace_back(buff);
+  while (buffs.capacity() > buffs.size() && !buff.empty())
+    buffs.emplace_back(buff.at(0));
 
   auto handler = [this, s = std::move(self), data = std::move(data), buff](error_code const& ec,
                                                                            size_t length) mutable {
@@ -543,8 +551,12 @@ void Connection::do_write_data(shared_ptr<Connection>    self,
     }
 
     if (data.consumed(length)) {
-      buff += length;
-      if (buff.size())
+      if (!buff.empty())
+        buff.at(0) += length;
+      while (!buff.empty() && (buff.at(0).size() == 0))
+        buff.erase(buff.begin());
+
+      if (!buff.empty())
         do_write_data(std::move(s), std::move(data), buff);
       else
         dequeue(ok());

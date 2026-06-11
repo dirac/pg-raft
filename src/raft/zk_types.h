@@ -2,8 +2,6 @@
 
 #include "src/base/base.h"
 
-struct TestOp {};
-
 struct OpenOp {
   /// The 24-character filename is divided into three distinct 8-digit (4-byte) structural segments.
   uint32_t tli;
@@ -23,6 +21,7 @@ struct WriteOp {
   uint32_t log_id;
   uint32_t seg_id;
   uint32_t offset;
+  uint32_t length;
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
@@ -30,6 +29,7 @@ struct WriteOp {
     ar & log_id;
     ar & seg_id;
     ar & offset;
+    ar & length;
   }
 };
 
@@ -52,8 +52,8 @@ struct FlushOp {
 };
 
 struct WalCommand {
-  uint64_t                                                flushed_lsn;
-  std::variant<TestOp, OpenOp, WriteOp, FlushOp, CloseOp> command;
+  uint64_t                                        flushed_lsn;
+  std::variant<OpenOp, WriteOp, FlushOp, CloseOp> command;
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
@@ -61,4 +61,3 @@ struct WalCommand {
     ar & command;
   }
 };
-

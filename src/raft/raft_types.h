@@ -80,6 +80,10 @@ struct AppendEntriesResponse {
   /** true if follower contained entry matching prev_log_idx and prev_log_term */
   bool success;
 
+  /** true if the standby is consuming the logs. The vote is counter only when we have success and
+   * running as both true. */
+  bool running;
+
   /**
    * On success it is the index of the last entry.
    * Otherwise the min of prev_log_idx and the index of the last entry.
@@ -103,16 +107,19 @@ struct AppendEntriesResponse {
 std::ostream& operator<<(std::ostream& out, AppendEntriesResponse const& r);
 
 struct InstallSnapshot {
-  /// Snapshot size, the snapshot will be send after sending this request.
-  uint64_t size;
+  RaftIndex prev_log_idx;
 
-  /// The sha256 of the file.
-  string checksum;
+  /// About a 1M entries max.
+  vector<Entry> entries;
+
+  /// Segment files that follow limit is 2.
+  vector<LogSeqNumber> files;
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & size;
-    ar & checksum;
+    ar & prev_log_idx;
+    ar & entries;
+    ar & files;
   }
 };
 std::ostream& operator<<(std::ostream& out, InstallSnapshot const& s);
@@ -208,4 +215,3 @@ struct RaftResponse {
   }
 };
 std::ostream& operator<<(std::ostream& out, RaftResponse const& r);
-
