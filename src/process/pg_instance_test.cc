@@ -176,6 +176,53 @@ BOOST_AUTO_TEST_CASE(backup, * boost::unit_test::timeout(60)) {
   BOOST_TEST(std::filesystem::exists(backup_dir / "pg_wal"));
 }
 
+BOOST_AUTO_TEST_CASE(verify_backup_standby, * boost::unit_test::timeout(60)) {
+  if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
+  IoThreads threads{1};
+  TmpDir    tmp;
+  auto data_dir   = tmp() / "pgdata";
+  auto backup_dir = tmp() / "backup";
+
+  // kStandby: backup() stops the instance and copies, producing a cleanly
+  // shut-down backup_dir that pg_checksums can verify.
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kStandby);
+  BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
+  BOOST_REQUIRE(pg.write_config({}));
+  BOOST_REQUIRE(pg.write_hba({}));
+  BOOST_REQUIRE(pg.start());
+  BOOST_REQUIRE(pg.wait_ready(kPort));
+
+  auto lk = pg.backup(backup_dir);
+  BOOST_REQUIRE(lk);
+  lk = pg.verify_backup(backup_dir, std::move(lk));
+  BOOST_TEST(bool(lk));
+}
+
+BOOST_AUTO_TEST_CASE(verify_backup_primary, * boost::unit_test::timeout(60)) {
+  if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
+  IoThreads threads{1};
+  TmpDir    tmp;
+  auto data_dir   = tmp() / "pgdata";
+  auto backup_dir = tmp() / "backup";
+
+  // kPrimary: backup() uses pg_basebackup; instance stays running.
+  // verify_backup detects "in production" state and uses pg_verifybackup.
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
+  BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
+  BOOST_REQUIRE(pg.write_config({}));
+  BOOST_REQUIRE(pg.write_hba({}));
+  BOOST_REQUIRE(pg.start());
+  BOOST_REQUIRE(pg.wait_ready(kPort));
+
+  auto lk = pg.backup(backup_dir);
+  BOOST_REQUIRE(lk);
+  BOOST_TEST(pg.is_running());
+
+  lk = pg.verify_backup(backup_dir, std::move(lk));
+  BOOST_TEST(bool(lk));
+  BOOST_TEST(pg.is_running());
+}
+
 BOOST_AUTO_TEST_CASE(restore_and_start, * boost::unit_test::timeout(60)) {
   if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
   IoThreads threads{1};

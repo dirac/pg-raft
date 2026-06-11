@@ -72,6 +72,15 @@ class PgInstance {
   // Standby: stops the instance and copies data_dir.
   SemaphoreLock backup(std::filesystem::path const& dest_dir);
 
+  // Verify a backup directory. Runs pg_controldata on both data_dir_ and
+  // |backup_dir|, then selects the appropriate integrity tool based on the
+  // backup type detected from pg_controldata output:
+  //   standby backup (shut down state)  → pg_checksums --check
+  //   hot backup (in production state)  → pg_verifybackup (PostgreSQL 13+)
+  // Takes the lock returned by backup(). Returns the lock as-is on success;
+  // releases it and returns a non-owning lock on any verification failure.
+  SemaphoreLock verify_backup(std::filesystem::path const& backup_dir, SemaphoreLock lk);
+
   // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
   bool restore(std::filesystem::path const& backup_dir);
 

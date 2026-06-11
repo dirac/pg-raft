@@ -216,6 +216,45 @@ SemaphoreLock PgInstance::backup(std::filesystem::path const& dest_dir) {
   return lk;
 }
 
+SemaphoreLock PgInstance::verify_backup(std::filesystem::path const& backup_dir,
+                                        SemaphoreLock                lk) {
+  if (!lk)
+    return lk;
+  auto run = [](std::filesystem::path bin, std::vector<std::string> args) {
+    Process p(std::move(bin), std::move(args));
+    return p.start() && p.wait() == 0;
+  };
+  if (!run(pg_bin_ / "pg_controldata", {data_dir_})) {
+    lk.release();
+    return lk;
+  }
+  // Run pg_controldata on the backup and capture output; ignore the return
+  // code since a hot backup (pg_basebackup) is in "in production" state.
+  struct CapProc : Process {
+    using Process::Process;
+    std::string out;
+    void on_stdout_line(std::string_view line) override { out += line; out += '\n'; }
+  };
+  CapProc cp(pg_bin_ / "pg_controldata", {backup_dir});
+  cp.start();
+  cp.wait();
+  if (cp.out.empty()) {
+    lk.release();
+    return lk;
+  }
+  // Choose the right verifier based on cluster state in the backup:
+  //   "shut down"    → standby backup (stop + copy): use pg_checksums (offline tool)
+  //   "in production" → hot backup (pg_basebackup): use pg_verifybackup (PG 13+)
+  bool integrity_ok;
+  if (cp.out.find("shut down") != std::string::npos)
+    integrity_ok = run(pg_bin_ / "pg_checksums", {"-D", backup_dir, "--check"});
+  else
+    integrity_ok = run(pg_bin_ / "pg_verifybackup", {backup_dir});
+  if (!integrity_ok)
+    lk.release();
+  return lk;
+}
+
 bool PgInstance::restore(std::filesystem::path const& backup_dir) {
   std::lock_guard lk(mu_);
   return copy_dir(backup_dir, data_dir_);
