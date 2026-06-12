@@ -3,16 +3,6 @@
 #include "src/base/base.h"
 #include "src/base/wal_segment.h"
 
-struct WalTracker {
-  virtual void async_publish(shared_ptr<WalSegment> segment, off_t offset, size_t size);
-
-  /// Invoke msync. The args (buff and size) are page aligned.
-  virtual void async_fsync(std::promise<int>      promise,
-                           shared_ptr<WalSegment> segment,
-                           unsigned char*         buff,
-                           size_t                 size);
-};
-
 class WalFuseSegment {
  public:
   WalFuseSegment(WalTracker& tracker, shared_ptr<WalSegment> map)
@@ -56,6 +46,8 @@ class WalFuseSegment {
   int fsync();
 
  private:
+  void initialize();
+
   /// The expectation is the data has not been modified.
   void check_modified(unsigned char const* buf, size_t size, off_t off);
 
@@ -65,4 +57,6 @@ class WalFuseSegment {
   off_t    next_;
   off_t    synced_;
   WalState state_;
+
+  std::atomic_flag initialized_;
 };

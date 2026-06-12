@@ -106,4 +106,16 @@ std::ostream& operator<<(std::ostream& out, inplace_vector<T, N> const& vec) {
   return out << std::format("{}", vec);
 }
 
+template <typename T>
+struct std::formatter<std::optional<T>> : public parse_fn {
+  auto format(std::optional<T> const& v, std::format_context& ctx) const {
+    return v ? std::format_to(ctx.out(), "{}", *v) : std::format_to(ctx.out(), "nil");
+  }
+};
+
+template <typename T>
+std::ostream& operator<<(std::ostream& out, std::optional<T> const& v) {
+  return out << std::format("{}", v);
+}
+
 #endif

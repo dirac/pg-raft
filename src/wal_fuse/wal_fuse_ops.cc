@@ -36,7 +36,7 @@ int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
     log(DEBUG, "open {} flags={} lsn={}", path, fi->flags, *lsn);
     n_open.fetch_add(1, std::memory_order_relaxed);
 
-    auto seg = std::make_shared<WalSegment>(backing_dir(), *lsn);
+    auto seg = std::make_shared<WalSegment>(cache_, backing_dir(), *lsn);
     if (auto r = seg->open(); !r)
       return -r.error().value();
 

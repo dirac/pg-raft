@@ -15,8 +15,8 @@ struct RequestElection {
 template <>
 struct std::formatter<RequestElection> : public parse_fn {
   auto format(RequestElection const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "RequestElection {{ (term, index) = {} }}",
-    std::get<0>(r.last_entry));
+    return std::format_to(
+        ctx.out(), "RequestElection {{ (term, index) = {} }}", std::get<0>(r.last_entry));
   }
 };
 std::ostream& operator<<(std::ostream& out, RequestElection const& r);
@@ -132,7 +132,7 @@ struct AppendEntriesResponse {
   /** true if follower contained entry matching prev_log_idx and prev_log_term */
   bool success;
 
-  /** true if the standby is consuming the logs. The vote is counter only when we have success and
+  /** true if the standby is consuming the logs. The vote is counted only when we have success and
    * running as both true. */
   bool running;
 

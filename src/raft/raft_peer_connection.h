@@ -86,22 +86,19 @@ class RaftPeerConnection : public Connection<> {
   /// If the node is a leader.
   void send_append_entries(RaftLog const&       rlog,
                            RaftTerm             leadership_term,
-                           RaftIndex            commit_idx,
-                           shared_ptr<Snapshot> snapshot) {
+                           RaftIndex            commit_idx) {
     return send_append_entries(
-        std::unique_lock<std::mutex>{mtx_}, rlog, leadership_term, commit_idx, std::move(snapshot));
+        std::unique_lock<std::mutex>{mtx_}, rlog, leadership_term, commit_idx);
   }
 
   void send_append_entries(std::unique_lock<std::mutex> lk,
                            RaftLog const&               rlog,
                            RaftTerm                     leadership_term,
-                           RaftIndex                    commit_idx,
-                           shared_ptr<Snapshot>         snapshot);
+                           RaftIndex                    commit_idx);
 
   void send_install_snapshot(std::unique_lock<std::mutex> lk,
                              RaftLog const&               rlog,
-                             RaftTerm                     leadership_term,
-                             shared_ptr<Snapshot>         snapshot);
+                             RaftTerm                     leadership_term);
 
   /// On failure of AppendEntries, should we send any append entries. If we have an outstanding
   /// append entry its response will also fail and trigger an append entries request.
@@ -208,9 +205,7 @@ class RaftPeerConnection : public Connection<> {
 
   /// Send the request and followed by the file, released the lock on completion.
   void send_request(std::unique_lock<std::mutex>         lk,
-                    RaftRequest                          request,
-                    std::optional<std::filesystem::path> filename = std::nullopt,
-                    shared_ptr<Snapshot>                 snapshot = nullptr);
+                    RaftRequest                          request);
 
   void set_leader_term(RaftLog const&                      rlog,
                        RaftTerm                            leadership_term,

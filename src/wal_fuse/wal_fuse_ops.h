@@ -6,7 +6,9 @@
 class WalFuseOps : public FuseOps {
  public:
   WalFuseOps(WalTracker& tracker, std::filesystem::path backing_dir)
-      : FuseOps(std::move(backing_dir)), tracker_(tracker) {}
+      : FuseOps(std::move(backing_dir)),
+        tracker_(tracker),
+        cache_(make_shared<WalSegmentCache>()) {}
 
   int op_open(char const* path, struct fuse_file_info* fi) override;
   int op_read(char const*            path,
@@ -24,5 +26,6 @@ class WalFuseOps : public FuseOps {
   int op_release(char const* path, struct fuse_file_info* fi) override;
 
  private:
-  WalTracker& tracker_;
+  WalTracker&                 tracker_;
+  shared_ptr<WalSegmentCache> cache_;
 };

@@ -241,13 +241,6 @@ class RaftServer : public ClientConnectionApi,
     return std::move(e.value().at(0));
   }
 
-  shared_ptr<Snapshot> snapshot() {
-    auto lk = std::unique_lock<std::mutex>{snapshot_mtx_};
-    if (!snapshot_ || snapshot_->log_index() + options_.snapshot_lag < commit_idx())
-      snapshot_ = fn::make_shared<Snapshot>(snapshot_dir_, commit_idx());
-    return snapshot_;
-  }
-
   RaftIndex compaction_idx() const { return compaction_idx_.load(std::memory_order_relaxed); }
 
  private:
@@ -273,18 +266,8 @@ class RaftServer : public ClientConnectionApi,
   // Tmp dir for the followers
   std::filesystem::path const tmpdir_;
 
-  // Tmp dir for the snapshots
-  std::filesystem::path const snapshot_dir_;
-
   // Persistent state.
   RaftLog log_;
-
-  // In memory state machine
-  ZkState state_;
-
-  // The last snapshot.
-  shared_ptr<Snapshot> snapshot_{nullptr};
-  std::mutex           snapshot_mtx_;
 
   std::atomic<RaftIndex> compaction_idx_{RaftIndex{0}};
   std::mutex             compaction_mtx_;

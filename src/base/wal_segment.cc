@@ -1,7 +1,9 @@
 #include "src/base/wal_segment.h"
 
-WalSegment::WalSegment(std::filesystem::path const& wal_dir, LogSeqNumber lsn)
-    : file_(wal_dir / filename(lsn)), lsn_(lsn) {}
+WalSegment::WalSegment(shared_ptr<WalSegmentCache>  cache,
+                       std::filesystem::path const& wal_dir,
+                       LogSeqNumber                 lsn)
+    : file_(wal_dir / filename(lsn)), lsn_(lsn), cache_(std::move(cache)) {}
 
 WalSegment::~WalSegment() {
   if (map_) {
@@ -9,6 +11,14 @@ WalSegment::~WalSegment() {
     map_->ref.fetch_sub(1, std::memory_order_relaxed);
   }
   gc();
+}
+
+std::mutex& WalSegment::map_mtx() {
+  return cache_->mtx;
+}
+
+map<LogSeqNumber, WalSegment::Mapping>& WalSegment::mappings() {
+  return cache_->mappings;
 }
 
 void WalSegment::gc(std::unique_lock<std::mutex> lk) {
@@ -86,12 +96,19 @@ bool WalSegment::Mapping::erase(unsigned t) const {
                             (epoch_msec() - last_epoch.load(std::memory_order_relaxed)) >= t);
 }
 
-std::mutex& WalSegment::map_mtx() {
-  static std::mutex m;
-  return m;
-}
+Result<void> WalSegment::fsync(off_t offset, size_t size) {
+  off_t p_offset = (offset / getpagesize()) * getpagesize();
 
-map<LogSeqNumber, WalSegment::Mapping>& WalSegment::mappings() {
-  static map<LogSeqNumber, Mapping> m;
-  return m;
+  size += u8(offset - p_offset);
+
+  size_t p_size = (size / static_cast<size_t>(getpagesize())) * static_cast<size_t>(getpagesize());
+  if (p_size < size)
+    p_size += static_cast<size_t>(getpagesize());
+
+  auto* buff = mapping() + p_offset;
+
+  if (::msync(buff, p_size, MS_SYNC))
+    return elog(
+        system_error_code(errno), "msync({}, {}) failed", reinterpret_cast<void*>(buff), p_size);
+  return ok();
 }

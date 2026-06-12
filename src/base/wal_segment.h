@@ -3,9 +3,11 @@
 #include "src/base/base.h"
 #include "src/base/logger.h"
 
+struct WalSegmentCache;
+
 class WalSegment : public std::enable_shared_from_this<WalSegment> {
  public:
-  WalSegment(std::filesystem::path const& dir, LogSeqNumber lsn);
+  WalSegment(shared_ptr<WalSegmentCache> cache, std::filesystem::path const& dir, LogSeqNumber lsn);
   ~WalSegment();
 
   Result<void> open();
@@ -19,8 +21,15 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   // The backing file.
   std::filesystem::path const& file() const { return file_; }
 
+  static constexpr int kNoConsensus =
+      ECANCELED;  // 140, Asynchronous operation stopped before normal completion
+
+  // Calls msync. When consensus is not reached but local msync is successful, we report
+  // kNoConsensus error. The offset and size are not page aligned.
+  Result<void> fsync(off_t offset, size_t size);
+
   // Release
-  static void gc() { gc(std::unique_lock{map_mtx()}); }
+  void gc() { gc(std::unique_lock{map_mtx()}); }
 
  private:
   struct Mapping {
@@ -42,14 +51,38 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
     std::atomic_uint last_epoch{0};
   };
 
+  friend struct WalSegmentCache;
+
   std::filesystem::path const file_;
   LogSeqNumber const          lsn_;
+  shared_ptr<WalSegmentCache> cache_;
 
   Mapping* map_{nullptr};
 
-  static std::mutex&                 map_mtx();
-  static map<LogSeqNumber, Mapping>& mappings();
+  std::mutex&                 map_mtx();
+  map<LogSeqNumber, Mapping>& mappings();
 
   /// Delete mappings that have not been used for 5 mins.
-  static void gc(std::unique_lock<std::mutex> lk);
+  void gc(std::unique_lock<std::mutex> lk);
+};
+
+struct WalSegmentCache {
+  std::mutex                             mtx;
+  map<LogSeqNumber, WalSegment::Mapping> mappings;
+};
+
+struct WalTracker {
+  virtual void async_publish(shared_ptr<WalSegment> segment, off_t offset, size_t size) {
+    (void)segment;
+    (void)offset;
+    (void)size;
+  }
+
+  /// Invoke msync. The args (offset and size) are not page aligned.
+  virtual void async_fsync(shared_ptr<WalSegment>            segment,
+                           off_t                             offset,
+                           size_t                            size,
+                           std::function<void(Result<void>)> completion_handler) {
+    completion_handler(segment->fsync(offset, size));
+  }
 };

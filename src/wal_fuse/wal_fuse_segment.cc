@@ -108,12 +108,13 @@ void WalFuseSegment::check_modified(unsigned char const* buf, size_t size, off_t
   log(INFO, "The wal-buffer got updated at {} lsn={}", off, lsn());
   std::memcpy(mapping() + off, buf, size);
   tracker_.async_publish(map_, off, size);
+
+  synced_ = std::min(synced_, off);
 }
 
-void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
-  bool rec_start;
-
-  if (!next_) [[unlikely]] {
+void WalFuseSegment::initialize() {
+  if (!initialized_.test_and_set()) [[unlikely]] {
+    bool   rec_start;
     size_t bytes = 0;
     do {
       std::tie(next_, bytes, rec_start) = state_.update(mapping(), kWalSegmentSize, 0);
@@ -121,10 +122,14 @@ void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
 
     log(INFO, "The file {} has data upto {}", lsn(), next_);
 
-    // page aligned.
-    synced_ = ((next_ / getpagesize()) * getpagesize());
+    synced_ = next_;
   }
+}
 
+void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
+  initialize();
+
+  bool rec_start;
   // Already processed
   if ((off + i4(size)) < next_) {
     check_modified(buf, size, off);
@@ -160,47 +165,29 @@ void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
 
 int WalFuseSegment::fsync() {
   // page aligned size.
-  auto size = (((next_ - synced_) + (getpagesize() - 1)) / getpagesize()) * getpagesize();
-  if (size == 0)
+  auto size = next_ - synced_;
+  if (size == 0) {
+    log(DEBUG, "Not doing sync next={} synced={}", next_, synced_);
     return 0;
+  }
 
-  auto promise = std::promise<int>{};
-  auto future  = promise.get_future();
+  auto promise = std::make_shared<std::promise<int>>();
+  auto future  = promise->get_future();
 
-  tracker_.async_fsync(std::move(promise), map_, mapping() + synced_, u8(size));
+  tracker_.async_fsync(map_, synced_, u8(size), [p = std::move(promise)](Result<void> r) mutable {
+    if (!r)
+      p->set_value(-r.error().value());
+    else
+      p->set_value(0);
+  });
 
   if (auto r = future.get(); r)
     return r;
 
-  // Keep one page of overlap so the next fsync re-covers the last page,
-  // which may still be receiving writes.
-  synced_ += size - getpagesize();
+  synced_ += size;
   return 0;
 }
 
 void WalFuseSegment::read(unsigned char* buf, size_t size, off_t off) {
   std::memcpy(buf, mapping() + off, size);
-}
-
-void WalTracker::async_publish(shared_ptr<WalSegment>, off_t, size_t) {}
-
-void WalTracker::async_fsync(std::promise<int> promise,
-                             shared_ptr<WalSegment>,
-                             unsigned char* buff,
-                             size_t         size) {
-  if (::msync(buff, size, MS_SYNC)) {
-    auto err = errno;
-    log(ERROR,
-        "msync({}, {}) failed, error={} ({})",
-        reinterpret_cast<void*>(buff),
-        size,
-        strerror(err),
-        err);
-    promise.set_value(-err);
-  } else
-    promise.set_value(0);
-}
-
-void breakpoint() {
-  log(ERROR, "Break");
 }

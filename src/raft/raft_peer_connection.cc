@@ -77,8 +77,7 @@ void RaftPeerConnection::set_leader_term(RaftLog const&                      rlo
 void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
                                              RaftLog const&               rlog,
                                              RaftTerm                     leadership_term,
-                                             RaftIndex                    commit_idx,
-                                             shared_ptr<Snapshot>         snapshot) {
+                                             RaftIndex                    commit_idx) {
   set_leader_term(rlog, leadership_term, lk);
 
   RaftIndex current_idx{0};
@@ -129,8 +128,7 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
 
 void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                                                RaftLog const&               rlog,
-                                               RaftTerm                     leadership_term,
-                                               shared_ptr<Snapshot>         snapshot) {
+                                               RaftTerm                     leadership_term) {
   set_leader_term(rlog, leadership_term, lk);
 
   std::filesystem::path file;
@@ -157,8 +155,7 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
 
 void RaftPeerConnection::send_request(std::unique_lock<std::mutex>         lk,
                                       RaftRequest                          request,
-                                      std::optional<std::filesystem::path> file,
-                                      shared_ptr<Snapshot>                 snapshot) {
+                                      std::optional<std::filesystem::path> file) {
   set_info_and_node_id(request);
 
   last_send_ = epoch_msec();
