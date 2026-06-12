@@ -53,7 +53,7 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
 
   friend struct WalSegmentCache;
 
-  std::filesystem::path const file_;
+  std::filesystem::path       file_;
   LogSeqNumber const          lsn_;
   shared_ptr<WalSegmentCache> cache_;
 

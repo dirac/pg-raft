@@ -113,3 +113,18 @@ int WalFuseOps::op_read(char const*            path,
   } else
     return FuseOps::op_read(path, buf, size, offset, fi);
 }
+
+int WalFuseOps::op_unlink(char const* path) {
+  if (auto lsn = log_seq_number(path); lsn) {
+    log(INFO, "unlink {}", path);
+    n_unlink.fetch_add(1, std::memory_order_relaxed);
+
+    char to[64];
+    to[0] = '/';
+    to[1] = '.';
+    strncpy(to + 2, *path == '/' ? path + 1 : path, sizeof(to) - 3);
+
+    return rename(real_path(path).c_str(), real_path(to).c_str()) == -1 ? -errno : 0;
+  } else
+    return FuseOps::op_unlink(path);
+}

@@ -25,6 +25,9 @@ class WalFuseOps : public FuseOps {
   int op_flush(char const* path, struct fuse_file_info* fi) override;
   int op_release(char const* path, struct fuse_file_info* fi) override;
 
+  // If it is a wal file do not remove, just rename it.
+  int op_unlink(char const* path) override;
+
  private:
   WalTracker&                 tracker_;
   shared_ptr<WalSegmentCache> cache_;

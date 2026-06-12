@@ -40,6 +40,15 @@ Result<void> WalSegment::open() {
 
   auto pos = maps.find(lsn_);
   if (pos == maps.end()) {
+    if (!std::filesystem::exists(file_)) {
+      // Add a '.' to the filename.
+      string name{"."};
+      name += file_.filename();
+      std::erase(name, '"');
+
+      file_ = file_.parent_path() / name;
+    }
+
     int fd = ::open(file_.c_str(), O_RDWR);
     if (fd == -1)
       return elog(system_error_code(errno), "Unable to open file {}", file_);
