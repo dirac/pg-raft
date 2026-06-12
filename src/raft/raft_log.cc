@@ -1,8 +1,31 @@
 #include "src/raft/raft_log.h"
 
-#include "src/base/string.h"
+#include "src/base/logger.h"
 
 namespace {
+
+template <typename T>
+string to_encoded_string(T const& t) {
+  stringstream                  stream;
+  boost::archive::text_oarchive oa(stream);
+  oa << t;
+
+  return stream.str();
+}
+
+template <typename T>
+Result<T> from_encoded_string(string const& str) {
+  T                             t;
+  istringstream                 stream(str);
+  boost::archive::text_iarchive ia(stream);
+  ia >> t;
+  return t;
+}
+
+template <typename T>
+Result<T> from_encoded_string(string_view str) {
+  return from_encoded_string<T>(string{str});
+}
 
 // Term db.
 MDB_val term_key() {
@@ -27,23 +50,9 @@ MDB_val index_key() {
   return MDB_val{.mv_size = 6, .mv_data = data};
 }
 
-MDB_val timestamp_key() {
-  static char* data = ::strdup("timestamp");
-
-  assert(strlen(data) == 9);
-  return MDB_val{.mv_size = 10, .mv_data = data};
-}
-
-MDB_val counter_key() {
-  static char* data = ::strdup("counter");
-
-  assert(strlen(data) == 7);
-  return MDB_val{.mv_size = 8, .mv_data = data};
-}
-
 template <typename T>
 std::array<uint8_t, 8U + sizeof(T)> to_mem(std::array<uint8_t, 8> const& prefix, T t) {
-  auto array = banyandb::servers::zookeeper::to_mem<T>(t);
+  auto array = to_mem<T>(t);
 
   std::array<uint8_t, 8U + sizeof(T)> result;
 
@@ -54,8 +63,7 @@ std::array<uint8_t, 8U + sizeof(T)> to_mem(std::array<uint8_t, 8> const& prefix,
 }
 
 std::array<uint8_t, 16> to_mem(RaftIndex idx, RaftTerm term) {
-  auto str =
-      to_mem(banyandb::servers::zookeeper::to_mem<RaftIndex::value_type>(INT(idx)), term.value());
+  auto str = to_mem(to_mem<RaftIndex::value_type>(INT(idx)), term.value());
   return str;
 }
 
@@ -67,8 +75,8 @@ std::tuple<RaftIndex, RaftTerm> from_mem<RaftIndex, RaftTerm>(uint8_t const* dat
   uint64_t idx;
   uint64_t term;
 
-  std::tie(idx, data)  = banyandb::servers::zookeeper::from_mem<uint64_t>(data);
-  std::tie(term, data) = banyandb::servers::zookeeper::from_mem<uint64_t>(data);
+  std::tie(idx, data)  = from_mem<uint64_t>(data);
+  std::tie(term, data) = from_mem<uint64_t>(data);
 
   return {RaftIndex{idx}, RaftTerm{term}};
 }
@@ -78,7 +86,7 @@ string to_val(string_view str) {
 }
 
 std::array<uint8_t, 8> to_val(std::time_t t) {
-  return banyandb::servers::zookeeper::to_mem<uint64_t>(u8(t));
+  return to_mem<uint64_t>(u8(t));
 }
 
 }  // namespace
@@ -97,22 +105,20 @@ Result<RaftTerm> RaftLog::open_term_db() {
   MDB_txn* txn = nullptr;
 
   if (int rc = env_create(&term_env_); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("env_create failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "env_create failed : {}", strerror(rc));
 
   if (int rc = env_set_maxdbs(term_env_, 2); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("env_set_maxdbs failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "env_set_maxdbs failed : {}", strerror(rc));
 
   if (int rc = env_open(term_env_, term_file.c_str()); rc != 0)
-    return ERROR_MSG(
-        system_error_code(rc),
-        fn::format("env_open for file {0} failed : {1}", term_file.c_str(), strerror(rc)));
+    return elog(system_error_code(rc), "env_open for file {0} failed", term_file);
 
   if (int rc = txn_wbegin(term_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_wbegin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_wbegin failed : {}", strerror(rc));
 
   if (int rc = dbi_open(txn, "main", &term_); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("dbi_open failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "dbi_open failed : {}", strerror(rc));
   }
 
   RaftTerm term{0};
@@ -122,7 +128,7 @@ Result<RaftTerm> RaftLog::open_term_db() {
 
   if (int rc = get(txn, term_, &key, &val); rc != 0 && rc != MDB_NOTFOUND) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("get failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "get failed : {}", strerror(rc));
   } else if (rc == MDB_NOTFOUND) {
     // Initialize the system with a zero RaftTerm.
     auto val_str = to_mem(INT(term));
@@ -131,14 +137,14 @@ Result<RaftTerm> RaftLog::open_term_db() {
 
     if (rc = put(txn, term_, &key, &val); rc != 0) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc), fn::format("put failed : {}", strerror(rc)));
+      return elog(system_error_code(rc), "put failed : {}", strerror(rc));
     }
   } else
     term = RaftTerm{std::get<RaftTerm::value_type>(
         from_mem<RaftTerm::value_type>(reinterpret_cast<uint8_t const*>(val.mv_data)))};
 
   if (int rc = txn_commit(txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_commit failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_commit failed : {}", strerror(rc));
 
   return term;
 }
@@ -152,33 +158,30 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
     mmap_size_ = std::max(mmap_size_, factor * std::filesystem::file_size(logs_file));
 
   if (int rc = env_create(&logs_env_); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("env_create failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "env_create failed : {}", strerror(rc));
 
   if (int rc = env_set_maxdbs(logs_env_, 7); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("env_set_maxdbs failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "env_set_maxdbs failed : {}", strerror(rc));
 
   if (int rc = env_set_mapsize(logs_env_, mmap_size_); rc != 0)
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("env_set_mapsize to {0} failed : {1}", mmap_size_, strerror(rc)));
+    return elog(
+        system_error_code(rc), "env_set_mapsize to {0} failed : {1}", mmap_size_, strerror(rc));
 
   if (int rc = env_open(logs_env_, logs_file.c_str()); rc != 0)
-    return ERROR_MSG(
-        system_error_code(rc),
-        fn::format("env_open for file {0} failed : {1}", logs_file.c_str(), strerror(rc)));
+    return elog(
+        system_error_code(rc), "env_open for file {0} failed : {1}", logs_file, strerror(rc));
 
   if (int rc = txn_wbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_wbegin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_wbegin failed : {}", strerror(rc));
 
 #define E(m) \
   {          \
     &m, #m   \
   }
-  for (auto [dbi, nm] : vector<std::tuple<MDB_dbi*, char const*>>{
-           E(logs_)}) {
+  for (auto [dbi, nm] : vector<std::tuple<MDB_dbi*, char const*>>{E(logs_)}) {
     if (int rc = dbi_open(txn, nm, dbi); rc != 0) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc),
-                       fn::format("dbi_open {0} failed : {1}", nm, strerror(rc)));
+      return elog(system_error_code(rc), "dbi_open {0} failed : {1}", nm, strerror(rc));
     }
   }
 
@@ -188,7 +191,7 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
     MDB_cursor* cursor;
     if (int rc = cursor_open(txn, logs_, &cursor); rc != 0) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc), fn::format("cursor_open failed : {}", strerror(rc)));
+      return elog(system_error_code(rc), "cursor_open failed : {}", strerror(rc));
     }
 
     MDB_val key;
@@ -209,19 +212,19 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
         if (rc = put(txn, logs_, &key, &val); rc != 0) {
           cursor_close(cursor);
           txn_abort(txn);
-          return ERROR_MSG(system_error_code(rc), fn::format("put(0,0) failed : {}", strerror(rc)));
+          return elog(system_error_code(rc), "put(0,0) failed : {}", strerror(rc));
         }
       } else {
         cursor_close(cursor);
         txn_abort(txn);
-        return ERROR_MSG(system_error_code(rc), fn::format("cursor_get failed {}", strerror(rc)));
+        return elog(system_error_code(rc), "cursor_get failed {}", strerror(rc));
       }
     }
     cursor_close(cursor);
   }
 
   if (int rc = txn_commit(txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_commit failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_commit failed : {}", strerror(rc));
   return ok();
 }
 
@@ -285,12 +288,12 @@ Result<bool> RaftLog::reset_entries(RaftIndex prev_log_idx, RaftTerm prev_log_te
 
   MDB_txn* txn;
   if (auto rc = txn_wbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("being_txn failed {}", strerror(rc)));
+    return elog(system_error_code(rc), "being_txn failed {}", strerror(rc));
 
   MDB_cursor* cursor;
   if (auto rc = cursor_open(txn, logs_, &cursor); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("cursor_open failed {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_open failed {}", strerror(rc));
   }
 
   auto    key_bytes = to_mem(prev_log_idx, RaftTerm{0});
@@ -303,13 +306,17 @@ Result<bool> RaftLog::reset_entries(RaftIndex prev_log_idx, RaftTerm prev_log_te
 
     if (rc == MDB_NOTFOUND)
       return false;
-    return ERROR_MSG(system_error_code(rc), fn::format("cursor_get failed {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_get failed {}", strerror(rc));
   }
 
   auto [idx, term] = from_mem<RaftIndex, RaftTerm>(reinterpret_cast<uint8_t const*>(key.mv_data));
   if (idx != prev_log_idx || term != prev_log_term) {
-    LOG_ERROR << "idx  (" << idx.value() << " vs " << prev_log_idx.value() << ") or term  ("
-              << term.value() << " vs " << prev_log_term.value() << ")";
+    log(ERROR,
+        "idx ({} vs {}) or term ({} vs {})",
+        idx.value(),
+        prev_log_idx.value(),
+        term.value(),
+        prev_log_term.value());
     return false;
   }
 
@@ -344,20 +351,20 @@ Result<bool> RaftLog::append_entries(RaftIndex            prev_log_idx,
 
   if (delete_entries) {
     if (auto r = reset_entries(prev_log_idx, prev_log_term); !r) {
-      return ERROR_MSG(r.error(), "reset_entries failed");
+      return elog(r.error(), "reset_entries failed");
     } else if (r.value() == false) {
-      LOG_ERROR << "The prev did not match";
+      log(ERROR, "The prev did not match idx={}/term={}", prev_log_idx, prev_log_term);
       return false;
     }
   } else {
     if (auto r = last_entry(); !r)
-      return ERROR_MSG(r.error(), "last_entry failed");
+      return elog(r.error(), "last_entry failed");
     else if (r.value() != std::make_tuple(prev_log_term, prev_log_idx))
       return false;
   }
 
   if (auto r = append_entries(prev_log_idx + 1U, entries); !r)
-    return ERROR_MSG(r.error(), "append entries failed");
+    return elog(r.error(), "append entries failed");
   return true;
 }
 
@@ -366,7 +373,7 @@ Result<void> RaftLog::append_entries(RaftIndex const idx, vector<Entry> const& e
 
   MDB_txn* txn;
   if (auto rc = txn_wbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed {}", strerror(rc));
 
   size_t n = 0;
   for (Entry const& entry : entries) {
@@ -406,12 +413,12 @@ Result<void> RaftLog::append_entries(RaftIndex const idx, vector<Entry> const& e
 
     if (rc != 0) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc), fn::format("put failed {}", strerror(rc)));
+      return elog(system_error_code(rc), "put failed {}", strerror(rc));
     }
   }
 
   if (int rc = txn_commit(txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_commit failed {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_commit failed {}", strerror(rc));
 
   return ok();
 }
@@ -421,7 +428,7 @@ Result<RaftTerm> RaftLog::set_current_term(RaftTerm term) {
 
   MDB_txn* txn;
   if (int rc = txn_wbegin(term_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   auto term_bytes = to_mem(INT(term));
 
@@ -431,7 +438,7 @@ Result<RaftTerm> RaftLog::set_current_term(RaftTerm term) {
 
   if (int rc = get(txn, term_, &tkey, &val); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("get(term) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "get(term) failed : {}", strerror(rc));
   }
 
   if (std::memcmp(val.mv_data, term_bytes.data(), term_bytes.size()) < 0) {
@@ -439,15 +446,14 @@ Result<RaftTerm> RaftLog::set_current_term(RaftTerm term) {
     val.mv_data = term_bytes.data();
     if (int rc = put(txn, term_, &tkey, &val); rc != 0) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc), fn::format("put(term) failed : {}", strerror(rc)));
+      return elog(system_error_code(rc), "put(term) failed : {}", strerror(rc));
     }
     if (int rc = del(txn, term_, &vkey); rc != 0 && rc != MDB_NOTFOUND) {
       txn_abort(txn);
-      return ERROR_MSG(system_error_code(rc), fn::format("del(vote) failed : {}", strerror(rc)));
+      return elog(system_error_code(rc), "del(vote) failed : {}", strerror(rc));
     }
     if (int rc = txn_commit(txn); rc != 0) {
-      return ERROR_MSG(system_error_code(rc),
-                       fn::format("txn_commit(txn) failed : {}", strerror(rc)));
+      return elog(system_error_code(rc), "txn_commit(txn) failed : {}", strerror(rc));
     }
     return term;
   }
@@ -462,7 +468,7 @@ Result<bool> RaftLog::vote(RaftTerm term, RaftNodeId node) {
 
   MDB_txn* txn;
   if (int rc = txn_wbegin(term_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   auto term_bytes = to_mem(INT(term));
   auto node_bytes = to_mem(INT(node));
@@ -473,13 +479,15 @@ Result<bool> RaftLog::vote(RaftTerm term, RaftNodeId node) {
 
   if (int rc = get(txn, term_, &tkey, &val); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("get(term) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "get(term) failed : {}", strerror(rc));
   }
 
   if (std::memcmp(val.mv_data, term_bytes.data(), term_bytes.size()) != 0) {
-    LOG_ERROR << "The term does not match " << INT(term) << " vs "
-              << std::get<RaftTerm::value_type>(
-                     from_mem<RaftTerm::value_type>(reinterpret_cast<uint8_t*>(val.mv_data)));
+    log(ERROR,
+        "The term does not match {} vs {}",
+        INT(term),
+        std::get<RaftTerm::value_type>(
+            from_mem<RaftTerm::value_type>(reinterpret_cast<uint8_t*>(val.mv_data))));
 
     txn_abort(txn);
     return false;
@@ -488,7 +496,7 @@ Result<bool> RaftLog::vote(RaftTerm term, RaftNodeId node) {
   int rc = get(txn, term_, &vkey, &val);
   if (rc != 0 && rc != MDB_NOTFOUND) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("get(vote) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "get(vote) failed : {}", strerror(rc));
   }
 
   if (rc != MDB_NOTFOUND) {
@@ -504,12 +512,11 @@ Result<bool> RaftLog::vote(RaftTerm term, RaftNodeId node) {
 
   if (int rc = put(txn, term_, &vkey, &val); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("put(vote) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "put(vote) failed : {}", strerror(rc));
   }
 
   if (int rc = txn_commit(txn); rc != 0) {
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("txn_commit(txn) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_commit(txn) failed : {}", strerror(rc));
   }
   return true;
 }
@@ -517,14 +524,14 @@ Result<bool> RaftLog::vote(RaftTerm term, RaftNodeId node) {
 Result<RaftTerm> RaftLog::current_term() const {
   MDB_txn* txn;
   if (int rc = txn_rbegin(term_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   MDB_val tkey = term_key();
   MDB_val val;
 
   if (int rc = get(txn, term_, &tkey, &val); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc), fn::format("get(term) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "get(term) failed : {}", strerror(rc));
   }
   auto result = RaftTerm{std::get<RaftTerm::value_type>(
       from_mem<RaftTerm::value_type>(reinterpret_cast<uint8_t const*>(val.mv_data)))};
@@ -538,13 +545,12 @@ Result<std::tuple<RaftTerm, RaftIndex>> RaftLog::entry(MDB_cursor_op op) const {
 
   MDB_txn* txn;
   if (int rc = txn_rbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   MDB_cursor* cursor;
   if (int rc = cursor_open(txn, logs_, &cursor); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_open(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_open(logs) failed : {}", strerror(rc));
   }
 
   MDB_val key;
@@ -555,8 +561,7 @@ Result<std::tuple<RaftTerm, RaftIndex>> RaftLog::entry(MDB_cursor_op op) const {
     txn_abort(txn);
 
     /// MDB_NOTFOUND is not possible.
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_get(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_get(logs) failed : {}", strerror(rc));
   }
 
   auto [idx, term] = from_mem<RaftIndex, RaftTerm>(reinterpret_cast<uint8_t const*>(key.mv_data));
@@ -572,13 +577,12 @@ Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,
 
   MDB_txn* txn;
   if (int rc = txn_rbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   MDB_cursor* cursor;
   if (int rc = cursor_open(txn, logs_, &cursor); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_open(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_open(logs) failed : {}", strerror(rc));
   }
 
   auto key_bytes = to_mem(idx, RaftTerm{0});
@@ -590,8 +594,7 @@ Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,
   if (rc = cursor_get(cursor, &key, &val, MDB_SET_RANGE); rc != 0 && rc != MDB_NOTFOUND) {
     cursor_close(cursor);
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_get(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_get(logs) failed : {}", strerror(rc));
   }
 
   if (rc == MDB_NOTFOUND || std::get<RaftIndex>(from_mem<RaftIndex, RaftTerm>(
@@ -632,13 +635,12 @@ Result<std::optional<RaftTerm>> RaftLog::get_term(RaftIndex idx) const {
 
   MDB_txn* txn;
   if (int rc = txn_rbegin(logs_env_, &txn); rc != 0)
-    return ERROR_MSG(system_error_code(rc), fn::format("txn_begin failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
 
   MDB_cursor* cursor;
   if (int rc = cursor_open(txn, logs_, &cursor); rc != 0) {
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_open(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_open(logs) failed : {}", strerror(rc));
   }
 
   auto key_bytes = to_mem(idx, RaftTerm{0});
@@ -650,8 +652,7 @@ Result<std::optional<RaftTerm>> RaftLog::get_term(RaftIndex idx) const {
   if (rc = cursor_get(cursor, &key, &val, MDB_SET_RANGE); rc != 0 && rc != MDB_NOTFOUND) {
     cursor_close(cursor);
     txn_abort(txn);
-    return ERROR_MSG(system_error_code(rc),
-                     fn::format("cursor_get(logs) failed : {}", strerror(rc)));
+    return elog(system_error_code(rc), "cursor_get(logs) failed : {}", strerror(rc));
   }
 
   if (rc == MDB_NOTFOUND) {
@@ -725,4 +726,3 @@ int RaftLog::cursor_del(MDB_cursor* cursor) {
 void RaftLog::cursor_close(MDB_cursor* cursor) const {
   return mdb_cursor_close(cursor);
 }
-

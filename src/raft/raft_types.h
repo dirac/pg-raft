@@ -11,6 +11,13 @@ struct RequestElection {
     ar & last_entry;
   }
 };
+
+template <>
+struct std::formatter<RequestElection> : public parse_fn {
+  auto format(RequestElection const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestElection { (term, index) = {} }", r.last_entry);
+  }
+};
 std::ostream& operator<<(std::ostream& out, RequestElection const& r);
 
 struct RequestElectionResponse {
@@ -112,14 +119,10 @@ struct InstallSnapshot {
   /// About a 1M entries max.
   vector<Entry> entries;
 
-  /// Segment files that follow limit is 2.
-  vector<LogSeqNumber> files;
-
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & prev_log_idx;
     ar & entries;
-    ar & files;
   }
 };
 std::ostream& operator<<(std::ostream& out, InstallSnapshot const& s);
@@ -165,6 +168,19 @@ struct RequestResponseInfo {
   }
 };
 
+struct MemBlock {
+  LogSeqNumber lsn;     // The file lsn.
+  off_t        offset;  // The offset into the segment.
+  size_t       length;  // The size of the block.
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & lsn;
+    ar & offset;
+    ar & length;
+  }
+};
+
 struct RaftRequest {
   /* The current term in the server. */
   RaftTerm term;
@@ -178,12 +194,16 @@ struct RaftRequest {
   /* Copied from request to associated response. */
   RequestResponseInfo info;
 
+  /* Segment mem blocks. */
+  inplace_vector<MemBlock, 2> data;
+
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & term;
     ar & node_id;
     ar & request;
     ar & info;
+    ar & data;
   }
 };
 std::ostream& operator<<(std::ostream& out, RaftRequest const& r);
