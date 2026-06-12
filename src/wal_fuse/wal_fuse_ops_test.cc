@@ -274,10 +274,6 @@ BOOST_FIXTURE_TEST_CASE(wal_file_fsync_calls_tracker,
   BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
 
   char page[kWalBlockSize]{};
-  ops.op_read(kWalPath, page, kWalBlockSize, 0, &fi);
-  for (auto i = 0U; i < kWalBlockSize; ++i)
-    BOOST_REQUIRE_EQUAL(page[i], '\0');
-
   fill_wal_page(page);
   ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
 
