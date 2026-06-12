@@ -91,6 +91,9 @@ class RaftLog {
   virtual void cursor_close(MDB_cursor* cursor) const;
 
  private:
+  /// Delete all entries after prev_log_idx, if the term matches.
+  Result<bool> reset_entries(RaftIndex prev_log_idx, RaftTerm prev_log_term);
+
   Result<void> append_entries(RaftIndex const idx, vector<Entry> const& entries);
 
   Result<void> resize_logs();

@@ -46,9 +46,9 @@ unit-test zk_state_test
   ;
 
 unit-test raft_log_test
-  : raft_log_test.cpp
-    zookeeper_server
-    ../../base//testing
+  : raft_log_test.cc
+    raft_server
+    ../base//testing
   ;
 
 unit-test raft_log_snapshot_test

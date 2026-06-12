@@ -15,7 +15,8 @@ struct RequestElection {
 template <>
 struct std::formatter<RequestElection> : public parse_fn {
   auto format(RequestElection const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "RequestElection { (term, index) = {} }", r.last_entry);
+    return std::format_to(ctx.out(), "RequestElection {{ (term, index) = {} }}",
+    std::get<0>(r.last_entry));
   }
 };
 std::ostream& operator<<(std::ostream& out, RequestElection const& r);
@@ -28,6 +29,13 @@ struct RequestElectionResponse {
     ar & success;
   }
 };
+
+template <>
+struct std::formatter<RequestElectionResponse> : public parse_fn {
+  auto format(RequestElectionResponse const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestElectionResponse {{ success={} }}", r.success);
+  }
+};
 std::ostream& operator<<(std::ostream& out, RequestElectionResponse const& r);
 
 struct RequestVote {
@@ -38,6 +46,16 @@ struct RequestVote {
     ar & last_entry;
   }
 };
+
+template <>
+struct std::formatter<RequestVote> : public parse_fn {
+  auto format(RequestVote const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(),
+                          "RequestVote {{ term={} index={} }}",
+                          std::get<RaftTerm>(r.last_entry),
+                          std::get<RaftIndex>(r.last_entry));
+  }
+};
 std::ostream& operator<<(std::ostream& out, RequestVote const& r);
 
 struct RequestVoteResponse {
@@ -46,6 +64,13 @@ struct RequestVoteResponse {
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & vote_granted;
+  }
+};
+
+template <>
+struct std::formatter<RequestVoteResponse> : public parse_fn {
+  auto format(RequestVoteResponse const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestVoteResponse {{ vote_granted={} }}", r.vote_granted);
   }
 };
 std::ostream& operator<<(std::ostream& out, RequestVoteResponse const& r);
@@ -61,6 +86,13 @@ struct Entry {
     ar & time;
     ar & term;
     ar & cmd;
+  }
+};
+
+template <>
+struct std::formatter<Entry> : public parse_fn {
+  auto format(Entry const& e, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "E{{ time={} term={} cmd={} }}", e.time, e.term, e.cmd);
   }
 };
 std::ostream& operator<<(std::ostream& out, Entry const& e);
@@ -79,6 +111,19 @@ struct AppendEntries {
     ar & prev_log_idx;
     ar & commit_idx;
     ar & entries;
+  }
+};
+
+template <>
+struct std::formatter<AppendEntries> : public parse_fn {
+  auto format(AppendEntries const& ae, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(),
+        "AppendEntries {{ prev_log_idx={} prev_log_term={} commit_idx={} entries={} }}",
+        ae.prev_log_idx,
+        ae.prev_log_term,
+        ae.commit_idx,
+        ae.entries);
   }
 };
 std::ostream& operator<<(std::ostream& out, AppendEntries const& ae);
@@ -111,6 +156,22 @@ struct AppendEntriesResponse {
     ar & n;
   }
 };
+
+template <>
+struct std::formatter<AppendEntriesResponse> : public parse_fn {
+  auto format(AppendEntriesResponse const& r, std::format_context& ctx) const {
+    auto out = std::format_to(ctx.out(),
+                              "AppendEntriesResponse {{ success={} running={} idx={}",
+                              r.success,
+                              r.running,
+                              r.idx);
+    if (r.term)
+      out = std::format_to(std::move(out), " term={}", *r.term);
+    if (r.n)
+      out = std::format_to(std::move(out), " n={}", *r.n);
+    return std::format_to(std::move(out), " }}");
+  }
+};
 std::ostream& operator<<(std::ostream& out, AppendEntriesResponse const& r);
 
 struct InstallSnapshot {
@@ -123,6 +184,16 @@ struct InstallSnapshot {
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & prev_log_idx;
     ar & entries;
+  }
+};
+
+template <>
+struct std::formatter<InstallSnapshot> : public parse_fn {
+  auto format(InstallSnapshot const& s, std::format_context& ctx) const {
+    return std::format_to(ctx.out(),
+                          "InstallSnapshot {{ prev_log_idx={} entries={} }}",
+                          s.prev_log_idx,
+                          s.entries.size());
   }
 };
 std::ostream& operator<<(std::ostream& out, InstallSnapshot const& s);
@@ -138,6 +209,14 @@ struct InstallSnapshotResponse {
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & idx;
     ar & success;
+  }
+};
+
+template <>
+struct std::formatter<InstallSnapshotResponse> : public parse_fn {
+  auto format(InstallSnapshotResponse const& s, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "InstallSnapshotResponse {{ idx={} success={} }}", s.idx, s.success);
   }
 };
 std::ostream& operator<<(std::ostream& out, InstallSnapshotResponse const& s);
@@ -168,6 +247,13 @@ struct RequestResponseInfo {
   }
 };
 
+template <>
+struct std::formatter<RequestResponseInfo> : public parse_fn {
+  auto format(RequestResponseInfo const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{}:{}", r.epoch, r.request_seq);
+  }
+};
+
 struct MemBlock {
   LogSeqNumber lsn;     // The file lsn.
   off_t        offset;  // The offset into the segment.
@@ -178,6 +264,14 @@ struct MemBlock {
     ar & lsn;
     ar & offset;
     ar & length;
+  }
+};
+
+template <>
+struct std::formatter<MemBlock> : public parse_fn {
+  auto format(MemBlock const& m, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "MemBlock {{ lsn={} offset={} length={} }}", m.lsn, m.offset, m.length);
   }
 };
 
@@ -206,6 +300,14 @@ struct RaftRequest {
     ar & data;
   }
 };
+
+template <>
+struct std::formatter<RaftRequest> : public parse_fn {
+  auto format(RaftRequest const& r, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "RaftRequest {{ {} term={} {} data={} }}", r.info, r.term, r.request, r.data);
+  }
+};
 std::ostream& operator<<(std::ostream& out, RaftRequest const& r);
 
 struct RaftResponse {
@@ -232,6 +334,14 @@ struct RaftResponse {
     ar & node_id;
     ar & response;
     ar & info;
+  }
+};
+
+template <>
+struct std::formatter<RaftResponse> : public parse_fn {
+  auto format(RaftResponse const& r, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "RaftResponse {{ {} term={} {} }}", r.info, r.term, r.response);
   }
 };
 std::ostream& operator<<(std::ostream& out, RaftResponse const& r);

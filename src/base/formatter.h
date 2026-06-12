@@ -87,4 +87,23 @@ std::ostream& operator<<(std::ostream& out, std::vector<T> const& vec) {
   return out << std::format("{}", vec);
 }
 
+template <typename T, size_t N>
+struct std::formatter<inplace_vector<T, N>> : public parse_fn {
+  auto format(inplace_vector<T, N> const& v, std::format_context& ctx) const {
+    auto        out = ctx.out();
+    auto const* del = "{";
+    for (auto const& e : v) {
+      out = std::format_to(std::move(out), "{}{}", del, e);
+      del = ", ";
+    }
+    return v.empty() ? std::format_to(std::move(out), "{}", "{}")
+                     : std::format_to(std::move(out), "{}", "}");
+  }
+};
+
+template <typename T, size_t N>
+std::ostream& operator<<(std::ostream& out, inplace_vector<T, N> const& vec) {
+  return out << std::format("{}", vec);
+}
+
 #endif

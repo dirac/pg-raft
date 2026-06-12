@@ -90,9 +90,13 @@ inline mode_t file_mode() {
   return S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
 }
 
+// clang-format off
+
+#include "src/base/using.h"
 #include "src/base/convert.h"
 #include "src/base/formatter.h"
 #include "src/base/int_type.h"
-#include "src/base/using.h"
+
+// clang-format on
 
 #endif

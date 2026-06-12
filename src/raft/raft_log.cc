@@ -2,8 +2,6 @@
 
 #include "src/base/logger.h"
 
-namespace {
-
 template <typename T>
 string to_encoded_string(T const& t) {
   stringstream                  stream;
@@ -89,14 +87,12 @@ std::array<uint8_t, 8> to_val(std::time_t t) {
   return to_mem<uint64_t>(u8(t));
 }
 
-}  // namespace
-
 RaftLog::RaftLog(std::filesystem::path dir) : dir_(dir) {
   std::error_code ec;
   std::filesystem::create_directories(dir_, ec);
 
   if (ec)
-    ABORT(fn::format("Unable to create directories {0}: {1}", dir_.c_str(), ec.message()));
+    log(FATAL, "Unable to create directories {0}: {1}", dir_.c_str(), ec.message());
 }
 
 Result<RaftTerm> RaftLog::open_term_db() {
@@ -186,7 +182,6 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
   }
 
   /// Add one element in logs database if empty.
-  bool empty = false;
   {
     MDB_cursor* cursor;
     if (int rc = cursor_open(txn, logs_, &cursor); rc != 0) {
@@ -198,8 +193,6 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
     MDB_val val;
     if (auto rc = cursor_get(cursor, &key, &val, MDB_FIRST); rc != 0) {
       if (rc == MDB_NOTFOUND) {
-        empty = true;
-
         auto key_str = to_mem(RaftIndex{0}, RaftTerm{0});
         auto val_str = to_encoded_string(Entry{.term = RaftTerm{0}, .time = 0, .cmd = {}});
 
