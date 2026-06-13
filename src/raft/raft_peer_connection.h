@@ -36,7 +36,7 @@ struct PeerConnectionApi {
 
   virtual std::shared_lock<std::shared_mutex> usage_lock() const = 0;
 
-  virtual shared_ptr<WalSegment> segment(LogSeqNumber const& lsn) const = 0;
+  virtual Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const = 0;
 
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;
 };
@@ -44,11 +44,11 @@ struct PeerConnectionApi {
 /// A raft server creates a peer connection. The other end is an instance of RaftFollowerConnection.
 class RaftPeerConnection : public Connection {
  public:
-  RaftPeerConnection(RaftNodeId                  self_id,
-                     RaftNodeId                  peer_id,
-                     weak_ptr<PeerConnectionApi> server,
-                     socket_type                 socket,
-                     Options const&              options)
+  RaftPeerConnection(RaftNodeId                    self_id,
+                     RaftNodeId                    peer_id,
+                     shared_ptr<PeerConnectionApi> server,
+                     socket_type                   socket,
+                     Options const&                options)
       : Connection(std::format("Raft:{0}", self_id),
                    std::move(socket),
                    std::chrono::seconds(options.timeout_secs)),
@@ -147,25 +147,31 @@ class RaftPeerConnection : public Connection {
     return (seq & kSeqMask) - (seq >> kSeqBits);
   }
 
-  void set_info_and_node_id(RaftRequest& request) {
+  void set_info_and_node_id(RaftRequest& request, bool respond) {
     request.node_id           = self_id_;
     request.info.epoch        = epoch_msec();
     request.info.request_term = request.term;
+    request.info.respond      = respond;
     request.info.request_idx  = static_cast<uint16_t>(request.request.index());
 
-    // This function is invoked with a lock (mtx_).
-    request.info.request_seq =
-        (sequence_.at(request.info.request_idx).fetch_add(1U, std::memory_order_relaxed) + 1U) &
-        kSeqMask;
-
-    // Fix if we overflow.
-    if (kSeqMask == request.info.request_seq) {
-      sequence_.at(request.info.request_idx).store(0);
-
+    if (respond) {
+      // This function is invoked with a lock (mtx_).
       request.info.request_seq =
           (sequence_.at(request.info.request_idx).fetch_add(1U, std::memory_order_relaxed) + 1U) &
           kSeqMask;
+
+      // By design, reset if we overflow.
+      if (kSeqMask == request.info.request_seq) {
+        sequence_.at(request.info.request_idx).store(0);
+
+        request.info.request_seq =
+            (sequence_.at(request.info.request_idx).fetch_add(1U, std::memory_order_relaxed) + 1U) &
+            kSeqMask;
+      }
+    } else {
+      request.info.request_seq = 0;
     }
+
     if (auto const* r = std::get_if<AppendEntries>(&(request.request))) {
       request.info.log =
           options_.log_req_response && (r->prev_log_idx != prev_log_idx || !r->entries.empty());
@@ -194,8 +200,7 @@ class RaftPeerConnection : public Connection {
   void system_error(std::error_code      ec,
                     std::source_location loc = std::source_location::current()) {
     shutdown(ec, loc);
-    if (auto s = server_.lock(); s)
-      s->system_error(ec);
+    server_->system_error(ec);
   }
 
   // Read the message size.
@@ -205,14 +210,14 @@ class RaftPeerConnection : public Connection {
   void response_handler(Result<Data> response);
 
   /// Send the request and followed by the file, released the lock on completion.
-  void send_request(std::unique_lock<std::mutex> lk, RaftRequest request);
+  void send_request(std::unique_lock<std::mutex> lk, RaftRequest request, bool respond);
 
   void set_leader_term(RaftLog const&                      rlog,
                        RaftTerm                            leadership_term,
                        std::unique_lock<std::mutex> const& lk);
 
-  // Remove entries if references more that two segments.
-  static vector<Entry> trim(vector<Entry> entries);
+  // Remove entries if it references more that two segments.
+  static bool trim(vector<Entry>& entries);
 
   // The region spaned by the write op entries.
   static inplace_vector<MemBlock, 2> mem_blocks(vector<Entry> const& entries);
@@ -227,7 +232,7 @@ class RaftPeerConnection : public Connection {
   // from the previous request.
   RaftIndex prev_log_idx{0};
 
-  weak_ptr<PeerConnectionApi> server_;
+  shared_ptr<PeerConnectionApi> server_;
 
   /// Serialize the send messages.
   mutable std::mutex mtx_;

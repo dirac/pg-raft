@@ -21,15 +21,19 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   // The backing file.
   std::filesystem::path const& file() const { return file_; }
 
-  // Buffer
-  asio::const_buffer const_buffer(off_t off, size_t size) const { return {mapping() + off, size}; }
-
   static constexpr int kNoConsensus =
       ECANCELED;  // 140, Asynchronous operation stopped before normal completion
 
   // Calls msync. When consensus is not reached but local msync is successful, we report
-  // kNoConsensus error. The offset and size are not page aligned.
+  // kNoConsensus error. The offset and size need not be page aligned.
   Result<void> fsync(off_t offset, size_t size);
+
+  void write(void const* buffer, off_t offset, size_t size) {
+    std::memcpy(mapping() + offset, buffer, size);
+  }
+
+  // Buffer
+  asio::const_buffer const_buffer(off_t off, size_t size) const { return {mapping() + off, size}; }
 
   // Release
   void gc() { gc(std::unique_lock{map_mtx()}); }

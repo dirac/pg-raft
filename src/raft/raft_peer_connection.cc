@@ -12,7 +12,8 @@ void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   return send_request(std::move(lk),
                       RaftRequest{
                           .term = current_term,
-                      });
+                      },
+                      true);
 }
 
 void RaftPeerConnection::send_request_vote(RaftLog const& rlog, RaftTerm candidate_term) {
@@ -31,7 +32,8 @@ void RaftPeerConnection::send_request_vote(RaftLog const& rlog, RaftTerm candida
                               RequestVote{
                                   .last_entry = last_entry,
                               },
-                      });
+                      },
+                      true);
 }
 
 void RaftPeerConnection::send_request_election(RaftLog const& rlog, RaftTerm leadership_term) {
@@ -50,7 +52,8 @@ void RaftPeerConnection::send_request_election(RaftLog const& rlog, RaftTerm lea
                               RequestElection{
                                   .last_entry = last_entry,
                               },
-                      });
+                      },
+                      true);
 }
 
 void RaftPeerConnection::set_leader_term(RaftLog const&                      rlog,
@@ -86,6 +89,7 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
     return;
 
   AppendEntries append_entries;
+  bool          respond = true;
 
   append_entries.commit_idx   = commit_idx;
   append_entries.prev_log_idx = next_idx_ - 1U;
@@ -105,9 +109,10 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
     return system_error(elog(r.error(), "Failed to entries_from at {}", next_idx_));
   else {
     std::optional<vector<Entry>> entries = std::move(r.value());
-    if (entries)
-      append_entries.entries = trim(std::move(entries.value()));
-    else {
+    if (entries) {
+      append_entries.entries = std::move(entries.value());
+      respond                = trim(append_entries.entries);
+    } else {
       return send_install_snapshot(std::move(lk), rlog, leadership_term);
     }
   }
@@ -119,7 +124,8 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
                           .term    = leadership_term,
                           .request = std::move(append_entries),
                           .data    = data,
-                      });
+                      },
+                      respond);
 }
 
 void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
@@ -133,7 +139,7 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
     auto [idx, entries] = std::move(r.value());
 
     next_idx_ = idx + 1U;
-    entries   = trim(std::move(entries));
+    trim(entries);
 
     std::reverse(entries.begin(), entries.end());
     idx -= entries.size();
@@ -148,7 +154,8 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                              .entries = std::move(entries),
                          },
                      .data = data,
-                 });
+                 },
+                 true);
   }
 }
 
@@ -180,26 +187,30 @@ inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& 
   return result;
 }
 
-vector<Entry> RaftPeerConnection::trim(vector<Entry> entries) {
-  set<LogSeqNumber> segments;
-  auto              iter = entries.begin();
+bool RaftPeerConnection::trim(vector<Entry>& entries) {
+  bool respond = entries.size() > 10;
 
-  while (iter != entries.end()) {
+  set<LogSeqNumber> segments;
+
+  for (auto iter = std::begin(entries); iter != std::end(entries); ++iter) {
     if (auto const* wal_cmd = std::get_if<WalCommand>(&(iter->cmd))) {
       if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command) &&
           segments.insert(wal_cmd->segment.value()).second) {
         if (segments.size() == 3) {
           entries.erase(iter, entries.end());
-          return entries;
+          return respond;
         }
       }
+      respond = respond || std::holds_alternative<FlushOp>(wal_cmd->command);
     }
   }
-  return entries;
+  return respond;
 }
 
-void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk, RaftRequest request) {
-  set_info_and_node_id(request);
+void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk,
+                                      RaftRequest                  request,
+                                      bool                         respond) {
+  set_info_and_node_id(request, respond);
 
   last_send_ = epoch_msec();
 
@@ -213,14 +224,11 @@ void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk, RaftReque
       segments.emplace_back(std::move(s));
       buffers.emplace_back(s->const_buffer(block.offset, block.size));
     } else {
-      if (auto server = server_.lock(); server) {
-        if (auto seg = server->segment(block.lsn); seg) {
-          segments.emplace_back(std::move(seg));
-          buffers.emplace_back(s->const_buffer(block.offset, block.size));
-        } else
-          return;
+      if (auto seg = server_->segment(block.lsn); seg) {
+        segments.emplace_back(std::move(seg.value()));
+        buffers.emplace_back(s->const_buffer(block.offset, block.size));
       } else
-        return;
+        return system_error(elog(seg.error(), "Unable to fetch the wal segment for {}", block.lsn));
     }
   }
   write_data(to_data(request),
@@ -230,7 +238,8 @@ void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk, RaftReque
                  shutdown(r.error());
              });
 
-  read_response();
+  if (respond)
+    read_response();
   lk.unlock();
 }
 
@@ -258,10 +267,9 @@ void RaftPeerConnection::response_handler(Result<Data> msg) {
 
     std::visit(
         [this, request_term, current_term](auto&& r) {
-          if (auto s = server_.lock(); s)
-            if (auto lk = s->usage_lock(); lk)
-              s->handle_response(
-                  self<RaftPeerConnection>(), request_term, current_term, std::move(r));
+          if (auto lk = server_->usage_lock(); lk)
+            server_->handle_response(
+                self<RaftPeerConnection>(), request_term, current_term, std::move(r));
         },
         r.value().response);
   }

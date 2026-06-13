@@ -142,6 +142,9 @@ struct RequestResponseInfo {
   /* log */
   bool log;
 
+  /* respond to the request. */
+  bool respond;
+
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & epoch;
@@ -149,6 +152,7 @@ struct RequestResponseInfo {
     ar & request_idx;
     ar & request_seq;
     ar & log;
+    ar & respond;
   }
 };
 

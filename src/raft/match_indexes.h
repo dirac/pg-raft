@@ -5,7 +5,9 @@
 struct MatchIndexes {
  public:
   MatchIndexes(RaftNodeId self_id, size_t n)
-      : self_id_(self_id), quorum_(static_cast<unsigned>(n) >> 1), match_indexes_(n, RaftIndex{0}) {
+      : self_id_(self_id),
+        quorum_((static_cast<unsigned>(n) >> 1) + 1U),
+        match_indexes_(n, RaftIndex{0}) {
     tmp_.reserve(n);
   }
 
@@ -41,4 +43,3 @@ struct MatchIndexes {
 
   std::mutex mtx_;
 };
-

@@ -10,6 +10,7 @@ lib raft_server
   : 
     raft_log.cc
     raft_peer_connection.cc
+    raft_follower_connection.cc
     deps
   ;
 
