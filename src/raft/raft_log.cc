@@ -1,6 +1,7 @@
 #include "src/raft/raft_log.h"
 
 #include "src/base/logger.h"
+#include "src/base/error_code.h"
 
 template <typename T>
 string to_encoded_string(T const& t) {
@@ -87,15 +88,18 @@ std::array<uint8_t, 8> to_val(std::time_t t) {
   return to_mem<uint64_t>(u8(t));
 }
 
-RaftLog::RaftLog(std::filesystem::path dir) : dir_(dir) {
-  std::error_code ec;
-  std::filesystem::create_directories(dir_, ec);
+RaftLog::RaftLog(std::filesystem::path dir) : dir_(dir) {}
 
-  if (ec)
-    log(FATAL, "Unable to create directories {0}: {1}", dir_.c_str(), ec.message());
+Result<void> mk_log_dir(std::filesystem::path dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  return elog(ec, "Unable to create directories {0}", dir);
 }
 
 Result<RaftTerm> RaftLog::open_term_db() {
+  if (auto r = mk_log_dir(dir_); !r)
+    return elog(r.error(), "open_term_db failed");
+
   auto term_file = term_db();
 
   MDB_txn* txn = nullptr;
@@ -146,6 +150,9 @@ Result<RaftTerm> RaftLog::open_term_db() {
 }
 
 Result<void> RaftLog::open_logs_db(unsigned factor) {
+  if (auto r = mk_log_dir(dir_); !r)
+    return elog(r.error(), "open_logs_db failed");
+
   auto logs_file = logs_db();
 
   MDB_txn* txn = nullptr;
@@ -564,8 +571,30 @@ Result<std::tuple<RaftTerm, RaftIndex>> RaftLog::entry(MDB_cursor_op op) const {
   return std::make_tuple(term, idx);
 }
 
-Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,
-                                                           size_t          count) const {
+Result<std::tuple<RaftIndex, vector<Entry>>> RaftLog::latest_entries(size_t count) const {
+  auto lk = std::shared_lock<std::shared_mutex>{rmtx_};
+
+  RaftIndex idx;
+  if (auto r = last_entry(); !r)
+    return r.error();
+  else
+    idx = std::get<RaftIndex>(r.value());
+
+  if (auto r = get_entries(idx, count, MDB_PREV); !r)
+    return r.error();
+  else {
+    if (!r.value())
+      return elog(make_error_code(ErrorCode::kProgramBug), "Program Bug");
+
+    auto entries = std::move(r.value().value());
+    return std::make_tuple(idx, std::move(entries));
+  }
+}
+
+Result<std::optional<vector<Entry>>> RaftLog::get_entries(RaftIndex const idx,
+                                                          size_t          count,
+                                                          MDB_cursor_op   op) const {
+  assert(op == MDB_NEXT || op == MDB_PREV);
   auto lk = std::shared_lock<std::shared_mutex>{rmtx_};
 
   MDB_txn* txn;
@@ -603,7 +632,8 @@ Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,
   do {
     auto [index, _] = from_mem<RaftIndex, RaftTerm>(reinterpret_cast<uint8_t const*>(key.mv_data));
     (void)index;
-    assert(index == (idx + result.size()));
+    assert(op != MDB_NEXT || index == (idx + result.size()));
+    assert(op != MDB_PREV || index == (idx - result.size()));
 
     if (auto r = from_encoded_string<Entry>(
             string{reinterpret_cast<char const*>(val.mv_data), val.mv_size});
@@ -615,7 +645,7 @@ Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,
       return r.error();
     }
 
-    rc = cursor_get(cursor, &key, &val, MDB_NEXT);
+    rc = cursor_get(cursor, &key, &val, op);
   } while ((result.size() < count) && (rc == 0));
 
   cursor_close(cursor);

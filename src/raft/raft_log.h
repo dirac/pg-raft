@@ -46,7 +46,12 @@ class RaftLog {
   Result<std::tuple<RaftTerm, RaftIndex>> first_entry() const { return entry(MDB_FIRST); }
 
   /// Returns atmost count entries starting at the index.
-  Result<std::optional<vector<Entry>>> entries_from(RaftIndex idx, size_t count) const;
+  Result<std::optional<vector<Entry>>> entries_from(RaftIndex idx, size_t count) const {
+    return get_entries(idx, count, MDB_NEXT);
+  }
+
+  /// Return atmost count entries from the back, the index of the latest element.
+  Result<std::tuple<RaftIndex, vector<Entry>>> latest_entries(size_t count) const;
 
   /// The term of the entry at the index.
   Result<std::optional<RaftTerm>> get_term(RaftIndex idx) const;
@@ -68,6 +73,10 @@ class RaftLog {
 
  protected:
   Result<std::tuple<RaftTerm, RaftIndex>> entry(MDB_cursor_op op) const;
+
+  Result<std::optional<vector<Entry>>> get_entries(RaftIndex     idx,
+                                                   size_t        count,
+                                                   MDB_cursor_op op) const;
 
   virtual char const* strerror(int rc) const;
 

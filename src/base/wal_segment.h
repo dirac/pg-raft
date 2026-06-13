@@ -21,6 +21,9 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   // The backing file.
   std::filesystem::path const& file() const { return file_; }
 
+  // Buffer
+  asio::const_buffer const_buffer(off_t off, size_t size) const { return {mapping() + off, size}; }
+
   static constexpr int kNoConsensus =
       ECANCELED;  // 140, Asynchronous operation stopped before normal completion
 

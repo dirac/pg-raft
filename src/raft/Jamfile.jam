@@ -9,7 +9,7 @@ alias deps
 lib raft_server
   : 
     raft_log.cc
-    raft_types.cc
+    raft_peer_connection.cc
     deps
   ;
 

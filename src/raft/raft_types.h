@@ -12,15 +12,6 @@ struct RequestElection {
   }
 };
 
-template <>
-struct std::formatter<RequestElection> : public parse_fn {
-  auto format(RequestElection const& r, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(), "RequestElection {{ (term, index) = {} }}", std::get<0>(r.last_entry));
-  }
-};
-std::ostream& operator<<(std::ostream& out, RequestElection const& r);
-
 struct RequestElectionResponse {
   bool success;
 
@@ -29,14 +20,6 @@ struct RequestElectionResponse {
     ar & success;
   }
 };
-
-template <>
-struct std::formatter<RequestElectionResponse> : public parse_fn {
-  auto format(RequestElectionResponse const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "RequestElectionResponse {{ success={} }}", r.success);
-  }
-};
-std::ostream& operator<<(std::ostream& out, RequestElectionResponse const& r);
 
 struct RequestVote {
   std::tuple<RaftTerm, RaftIndex> last_entry;
@@ -47,17 +30,6 @@ struct RequestVote {
   }
 };
 
-template <>
-struct std::formatter<RequestVote> : public parse_fn {
-  auto format(RequestVote const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(),
-                          "RequestVote {{ term={} index={} }}",
-                          std::get<RaftTerm>(r.last_entry),
-                          std::get<RaftIndex>(r.last_entry));
-  }
-};
-std::ostream& operator<<(std::ostream& out, RequestVote const& r);
-
 struct RequestVoteResponse {
   bool vote_granted;
 
@@ -66,14 +38,6 @@ struct RequestVoteResponse {
     ar & vote_granted;
   }
 };
-
-template <>
-struct std::formatter<RequestVoteResponse> : public parse_fn {
-  auto format(RequestVoteResponse const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "RequestVoteResponse {{ vote_granted={} }}", r.vote_granted);
-  }
-};
-std::ostream& operator<<(std::ostream& out, RequestVoteResponse const& r);
 
 struct Entry {
   std::time_t time;  // The timestamp when the entry was created.
@@ -88,14 +52,6 @@ struct Entry {
     ar & cmd;
   }
 };
-
-template <>
-struct std::formatter<Entry> : public parse_fn {
-  auto format(Entry const& e, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "E{{ time={} term={} cmd={} }}", e.time, e.term, e.cmd);
-  }
-};
-std::ostream& operator<<(std::ostream& out, Entry const& e);
 
 struct AppendEntries {
   RaftTerm  prev_log_term;
@@ -113,20 +69,6 @@ struct AppendEntries {
     ar & entries;
   }
 };
-
-template <>
-struct std::formatter<AppendEntries> : public parse_fn {
-  auto format(AppendEntries const& ae, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(),
-        "AppendEntries {{ prev_log_idx={} prev_log_term={} commit_idx={} entries={} }}",
-        ae.prev_log_idx,
-        ae.prev_log_term,
-        ae.commit_idx,
-        ae.entries);
-  }
-};
-std::ostream& operator<<(std::ostream& out, AppendEntries const& ae);
 
 struct AppendEntriesResponse {
   /** true if follower contained entry matching prev_log_idx and prev_log_term */
@@ -157,46 +99,18 @@ struct AppendEntriesResponse {
   }
 };
 
-template <>
-struct std::formatter<AppendEntriesResponse> : public parse_fn {
-  auto format(AppendEntriesResponse const& r, std::format_context& ctx) const {
-    auto out = std::format_to(ctx.out(),
-                              "AppendEntriesResponse {{ success={} running={} idx={}",
-                              r.success,
-                              r.running,
-                              r.idx);
-    if (r.term)
-      out = std::format_to(std::move(out), " term={}", *r.term);
-    if (r.n)
-      out = std::format_to(std::move(out), " n={}", *r.n);
-    return std::format_to(std::move(out), " }}");
-  }
-};
-std::ostream& operator<<(std::ostream& out, AppendEntriesResponse const& r);
-
 struct InstallSnapshot {
-  RaftIndex prev_log_idx;
+  RaftIndex log_idx;
 
   /// About a 1M entries max.
   vector<Entry> entries;
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & prev_log_idx;
+    ar & log_idx;
     ar & entries;
   }
 };
-
-template <>
-struct std::formatter<InstallSnapshot> : public parse_fn {
-  auto format(InstallSnapshot const& s, std::format_context& ctx) const {
-    return std::format_to(ctx.out(),
-                          "InstallSnapshot {{ prev_log_idx={} entries={} }}",
-                          s.prev_log_idx,
-                          s.entries.size());
-  }
-};
-std::ostream& operator<<(std::ostream& out, InstallSnapshot const& s);
 
 struct InstallSnapshotResponse {
   /** the current log index. */
@@ -211,15 +125,6 @@ struct InstallSnapshotResponse {
     ar & success;
   }
 };
-
-template <>
-struct std::formatter<InstallSnapshotResponse> : public parse_fn {
-  auto format(InstallSnapshotResponse const& s, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(), "InstallSnapshotResponse {{ idx={} success={} }}", s.idx, s.success);
-  }
-};
-std::ostream& operator<<(std::ostream& out, InstallSnapshotResponse const& s);
 
 struct RequestResponseInfo {
   /* The epoch when the request got created. Useful to track round trip timing. */
@@ -247,31 +152,16 @@ struct RequestResponseInfo {
   }
 };
 
-template <>
-struct std::formatter<RequestResponseInfo> : public parse_fn {
-  auto format(RequestResponseInfo const& r, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "{}:{}", r.epoch, r.request_seq);
-  }
-};
-
 struct MemBlock {
   LogSeqNumber lsn;     // The file lsn.
   off_t        offset;  // The offset into the segment.
-  size_t       length;  // The size of the block.
+  size_t       size;    // The size of the block.
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & lsn;
     ar & offset;
-    ar & length;
-  }
-};
-
-template <>
-struct std::formatter<MemBlock> : public parse_fn {
-  auto format(MemBlock const& m, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(), "MemBlock {{ lsn={} offset={} length={} }}", m.lsn, m.offset, m.length);
+    ar & size;
   }
 };
 
@@ -301,15 +191,6 @@ struct RaftRequest {
   }
 };
 
-template <>
-struct std::formatter<RaftRequest> : public parse_fn {
-  auto format(RaftRequest const& r, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(), "RaftRequest {{ {} term={} {} data={} }}", r.info, r.term, r.request, r.data);
-  }
-};
-std::ostream& operator<<(std::ostream& out, RaftRequest const& r);
-
 struct RaftResponse {
   /** currentTerm, to force other leader/candidate to step down */
   RaftTerm term;
@@ -337,6 +218,145 @@ struct RaftResponse {
   }
 };
 
+// Formatters
+
+template <>
+struct std::formatter<RequestElection> : public parse_fn {
+  auto format(RequestElection const& r, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "RequestElection {{ (term, index) = {} }}", std::get<0>(r.last_entry));
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, RequestElection const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<RequestElectionResponse> : public parse_fn {
+  auto format(RequestElectionResponse const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestElectionResponse {{ success={} }}", r.success);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, RequestElectionResponse const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<RequestVote> : public parse_fn {
+  auto format(RequestVote const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(),
+                          "RequestVote {{ term={} index={} }}",
+                          std::get<RaftTerm>(r.last_entry),
+                          std::get<RaftIndex>(r.last_entry));
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, RequestVote const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<RequestVoteResponse> : public parse_fn {
+  auto format(RequestVoteResponse const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestVoteResponse {{ vote_granted={} }}", r.vote_granted);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, RequestVoteResponse const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<Entry> : public parse_fn {
+  auto format(Entry const& e, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "E{{ time={} term={} cmd={} }}", e.time, e.term, e.cmd);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, Entry const& e) {
+  return out << std::format("{}", e);
+}
+
+template <>
+struct std::formatter<AppendEntries> : public parse_fn {
+  auto format(AppendEntries const& ae, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(),
+        "AppendEntries {{ prev_log_idx={} prev_log_term={} commit_idx={} entries={} }}",
+        ae.prev_log_idx,
+        ae.prev_log_term,
+        ae.commit_idx,
+        ae.entries);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, AppendEntries const& ae) {
+  return out << std::format("{}", ae);
+}
+
+template <>
+struct std::formatter<AppendEntriesResponse> : public parse_fn {
+  auto format(AppendEntriesResponse const& r, std::format_context& ctx) const {
+    auto out = std::format_to(ctx.out(),
+                              "AppendEntriesResponse {{ success={} running={} idx={}",
+                              r.success,
+                              r.running,
+                              r.idx);
+    if (r.term)
+      out = std::format_to(std::move(out), " term={}", *r.term);
+    if (r.n)
+      out = std::format_to(std::move(out), " n={}", *r.n);
+    return std::format_to(std::move(out), " }}");
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, AppendEntriesResponse const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<InstallSnapshot> : public parse_fn {
+  auto format(InstallSnapshot const& s, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "InstallSnapshot {{ log_idx={} entries={} }}", s.log_idx, s.entries.size());
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, InstallSnapshot const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
+struct std::formatter<InstallSnapshotResponse> : public parse_fn {
+  auto format(InstallSnapshotResponse const& s, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "InstallSnapshotResponse {{ idx={} success={} }}", s.idx, s.success);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, InstallSnapshotResponse const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
+struct std::formatter<RequestResponseInfo> : public parse_fn {
+  auto format(RequestResponseInfo const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{}:{}", r.epoch, r.request_seq);
+  }
+};
+
+template <>
+struct std::formatter<MemBlock> : public parse_fn {
+  auto format(MemBlock const& m, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "MemBlock {{ lsn={} offset={} size={} }}", m.lsn, m.offset, m.size);
+  }
+};
+
+template <>
+struct std::formatter<RaftRequest> : public parse_fn {
+  auto format(RaftRequest const& r, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "RaftRequest {{ {} term={} {} data={} }}", r.info, r.term, r.request, r.data);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, RaftRequest const& r) {
+  return out << std::format("{}", r);
+}
+
 template <>
 struct std::formatter<RaftResponse> : public parse_fn {
   auto format(RaftResponse const& r, std::format_context& ctx) const {
@@ -344,4 +364,6 @@ struct std::formatter<RaftResponse> : public parse_fn {
         ctx.out(), "RaftResponse {{ {} term={} {} }}", r.info, r.term, r.response);
   }
 };
-std::ostream& operator<<(std::ostream& out, RaftResponse const& r);
+inline std::ostream& operator<<(std::ostream& out, RaftResponse const& r) {
+  return out << std::format("{}", r);
+}

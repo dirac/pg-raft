@@ -1,9 +1,5 @@
 #include "src/raft/raft_peer_connection.h"
 
-#include "src/base/cert_functions.h"
-
-Logger RaftPeerConnection::logger{"raft-peer-conn"};
-
 void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   std::unique_lock<std::mutex> lk{mtx_};
 
@@ -11,7 +7,7 @@ void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   if (auto r = rlog.current_term(); r)
     current_term = r.value();
   else
-    return system_error(ERROR_MSG(r.error(), "Failed to get current term"));
+    return system_error(elog(r.error(), "Failed to get current term"));
 
   return send_request(std::move(lk),
                       RaftRequest{
@@ -26,7 +22,7 @@ void RaftPeerConnection::send_request_vote(RaftLog const& rlog, RaftTerm candida
   if (auto r = rlog.last_entry(); r)
     last_entry = r.value();
   else
-    return system_error(ERROR_MSG(r.error(), "Failed to get last entry"));
+    return system_error(elog(r.error(), "Failed to get last entry"));
 
   return send_request(std::move(lk),
                       RaftRequest{
@@ -45,7 +41,7 @@ void RaftPeerConnection::send_request_election(RaftLog const& rlog, RaftTerm lea
   if (auto r = rlog.last_entry(); r)
     last_entry = r.value();
   else
-    return system_error(ERROR_MSG(r.error(), "Failed to get last entry"));
+    return system_error(elog(r.error(), "Failed to get last entry"));
 
   return send_request(std::move(lk),
                       RaftRequest{
@@ -66,7 +62,7 @@ void RaftPeerConnection::set_leader_term(RaftLog const&                      rlo
     if (auto r = rlog.last_entry(); r)
       current_idx = std::get<RaftIndex>(r.value());
     else
-      return system_error(ERROR_MSG(r.error(), "Failed to get last entry"));
+      return system_error(elog(r.error(), "Failed to get last entry"));
 
     leader_term_ = leadership_term;
     last_send_   = 0U;
@@ -84,7 +80,7 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
   if (auto r = rlog.last_entry(); r)
     current_idx = std::get<RaftIndex>(r.value());
   else
-    return system_error(ERROR_MSG(r.error(), "Failed to get last entry"));
+    return system_error(elog(r.error(), "Failed to get last entry"));
 
   if ((next_idx_ >= current_idx) && (epoch_msec() - last_send_) < (options_.election_timeout >> 2))
     return;
@@ -95,34 +91,34 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
   append_entries.prev_log_idx = next_idx_ - 1U;
 
   if (auto r = rlog.get_term(append_entries.prev_log_idx); !r)
-    return system_error(ERROR_MSG(
-        r.error(), fn::format("Failed to get_term at {}", INT(append_entries.prev_log_idx))));
+    return system_error(elog(r.error(), "Failed to get_term at {}", append_entries.prev_log_idx));
 
   else {
     std::optional<RaftTerm> term = r.value();
     if (term)
       append_entries.prev_log_term = *term;
     else
-      return send_install_snapshot(std::move(lk), rlog, leadership_term, std::move(snapshot));
+      return send_install_snapshot(std::move(lk), rlog, leadership_term);
   }
 
   if (auto r = rlog.entries_from(next_idx_, options_.max_entries); !r)
-    return system_error(
-        ERROR_MSG(r.error(), fn::format("Failed to entries_from at {}", INT(next_idx_))));
+    return system_error(elog(r.error(), "Failed to entries_from at {}", next_idx_));
   else {
     std::optional<vector<Entry>> entries = std::move(r.value());
     if (entries)
-      append_entries.entries = std::move(entries.value());
+      append_entries.entries = trim(std::move(entries.value()));
     else {
-      next_idx_ = current_idx + 1U;
-      return send_install_snapshot(std::move(lk), rlog, leadership_term, std::move(snapshot));
+      return send_install_snapshot(std::move(lk), rlog, leadership_term);
     }
   }
   next_idx_ = next_idx_ + append_entries.entries.size();
+
+  auto data = mem_blocks(append_entries.entries);
   return send_request(std::move(lk),
                       RaftRequest{
                           .term    = leadership_term,
                           .request = std::move(append_entries),
+                          .data    = data,
                       });
 }
 
@@ -131,56 +127,110 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                                                RaftTerm                     leadership_term) {
   set_leader_term(rlog, leadership_term, lk);
 
-  std::filesystem::path file;
-  string                checksum;
-  size_t                size;
+  if (auto r = rlog.latest_entries(options_.snapshot_entries_count); !r)
+    return system_error(elog(r.error(), "failed in getting latest entries"));
+  else {
+    auto [idx, entries] = std::move(r.value());
 
-  if (auto r = snapshot->details(rlog); !r)
-    return system_error(ERROR_MSG(r.error(), "Failed to get the snapshot file"));
-  else
-    std::tie(file, checksum, size) = r.value();
+    next_idx_ = idx + 1U;
+    entries   = trim(std::move(entries));
 
-  send_request(std::move(lk),
-               RaftRequest{
-                   .term = leadership_term,
-                   .request =
-                       InstallSnapshot{
-                           .size     = size,
-                           .checksum = checksum,
-                       },
-               },
-               std::move(file),
-               std::move(snapshot));
+    std::reverse(entries.begin(), entries.end());
+    idx -= entries.size();
+
+    auto data = mem_blocks(entries);
+    send_request(std::move(lk),
+                 RaftRequest{
+                     .term = leadership_term,
+                     .request =
+                         InstallSnapshot{
+                             .log_idx = idx,
+                             .entries = std::move(entries),
+                         },
+                     .data = data,
+                 });
+  }
 }
 
-void RaftPeerConnection::send_request(std::unique_lock<std::mutex>         lk,
-                                      RaftRequest                          request,
-                                      std::optional<std::filesystem::path> file) {
+inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& entries) {
+  map<LogSeqNumber, std::tuple<off_t, off_t>> regions;
+  for (auto const& e : entries) {
+    if (auto const* wal_cmd = std::get_if<WalCommand>(&e.cmd)) {
+      if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command)) {
+        auto pos = regions.find(wal_cmd->segment.value());
+        if (pos == regions.end())
+          pos = regions.emplace(wal_cmd->segment.value(), std::make_tuple(0, 0)).first;
+
+        WriteOp op  = std::get<WriteOp>(wal_cmd->command);
+        auto [s, e] = pos->second;
+        s           = std::min(op.offset, s);
+        e           = std::max(op.offset + static_cast<off_t>(op.size), e);
+        pos->second = std::make_tuple(s, e);
+      }
+    }
+  }
+
+  inplace_vector<MemBlock, 2> result;
+  for (auto [lsn, reg] : regions)
+    result.emplace_back(MemBlock{
+        .lsn    = lsn,
+        .offset = std::get<0>(reg),
+        .size   = static_cast<size_t>(std::get<1>(reg) - std::get<0>(reg)),
+    });
+  return result;
+}
+
+vector<Entry> RaftPeerConnection::trim(vector<Entry> entries) {
+  set<LogSeqNumber> segments;
+  auto              iter = entries.begin();
+
+  while (iter != entries.end()) {
+    if (auto const* wal_cmd = std::get_if<WalCommand>(&(iter->cmd))) {
+      if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command) &&
+          segments.insert(wal_cmd->segment.value()).second) {
+        if (segments.size() == 3) {
+          entries.erase(iter, entries.end());
+          return entries;
+        }
+      }
+    }
+  }
+  return entries;
+}
+
+void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk, RaftRequest request) {
   set_info_and_node_id(request);
 
   last_send_ = epoch_msec();
 
-  if (request.info.log) {
-    LOG_INFO << log_prefix() << request;
-  }
+  if (request.info.log)
+    log(INFO, "{}{}", log_prefix(), request);
 
-  if (file) {
-    write_data(to_data(request), [this, s = self()](Result<void> r) {
-      if (!r)
-        shutdown(r.error());
-    });
-    write_file(std::move(file.value()), [this, s = self(), snapshot](Result<void> r) {
-      if (!r && is_system_error_code(r.error()))
-        return system_error(r.error());
-    });
-  } else {
-    write_data(to_data(request), [this, s = self()](Result<void> r) {
-      if (!r)
-        shutdown(r.error());
-    });
+  inplace_vector<asio::const_buffer, 2>     buffers;
+  inplace_vector<shared_ptr<WalSegment>, 2> segments;
+  for (auto const& block : request.data) {
+    if (auto s = segment_; s && s->lsn() == block.lsn) {
+      segments.emplace_back(std::move(s));
+      buffers.emplace_back(s->const_buffer(block.offset, block.size));
+    } else {
+      if (auto server = server_.lock(); server) {
+        if (auto seg = server->segment(block.lsn); seg) {
+          segments.emplace_back(std::move(seg));
+          buffers.emplace_back(s->const_buffer(block.offset, block.size));
+        } else
+          return;
+      } else
+        return;
+    }
   }
+  write_data(to_data(request),
+             buffers,
+             [this, s = self(), segments = std::move(segments)](Result<void> r) {
+               if (!r)
+                 shutdown(r.error());
+             });
+
   read_response();
-
   lk.unlock();
 }
 
@@ -198,10 +248,10 @@ void RaftPeerConnection::response_handler(Result<Data> msg) {
     RaftTerm   current_term = r.value().term;
     RaftNodeId node_id      = r.value().node_id;
 
-    ASSERT(node_id == peer_id());
+    assert(node_id == peer_id());
 
     if (r.value().info.log) {
-      LOG_INFO << log_prefix() << r.value();
+      log(INFO, "{}{}", log_prefix(), r.value());
     }
 
     // round_trip_time = epoch_msec() - r.value().info.epoch;
@@ -221,4 +271,3 @@ void RaftPeerConnection::read_response() {
   auto handler = [this, s = self()](Result<Data> msg) mutable { response_handler(std::move(msg)); };
   read_data(std::move(handler));
 }
-

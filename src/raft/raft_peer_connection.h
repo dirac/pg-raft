@@ -1,10 +1,10 @@
 #pragma once
 
+#include "src/base/wal_segment.h"
 #include "src/net/connection.h"
 #include "src/raft/options.h"
 #include "src/raft/raft_log.h"
 #include "src/raft/raft_types.h"
-#include "src/raft/snapshot.h"
 
 class RaftPeerConnection;
 
@@ -36,36 +36,32 @@ struct PeerConnectionApi {
 
   virtual std::shared_lock<std::shared_mutex> usage_lock() const = 0;
 
+  virtual shared_ptr<WalSegment> segment(LogSeqNumber const& lsn) const = 0;
+
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;
 };
 
 /// A raft server creates a peer connection. The other end is an instance of RaftFollowerConnection.
-class RaftPeerConnection : public Connection<> {
+class RaftPeerConnection : public Connection {
  public:
-  static Logger logger;
-
   RaftPeerConnection(RaftNodeId                  self_id,
                      RaftNodeId                  peer_id,
                      weak_ptr<PeerConnectionApi> server,
-                     std::filesystem::path       tmpdir,
                      socket_type                 socket,
                      Options const&              options)
-      : Connection<>(to_string(Role::kZookeeper),
-                     fn::format("{0}", INT(peer_id)),
-                     std::move(socket),
-                     std::move(tmpdir),
-                     std::chrono::seconds(options.timeout_secs),
-                     logger),
+      : Connection(std::format("Raft:{0}", self_id),
+                   std::move(socket),
+                   std::chrono::seconds(options.timeout_secs)),
         self_id_(self_id),
         peer_id_(peer_id),
         server_(server),
         last_send_(0),
         options_(options) {
-    set_log_prefix(fn::format("({0} -> {1}) ", INT(self_id), INT(peer_id)));
+    set_log_prefix(std::format("({0} -> {1}) ", self_id, peer_id));
   }
 
   void close() {
-    LOG_INFO << "Closing connecion";
+    log(INFO, "{} Closing connecion", log_prefix());
     shutdown();
   }
 
@@ -84,11 +80,16 @@ class RaftPeerConnection : public Connection<> {
   void send_ping(RaftLog const& rlog);
 
   /// If the node is a leader.
-  void send_append_entries(RaftLog const&       rlog,
-                           RaftTerm             leadership_term,
-                           RaftIndex            commit_idx) {
-    return send_append_entries(
-        std::unique_lock<std::mutex>{mtx_}, rlog, leadership_term, commit_idx);
+  void send_append_entries(RaftLog const&         rlog,
+                           RaftTerm               leadership_term,
+                           RaftIndex              commit_idx,
+                           shared_ptr<WalSegment> segment) {
+    auto lk = std::unique_lock{mtx_};
+
+    if (segment && segment != segment_)
+      segment_ = segment;
+
+    return send_append_entries(std::move(lk), rlog, leadership_term, commit_idx);
   }
 
   void send_append_entries(std::unique_lock<std::mutex> lk,
@@ -134,15 +135,15 @@ class RaftPeerConnection : public Connection<> {
   static_assert(kSeqBits != 32 || kSeqMask == std::numeric_limits<uint32_t>::max());
 
   template <typename T>
-  static consteval uint16_t index() {
+  static uint16_t index() {
     auto r = RaftRequest{.request = T{}};
     return static_cast<uint16_t>(r.request.index());
   }
 
   template <typename T>
   int64_t outstanding_requests() const {
-    auto static constexpr idx = index<T>();
-    auto seq                  = sequence_.at(idx).load(std::memory_order_relaxed);
+    auto static idx = index<T>();
+    auto seq        = sequence_.at(idx).load(std::memory_order_relaxed);
     return (seq & kSeqMask) - (seq >> kSeqBits);
   }
 
@@ -204,12 +205,17 @@ class RaftPeerConnection : public Connection<> {
   void response_handler(Result<Data> response);
 
   /// Send the request and followed by the file, released the lock on completion.
-  void send_request(std::unique_lock<std::mutex>         lk,
-                    RaftRequest                          request);
+  void send_request(std::unique_lock<std::mutex> lk, RaftRequest request);
 
   void set_leader_term(RaftLog const&                      rlog,
                        RaftTerm                            leadership_term,
                        std::unique_lock<std::mutex> const& lk);
+
+  // Remove entries if references more that two segments.
+  static vector<Entry> trim(vector<Entry> entries);
+
+  // The region spaned by the write op entries.
+  static inplace_vector<MemBlock, 2> mem_blocks(vector<Entry> const& entries);
 
  private:
   RaftNodeId const self_id_;
@@ -233,5 +239,6 @@ class RaftPeerConnection : public Connection<> {
   std::array<std::atomic_uint64_t, 5> sequence_;
 
   Options const options_;
-};
 
+  shared_ptr<WalSegment> segment_{nullptr};
+};
