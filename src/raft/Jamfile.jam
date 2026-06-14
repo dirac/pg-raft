@@ -11,6 +11,10 @@ lib raft_server
     raft_log.cc
     raft_peer_connection.cc
     raft_follower_connection.cc
+    raft_client_connection.cc
+    match_indexes.cc
+    vote_tally.cc
+    peer_connection_mgr.cc
     deps
   ;
 

@@ -5,18 +5,13 @@
 PeerConnectionMgr::PeerConnectionMgr(boost::asio::io_context& io_context,
                                      RaftNodeId               self_id,
                                      Config const&            config,
-                                     Certificates const&      certs,
-                                     std::filesystem::path    tmpdir,
                                      Options const&           options)
     : io_context_(io_context),
       self_id_(self_id),
-      log_prefix_(fn::format("({0}) ", INT(self_id_))),
-      nodes_(static_cast<unsigned>(config.zk_servers.size())),
-      tmpdir_(tmpdir),
+      log_prefix_(std::format("({0}) ", INT(self_id_))),
+      nodes_(static_cast<unsigned>(config.servers.size())),
       options_(options) {
   for (auto i = 0U; i < nodes(); ++i) {
-    ssl_contexts_.emplace_back(fn::format("{0}:{1}", to_string(Role::kZookeeper), INT(self_id)),
-                               certs);
     connections_.emplace_back(nullptr);
     last_connect_attempt_.at(i) = 0U;
   }
@@ -60,11 +55,13 @@ void PeerConnectionMgr::close() {
                                    });
 
   std::this_thread::sleep_for(std::chrono::seconds(1));
-  LOG_INFO << log_prefix_ << "Connections hanging around "
-           << std::accumulate(
-                  std::begin(weak_ptrs), std::end(weak_ptrs), 0U, [](unsigned result, auto& ptr) {
-                    return result + ptr.use_count();
-                  });
+  log(INFO,
+      "{} Connections hanging around {}",
+      log_prefix(),
+      std::accumulate(
+          std::begin(weak_ptrs), std::end(weak_ptrs), 0U, [](unsigned result, auto& ptr) {
+            return result + ptr.use_count();
+          }));
 }
 
 vector<shared_ptr<RaftPeerConnection>> PeerConnectionMgr::get_connections() {
@@ -83,30 +80,29 @@ unsigned PeerConnectionMgr::connected_peers() const {
 
 void PeerConnectionMgr::set_connection(
     uint16_t                                            idx,
-    weak_ptr<PeerConnectionApi>                         server,
+    shared_ptr<PeerConnectionApi>                       server,
     std::function<void(shared_ptr<RaftPeerConnection>)> on_connect,
     Result<socket_type>                                 socket) {
   if (!socket) {
-    LOG_ERROR << log_prefix_ << "Unable to connect to node=" << idx << " error: " << socket.error();
+    log(INFO, "{} Unable to connect to node={} error: {}", log_prefix(), idx, socket.error());
     set_connection(idx, nullptr);
 
   } else {
-    LOG_INFO << log_prefix_ << "Connected to node=" << idx;
+    log(INFO, "{} Connected to node={}", log_prefix(), idx);
     if (auto conn =
             set_connection(idx,
-                           Connection<>::create<RaftPeerConnection>(self_id_,
-                                                                    /*peer_id=*/RaftNodeId{idx},
-                                                                    server,
-                                                                    tmpdir_,
-                                                                    std::move(socket.value()),
-                                                                    options_));
+                           Connection::create<RaftPeerConnection>(self_id_,
+                                                                  /*peer_id=*/RaftNodeId{idx},
+                                                                  server,
+                                                                  std::move(socket.value()),
+                                                                  options_));
         conn) {
       on_connect(conn);
     }
   }
 }
 
-void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi>                         server,
+void PeerConnectionMgr::reconnect(shared_ptr<PeerConnectionApi>                       server,
                                   Config const&                                       config,
                                   std::function<void(shared_ptr<RaftPeerConnection>)> on_connect) {
   auto connections = get_connections();
@@ -123,16 +119,15 @@ void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi>                   
     if ((last_connect == 0 || (last_connect + options().reconnect_interval < epoch_msec())) &&
         last_connect_attempt_.at(idx).compare_exchange_strong(
             last_connect, std::numeric_limits<unsigned>::max())) {
-      LOG_INFO << log_prefix_ << "Connecting to node=" << idx << " last try @ " << last_connect;
+      log(INFO, "{} Connecting to node={} last try @ {}", log_prefix(), idx, last_connect);
 
-      banyandb::net::async_connect(
-          io_context(),
-          ssl_contexts_.at(idx),
-          HostAddress{.address = config.zk_servers.at(idx).hostname,
-                      .port    = config.zk_servers.at(idx).port},
-          [this, s = self(), idx, server, on_connect](Result<socket_type> socket) {
-            set_connection(idx, server, std::move(on_connect), std::move(socket));
-          });
+      async_connect(io_context(),
+                    std::format("Raft:{}", self_id_),
+                    HostAddress{.address = config.servers.at(idx).hostname,
+                                .port    = config.servers.at(idx).ha_port},
+                    [this, s = self(), idx, server, on_connect](Result<socket_type> socket) {
+                      set_connection(idx, server, std::move(on_connect), std::move(socket));
+                    });
     }
   }
 }
@@ -163,4 +158,3 @@ unsigned PeerConnectionMgr::for_each(std::function<void(shared_ptr<RaftPeerConne
   }
   return nodes() - closed;
 }
-

@@ -23,8 +23,6 @@ class RaftServerConnection : public Connection<> {
 
   void close() { shutdown(); }
 
-  Result<ZkResponse> exec(ZkRequest const& request);
-
   void set_peer_status(uint8_t l) final { set_leader(l ? true : false); }
 
   void async_leadership_check(std::function<void(Result<bool>)> check) {
@@ -35,7 +33,9 @@ class RaftServerConnection : public Connection<> {
     request_peer_status();
   }
 
-  bool is_leader() const { return leader_.load(std::memory_order_relaxed) && !closed(); }
+  bool is_leader() const { return leader_.load(std::memory_order_relaxed) != 0 && !closed(); }
+  bool is_serving() const { return leader_.load(std::memory_order_relaxed) ==
+  static_cast<uint8_t>(0x3) && !closed(); }
 
   RaftNodeId node_id() const { return id_; }
 
@@ -61,7 +61,7 @@ class RaftServerConnection : public Connection<> {
  private:
   RaftNodeId const id_;
 
-  std::atomic<bool> leader_;
+  std::atomic<uint8_t> leader_;
 
   std::deque<std::function<void(Result<bool>)>> leadership_checks_;
   std::mutex                                    leadership_checks_mtx_;

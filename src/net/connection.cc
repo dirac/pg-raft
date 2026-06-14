@@ -34,7 +34,7 @@ Connection::~Connection() {
 void Connection::on_shutdown() {}
 
 void Connection::start() {
-  assert(started_.test_and_set() == false);
+  if (started_.test_and_set()) return;
 
   do_read_header();
   if (timeout_.count() > 0) {

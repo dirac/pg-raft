@@ -1,7 +1,6 @@
 #pragma once
 
 #include "src/base/config.h"
-#include "src/net/ssl_context.h"
 #include "src/raft/raft_peer_connection.h"
 
 struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr> {
@@ -9,15 +8,13 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   PeerConnectionMgr(boost::asio::io_context& io_context,
                     RaftNodeId               self_id,
                     Config const&            config,
-                    Certificates const&      certs,
-                    std::filesystem::path    tmpdir,
                     Options const&           options);
   void close();
 
   unsigned post(std::function<void(shared_ptr<RaftPeerConnection>)> func);
   unsigned for_each(std::function<void(shared_ptr<RaftPeerConnection>&)> func);
 
-  void reconnect(weak_ptr<PeerConnectionApi>                         server,
+  void reconnect(shared_ptr<PeerConnectionApi>                       server,
                  Config const&                                       config,
                  std::function<void(shared_ptr<RaftPeerConnection>)> on_connect);
 
@@ -48,9 +45,11 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   shared_ptr<RaftPeerConnection> set_connection(uint16_t idx, shared_ptr<RaftPeerConnection> conn);
 
   void set_connection(uint16_t                                            idx,
-                      weak_ptr<PeerConnectionApi>                         server,
+                      shared_ptr<PeerConnectionApi>                       server,
                       std::function<void(shared_ptr<RaftPeerConnection>)> on_connect,
                       Result<socket_type>                                 socket);
+
+  auto const& log_prefix() const { return log_prefix_; }
 
   boost::asio::io_context& io_context() { return io_context_; }
 
@@ -62,12 +61,6 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
 
   /// Number of nodes.
   unsigned const nodes_;
-
-  // Temp directory to be used for the connections.
-  std::filesystem::path const tmpdir_;
-
-  // SSL Context for each connection.
-  vector<banyandb::net::ssl::Context> ssl_contexts_;
 
   // The connections.
   vector<shared_ptr<RaftPeerConnection>> connections_;

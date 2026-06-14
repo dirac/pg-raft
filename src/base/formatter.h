@@ -46,6 +46,28 @@ struct std::formatter<struct stat> : public parse_fn {
 };
 
 template <>
+struct std::formatter<std::error_code> : public parse_fn {
+  auto format(std::error_code const& ec, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{} ({})", ec.message(), ec.value());
+  }
+};
+
+inline std::ostream& operator<<(std::ostream& out, std::error_code const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
+struct std::formatter<boost::system::error_code> : public parse_fn {
+  auto format(boost::system::error_code const& ec, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "{} ({})", ec.message(), ec.value());
+  }
+};
+
+inline std::ostream& operator<<(std::ostream& out, boost::system::error_code const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
 struct std::formatter<std::monostate> : public parse_fn {
   auto format(std::monostate const&, std::format_context& ctx) const {
     return std::format_to(ctx.out(), "<>");

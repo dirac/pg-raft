@@ -4,37 +4,21 @@
 #include "src/raft/raft_types.h"
 
 struct ClientConnectionApi {
-  virtual bool is_leader() const                                                = 0;
-  virtual bool resigning() const                                                = 0;
-  virtual void exec(ZkRequest request, std::function<void(ZkResponse)> handler) = 0;
+  virtual bool is_leader() const = 0;
+  virtual bool serving() const   = 0;
+  virtual bool resigning() const = 0;
 };
 
-class RaftClientConnection : public Connection<> {
+class RaftClientConnection : public Connection {
  public:
-  static Logger logger;
-  static std::atomic<unsigned> counter;
-
-  RaftClientConnection(shared_ptr<ClientConnectionApi> server,
-                       char const*                     role,
-                       string                          peer,
-                       socket_type                     socket)
-      : Connection<>(role, std::move(peer), std::move(socket), std::filesystem::path{}, logger),
-        server_(server) {}
-
-  void start() final;
+  RaftClientConnection(shared_ptr<ClientConnectionApi> server, string peer, socket_type socket)
+      : Connection(std::move(peer), std::move(socket)), server_(server) {}
 
   void close() { shutdown(); }
 
   // Is the server a leader.
-  uint8_t status() const { return is_leader() ? 1 : 0; }
+  uint8_t status() const final;
 
  private:
-  bool is_leader() const;
-
-  void read_request();
-  void process(ZkRequest request);
-  void write_response(ZkResponse response);
-
   weak_ptr<ClientConnectionApi> const server_;
 };
-
