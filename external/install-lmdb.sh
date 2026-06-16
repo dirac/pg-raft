@@ -33,8 +33,6 @@ exit_on_error $? ${LINENO} "make install"
 cd ${DIR}
 exit_on_error $? ${LINENO} 'cd ${DIR}'
 
-exit;
-
 rm -r BUILDS/lmdb-LMDB_${VERSION}
 exit_on_error $? ${LINENO} 'rm -r BUILDS/liblmdb'
 
