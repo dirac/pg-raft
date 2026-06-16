@@ -20,7 +20,7 @@ exit_on_error $? ${LINENO} "cd liblmdb"
 sed_prefix=$(echo $prefix | sed 's/\//\\\//g')
 sed 's/^prefix[[:space:]]=.*$/prefix = _SET_PREFIX_/' Makefile | \
 sed "s/_SET_PREFIX_/${sed_prefix}/" | \
-sed 's/^ILIBS2[[:space:]]*=.*$/ILIBS = /' \
+sed 's/^ILIBS2[[:space:]]*=.*$/ILIBS2 = /' \
   >  Makefile.pg_raft
 exit_on_error $? ${LINENO} "sed makefile"
 
@@ -32,6 +32,8 @@ exit_on_error $? ${LINENO} "make install"
 
 cd ${DIR}
 exit_on_error $? ${LINENO} 'cd ${DIR}'
+
+exit;
 
 rm -r BUILDS/lmdb-LMDB_${VERSION}
 exit_on_error $? ${LINENO} 'rm -r BUILDS/liblmdb'
