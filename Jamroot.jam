@@ -5,7 +5,7 @@ project pg_raft
     : requirements
       <include>.
       <link>static
-      <cxxstd>latest
+      <cxxstd>23
       <debug-symbols>on
       <cxxflags>-DBOOST_ASIO_NO_DEPRECATED=1
       <cxxflags>-DTOP_DIR="$(TOP_DIR)"
