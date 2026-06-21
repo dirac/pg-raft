@@ -126,6 +126,24 @@ struct InstallSnapshotResponse {
   }
 };
 
+struct SnapshotRequest {
+  RaftIndex applied_idx;
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & applied_idx;
+  }
+};
+
+struct SnapshotResponse {
+  bool success;
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & success;
+  }
+};
+
 struct RequestResponseInfo {
   /* The epoch when the request got created. Useful to track round trip timing. */
   uint32_t epoch;
