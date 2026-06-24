@@ -37,3 +37,10 @@ unit-test connection_test
     ../base//testing
   ;
 
+unit-test sha256_test
+  : sha256_test.cc
+    sha256.cc
+    deps
+    ../base//testing
+  ;
+
