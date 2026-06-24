@@ -8,6 +8,7 @@ lib net
     async_connect.cc
     connection.cc
     server.cc
+    sha256.cc
     deps
   ;
 

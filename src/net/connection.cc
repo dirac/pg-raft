@@ -34,7 +34,8 @@ Connection::~Connection() {
 void Connection::on_shutdown() {}
 
 void Connection::start() {
-  if (started_.test_and_set()) return;
+  if (started_.test_and_set())
+    return;
 
   do_read_header();
   if (timeout_.count() > 0) {
@@ -252,10 +253,12 @@ void Connection::cleanup(std::error_code ec, int fd, std::filesystem::path file)
 }
 
 void Connection::do_read_file(uint64_t length) {
-  if (!write_file_buff_)
-    write_file_buff_ = make_unique<std::array<char, kPageSize>>();
+  if (!do_read_file_buff_)
+    do_read_file_buff_ = make_unique<std::array<char, kPageSize>>();
 
   auto file = tmp_file();
+  init(&read_checksum_ctx_);
+
   log(DEBUG, "Writing file from peer at {}", file.c_str());
 
   int fd = ::open(file.c_str(), O_RDWR | O_CREAT | O_EXCL, file_mode());
@@ -268,14 +271,51 @@ void Connection::do_read_file(uint64_t length) {
     do_read_file(self(), fd, length, std::move(file));
 }
 
+void Connection::do_read_checksum(shared_ptr<Connection>      self,
+                                  std::filesystem::path       file,
+                                  boost::asio::mutable_buffer buff) {
+  if (buff.size() == 0) {
+    auto checksum = finalize(&read_checksum_ctx_);
+    if (checksum != read_checksum_) {
+      log(ERROR,
+          "Checksum did not match {} vs {}",
+          static_cast<std::string>(checksum),
+          static_cast<std::string>(read_checksum_));
+
+      auto ec = system_error_code(EBADMSG);
+      cleanup(ec, -1, file);
+      return shutdown(ec);
+    }
+    enqueue<std::filesystem::path>(std::move(file), read_file_q_);
+    return do_read_header();
+  };
+
+  auto handler = [this, s = std::move(self), file = std::move(file), buff](error_code const& ec,
+                                                                           size_t bytes) mutable {
+    if (ec) {
+      cleanup(ec, -1, file);
+      return shutdown(ec);
+    }
+    buff += bytes;
+    do_read_checksum(std::move(s), std::move(file), buff);
+  };
+  async_read_some(buff, std::move(handler));
+}
+
+void Connection::do_read_checksum(shared_ptr<Connection> self, std::filesystem::path file) {
+  return do_read_checksum(
+      std::move(self),
+      std::move(file),
+      boost::asio::mutable_buffer(read_checksum_.data(), read_checksum_.size()));
+}
+
 void Connection::do_read_file(shared_ptr<Connection> self,
                               int                    fd,
                               uint64_t               length,
                               std::filesystem::path  file) {
   if (length == 0) {
     ::close(fd);
-    enqueue<std::filesystem::path>(std::move(file), read_file_q_);
-    return do_read_header();
+    return do_read_checksum(std::move(self), std::move(file));
   }
 
   auto handler = [this, s = std::move(self), fd, length, file](error_code const& ec,
@@ -286,16 +326,17 @@ void Connection::do_read_file(shared_ptr<Connection> self,
       cleanup(ec, fd, file);
       return shutdown(ec);
     }
+    update(&read_checksum_ctx_, do_read_file_buff_->data(), bytes);
 
-    if (auto r = fwrite(fd, write_file_buff_->data(), bytes); !r) {
+    if (auto r = fwrite(fd, do_read_file_buff_->data(), bytes); !r) {
       cleanup(r.error(), fd, std::move(file));
       return shutdown(r.error());
     } else
       return do_read_file(std::move(s), fd, length - bytes, std::move(file));
   };
 
-  async_read_some(boost::asio::mutable_buffer(write_file_buff_->data(),
-                                              std::min<size_t>(length, write_file_buff_->size())),
+  async_read_some(boost::asio::mutable_buffer(do_read_file_buff_->data(),
+                                              std::min<size_t>(length, do_read_file_buff_->size())),
                   std::move(handler));
 }
 
@@ -497,8 +538,9 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
     } break;
 
     case WriteToken::kFile: {
-      if (!read_file_buff_)
-        read_file_buff_ = make_unique<std::array<char, kPageSize>>();
+      if (!do_write_file_buff_)
+        do_write_file_buff_ = make_unique<std::array<char, kPageSize>>();
+      init(&write_checksum_ctx_);
 
       auto ec   = std::error_code{};
       auto file = std::move(write_file_q_.queue.front());
@@ -566,24 +608,46 @@ void Connection::do_write_data(shared_ptr<Connection>                       self
   async_write_some(buffs, std::move(handler));
 }
 
+void Connection::do_write_checksum(shared_ptr<Connection> self, asio::const_buffer buff) {
+  if (buff.size() == 0)
+    return dequeue(ok());
+
+  auto handler = [this, s = std::move(self), buff](error_code const& ec, size_t length) mutable {
+    if (ec) {
+      dequeue(ec);
+      return shutdown(ec);
+    }
+    buff += length;
+    do_write_checksum(std::move(s), buff);
+  };
+  async_write_some(buff, std::move(handler));
+}
+
+void Connection::do_write_checksum(shared_ptr<Connection> self) {
+  do_write_checksum(std::move(self),
+                    asio::const_buffer(write_checksum_.data(), write_checksum_.size()));
+}
+
 void Connection::do_write_file(shared_ptr<Connection>    self,
                                int                       fd,
                                size_t                    size,
                                boost::asio::const_buffer buff) {
   if (size == 0) {
     ::close(fd);
-    return dequeue(ok());
+    write_checksum_ = finalize(&write_checksum_ctx_);
+    return do_write_checksum(std::move(self));
   }
 
   if (buff.size() == 0) {
-    auto bytes = std::min(size, read_file_buff_->size());
+    auto bytes = std::min(size, do_write_file_buff_->size());
 
-    if (auto r = fread(fd, read_file_buff_->data(), bytes); !r) {
+    if (auto r = fread(fd, do_write_file_buff_->data(), bytes); !r) {
       ::close(fd);
       dequeue(r.error());
       return shutdown(r.error());
     }
-    buff = boost::asio::const_buffer(read_file_buff_->data(), bytes);
+    update(&write_checksum_ctx_, do_write_file_buff_->data(), bytes);
+    buff = boost::asio::const_buffer(do_write_file_buff_->data(), bytes);
   }
 
   auto handler = [this, s = std::move(self), fd, size, buff](error_code const& ec,

@@ -25,6 +25,10 @@ struct FollowerConnectionApi {
                                                           RaftTerm        term,
                                                           InstallSnapshot request) = 0;
 
+  virtual std::optional<RaftResponse> handle_peer_request(RaftNodeId      node,
+                                                          RaftTerm        term,
+                                                          SnapshotRequest request) = 0;
+
   virtual Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const = 0;
 
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;

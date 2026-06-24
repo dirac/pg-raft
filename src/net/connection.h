@@ -2,6 +2,7 @@
 
 #include "src/net/data.h"
 #include "src/net/host_address.h"
+#include "src/net/sha256.h"
 
 using tcp_socket  = boost::asio::ip::tcp::socket;
 using ssl_socket  = boost::asio::ssl::stream<boost::asio::ip::tcp::socket>;
@@ -147,6 +148,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
                      int                       fd,
                      size_t                    size,
                      boost::asio::const_buffer buff);
+  void do_write_checksum(shared_ptr<Connection> self);
+  void do_write_checksum(shared_ptr<Connection> self, asio::const_buffer buff);
 
   uint32_t recv_packet_ = 0;
   uint32_t sent_packet_ = 0;
@@ -167,6 +170,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
                     int                    fd,
                     uint64_t               length,
                     std::filesystem::path  file);
+  void do_read_checksum(shared_ptr<Connection> self, std::filesystem::path file);
+  void do_read_checksum(shared_ptr<Connection>      self,
+                        std::filesystem::path       file,
+                        boost::asio::mutable_buffer buff);
 
   void shutdown(shared_ptr<Connection> self);
   void async_shutdown(std::function<void()> invoke_on_shutdown);
@@ -286,8 +293,14 @@ class Connection : public std::enable_shared_from_this<Connection> {
   boost::asio::io_context::strand strand_;
 
   // File transfers
-  unique_ptr<std::array<char, kPageSize>> read_file_buff_;
-  unique_ptr<std::array<char, kPageSize>> write_file_buff_;
+  unique_ptr<std::array<char, kPageSize>> do_read_file_buff_;
+  unique_ptr<std::array<char, kPageSize>> do_write_file_buff_;
+
+  ChecksumContext write_checksum_ctx_;
+  Checksum        write_checksum_;
+
+  ChecksumContext read_checksum_ctx_;
+  Checksum        read_checksum_;
 
   // The last epoch that we read a character.
   std::atomic<unsigned> last_epoch_;

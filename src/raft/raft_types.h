@@ -138,9 +138,13 @@ struct SnapshotRequest {
 struct SnapshotResponse {
   bool success;
 
+  /** files that follow this response. */
+  vector<string> files;
+
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & success;
+    ar & files;
   }
 };
 
@@ -194,7 +198,12 @@ struct RaftRequest {
   /* Node that generated the request. */
   RaftNodeId node_id;
 
-  std::variant<std::monostate, RequestVote, AppendEntries, InstallSnapshot, RequestElection>
+  std::variant<std::monostate,
+               RequestVote,
+               AppendEntries,
+               InstallSnapshot,
+               RequestElection,
+               SnapshotRequest>
       request;
 
   /* Copied from request to associated response. */
@@ -220,12 +229,30 @@ struct RaftResponse {
   /** The node that generated the response. */
   RaftNodeId node_id;
 
+  /** Leader node */
+  std::optional<RaftNodeId> leader;
+
+  /** The following two are extracted using the statement:
+      SELECT
+        CASE
+            WHEN pg_is_in_recovery() THEN NULL
+            ELSE pg_current_wal_flush_lsn()::numeric
+        END AS primary_flushed_lsn,
+        CASE
+            WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::numeric
+            ELSE NULL
+        END AS standby_applied_lsn;
+  */
+  std::optional<uint64_t> primary_flushed_lsn;
+  std::optional<uint64_t> standby_applied_lsn;
+
   /** the response. */
   std::variant<std::monostate,
                RequestVoteResponse,
                AppendEntriesResponse,
                InstallSnapshotResponse,
-               RequestElectionResponse>
+               RequestElectionResponse,
+               SnapshotResponse>
       response;
 
   /* Copied from request to associated response. */
@@ -235,6 +262,9 @@ struct RaftResponse {
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & term;
     ar & node_id;
+    ar & leader;
+    ar & primary_flushed_lsn;
+    ar & standby_applied_lsn;
     ar & response;
     ar & info;
   }
@@ -350,6 +380,27 @@ struct std::formatter<InstallSnapshotResponse> : public parse_fn {
   }
 };
 inline std::ostream& operator<<(std::ostream& out, InstallSnapshotResponse const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
+struct std::formatter<SnapshotRequest> : public parse_fn {
+  auto format(SnapshotRequest const& s, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "SnapshotRequest {{ log_idx={} }}", s.applied_idx);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, SnapshotRequest const& s) {
+  return out << std::format("{}", s);
+}
+
+template <>
+struct std::formatter<SnapshotResponse> : public parse_fn {
+  auto format(SnapshotResponse const& s, std::format_context& ctx) const {
+    return std::format_to(
+        ctx.out(), "SnapshotResponse {{ success={} files={} }}", s.success, s.files);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, SnapshotResponse const& s) {
   return out << std::format("{}", s);
 }
 
