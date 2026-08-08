@@ -34,11 +34,6 @@ struct PeerConnectionApi {
                                RaftTerm                       current_term,
                                RequestElectionResponse        response) = 0;
 
-  virtual void handle_response(shared_ptr<RaftPeerConnection> conn,
-                               RaftTerm                       request_term,
-                               RaftTerm                       current_term,
-                               SnapshotResponse               response) = 0;
-
   virtual std::shared_lock<std::shared_mutex> usage_lock() const = 0;
 
   virtual Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const = 0;

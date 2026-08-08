@@ -2,6 +2,17 @@
 
 #include "src/base/base.h"
 
+struct TimelineOp {
+  uint64_t timeline;
+  string   content;
+
+  template <typename Archive>
+  void serialize(Archive& ar, unsigned int /* version */) {
+    ar & timeline;
+    ar & content;
+  }
+};
+
 struct OpenOp {
   template <typename Archive>
   void serialize(Archive& /*ar*/, unsigned int /* version */) {}
@@ -42,7 +53,7 @@ struct WalCommand {
   std::optional<LogSeqNumber> segment;
 
   /// Command.
-  std::variant<std::monostate, FlushOp, OpenOp, WriteOp, CloseOp> command;
+  std::variant<std::monostate, FlushOp, OpenOp, WriteOp, CloseOp, TimelineOp> command;
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
@@ -91,6 +102,16 @@ struct std::formatter<FlushOp> : public parse_fn {
   }
 };
 inline std::ostream& operator<<(std::ostream& out, FlushOp const& r) {
+  return out << std::format("{}", r);
+}
+
+template <>
+struct std::formatter<TimelineOp> : public parse_fn {
+  auto format(TimelineOp const& t, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "timeline_op {}", t.timeline);
+  }
+};
+inline std::ostream& operator<<(std::ostream& out, TimelineOp const& r) {
   return out << std::format("{}", r);
 }
 

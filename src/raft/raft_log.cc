@@ -201,7 +201,7 @@ Result<void> RaftLog::open_logs_db(unsigned factor) {
     if (auto rc = cursor_get(cursor, &key, &val, MDB_FIRST); rc != 0) {
       if (rc == MDB_NOTFOUND) {
         auto key_str = to_mem(RaftIndex{0}, RaftTerm{0});
-        auto val_str = to_encoded_string(Entry{.term = RaftTerm{0}, .time = 0, .cmd = {}});
+        auto val_str = to_encoded_string(Entry{.term = RaftTerm{0}, .cmd = {}});
 
         key.mv_size = key_str.size();
         key.mv_data = key_str.data();

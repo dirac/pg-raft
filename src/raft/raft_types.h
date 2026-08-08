@@ -40,14 +40,12 @@ struct RequestVoteResponse {
 };
 
 struct Entry {
-  std::time_t time;  // The timestamp when the entry was created.
-  RaftTerm    term;  // The term this entry was created.
+  RaftTerm term;  // The term this entry was created.
 
-  std::variant<std::monostate, WalCommand> cmd;
+  WalCommand cmd;
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & time;
     ar & term;
     ar & cmd;
   }
@@ -105,10 +103,14 @@ struct InstallSnapshot {
   /// About a 1M entries max.
   vector<Entry> entries;
 
+  /// The applied idx for various nodes.
+  map<RaftNodeId, RaftIndex> applied_indexes;
+
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & log_idx;
     ar & entries;
+    ar & applied_indexes;
   }
 };
 
@@ -123,28 +125,6 @@ struct InstallSnapshotResponse {
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & idx;
     ar & success;
-  }
-};
-
-struct SnapshotRequest {
-  RaftIndex applied_idx;
-
-  template <class Archive>
-  void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & applied_idx;
-  }
-};
-
-struct SnapshotResponse {
-  bool success;
-
-  /** files that follow this response. */
-  vector<string> files;
-
-  template <class Archive>
-  void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & success;
-    ar & files;
   }
 };
 
@@ -202,8 +182,7 @@ struct RaftRequest {
                RequestVote,
                AppendEntries,
                InstallSnapshot,
-               RequestElection,
-               SnapshotRequest>
+               RequestElection>
       request;
 
   /* Copied from request to associated response. */
@@ -222,15 +201,9 @@ struct RaftRequest {
   }
 };
 
-struct RaftResponse {
-  /** currentTerm, to force other leader/candidate to step down */
-  RaftTerm term;
-
-  /** The node that generated the response. */
-  RaftNodeId node_id;
-
-  /** Leader node */
-  std::optional<RaftNodeId> leader;
+struct Status {
+  /* The applied index, which is usually less than the commit index for followers. */
+  RaftIndex applied_idx;
 
   /** The following two are extracted using the statement:
       SELECT
@@ -246,25 +219,40 @@ struct RaftResponse {
   std::optional<uint64_t> primary_flushed_lsn;
   std::optional<uint64_t> standby_applied_lsn;
 
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & applied_idx;
+    ar & primary_flushed_lsn;
+    ar & standby_applied_lsn;
+  }
+};
+
+struct RaftResponse {
+  /** currentTerm, to force other leader/candidate to step down */
+  RaftTerm term;
+
+  /** The node that generated the response. */
+  RaftNodeId node_id;
+
+  /** The wal status, the value can be stale by a few seconds. */
+  Status status;
+
   /** the response. */
   std::variant<std::monostate,
                RequestVoteResponse,
                AppendEntriesResponse,
                InstallSnapshotResponse,
-               RequestElectionResponse,
-               SnapshotResponse>
+               RequestElectionResponse>
       response;
 
-  /* Copied from request to associated response. */
+  /* Copied from the associated request. */
   RequestResponseInfo info;
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
     ar & term;
     ar & node_id;
-    ar & leader;
-    ar & primary_flushed_lsn;
-    ar & standby_applied_lsn;
+    ar & status;
     ar & response;
     ar & info;
   }
@@ -319,7 +307,7 @@ inline std::ostream& operator<<(std::ostream& out, RequestVoteResponse const& r)
 template <>
 struct std::formatter<Entry> : public parse_fn {
   auto format(Entry const& e, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "E{{ time={} term={} cmd={} }}", e.time, e.term, e.cmd);
+    return std::format_to(ctx.out(), "E{{ term={} cmd={} }}", e.term, e.cmd);
   }
 };
 inline std::ostream& operator<<(std::ostream& out, Entry const& e) {
@@ -380,27 +368,6 @@ struct std::formatter<InstallSnapshotResponse> : public parse_fn {
   }
 };
 inline std::ostream& operator<<(std::ostream& out, InstallSnapshotResponse const& s) {
-  return out << std::format("{}", s);
-}
-
-template <>
-struct std::formatter<SnapshotRequest> : public parse_fn {
-  auto format(SnapshotRequest const& s, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "SnapshotRequest {{ log_idx={} }}", s.applied_idx);
-  }
-};
-inline std::ostream& operator<<(std::ostream& out, SnapshotRequest const& s) {
-  return out << std::format("{}", s);
-}
-
-template <>
-struct std::formatter<SnapshotResponse> : public parse_fn {
-  auto format(SnapshotResponse const& s, std::format_context& ctx) const {
-    return std::format_to(
-        ctx.out(), "SnapshotResponse {{ success={} files={} }}", s.success, s.files);
-  }
-};
-inline std::ostream& operator<<(std::ostream& out, SnapshotResponse const& s) {
   return out << std::format("{}", s);
 }
 

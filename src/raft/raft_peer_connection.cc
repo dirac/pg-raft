@@ -162,7 +162,7 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
 inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& entries) {
   map<LogSeqNumber, std::tuple<off_t, off_t>> regions;
   for (auto const& e : entries) {
-    if (auto const* wal_cmd = std::get_if<WalCommand>(&e.cmd)) {
+    if (auto const* wal_cmd = &e.cmd) {
       if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command)) {
         auto pos = regions.find(wal_cmd->segment.value());
         if (pos == regions.end())
@@ -193,7 +193,7 @@ bool RaftPeerConnection::trim(vector<Entry>& entries) {
   set<LogSeqNumber> segments;
 
   for (auto iter = std::begin(entries); iter != std::end(entries); ++iter) {
-    if (auto const* wal_cmd = std::get_if<WalCommand>(&(iter->cmd))) {
+    if (auto const* wal_cmd = &(iter->cmd)) {
       if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command) &&
           segments.insert(wal_cmd->segment.value()).second) {
         if (segments.size() == 3) {

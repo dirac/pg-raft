@@ -100,18 +100,8 @@ void RaftServer::periodic() {
     if ((is_leader() && !resigning()) || (is_candidate() && has_votes())) {
       if (!tick())
         send_append_entries(/*check_sync_flag*/ false);
-
-      if (auto cmds = state_.expire_sessions(); !cmds.empty())
-        exec(
-            ZkRequest{
-                .session_id = 0,
-                .request_no = -1,
-                .commands   = std::move(cmds),
-            },
-            [](ZkResponse) {});
-
     } else if (is_follower()) {
-      auto idx = apply_entries();
+      apply_entries();
       if (compaction_idx() + options_.compaction_lag < idx) {
         auto lk = try_unique_lock();
         if (lk && (compaction_idx() + options_.compaction_lag < idx) && is_follower()) {
@@ -841,4 +831,3 @@ void RaftServer::close() {
   snapshot_.reset();
   log_.close();
 }
-

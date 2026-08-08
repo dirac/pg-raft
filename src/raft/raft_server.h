@@ -70,25 +70,34 @@ class RaftServer : public ClientConnectionApi,
   /// Client request.
   void exec(ZkRequest request, std::function<void(ZkResponse)> handler) override;
 
-  std::optional<RaftResponse> handle_peer_request(RaftNodeId node_id,
-                                                  RaftTerm   term,
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             node_id,
+                                                  RaftTerm               term,
                                                   std::monostate) override;
 
-  std::optional<RaftResponse> handle_peer_request(RaftNodeId  candidate,
-                                                  RaftTerm    term,
-                                                  RequestVote request) override;
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             candidate,
+                                                  RaftTerm               term,
+                                                  RequestVote            request) override;
 
-  std::optional<RaftResponse> handle_peer_request(RaftNodeId      leader,
-                                                  RaftTerm        term,
-                                                  InstallSnapshot request) override;
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             leader,
+                                                  RaftTerm               term,
+                                                  AppendEntries          request) override;
 
-  std::optional<RaftResponse> handle_peer_request(RaftNodeId    leader,
-                                                  RaftTerm      term,
-                                                  AppendEntries request) override;
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             candidate,
+                                                  RaftTerm               term,
+                                                  RequestElection        request) override;
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             leader,
+                                                  RaftTerm               term,
+                                                  InstallSnapshot        request) override;
 
-  std::optional<RaftResponse> handle_peer_request(RaftNodeId      candidate,
-                                                  RaftTerm        term,
-                                                  RequestElection request) override;
+  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
+                                                  RaftNodeId             leader,
+                                                  RaftTerm               term,
+                                                  SnapshotRequest        request) override;
 
   void handle_response(shared_ptr<RaftPeerConnection> conn,
                        RaftTerm                       req_term,
