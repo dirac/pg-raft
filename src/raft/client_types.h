@@ -1,12 +1,25 @@
 #pragma once
 
-struct StatusRequest {};
+struct StatusRequest {
+  template <class Archive>
+  void serialize(Archive& /* ar */, unsigned int const /*version*/) {}
+};
 
 struct StatusResponse {
+  bool leader;
+
   RaftIndex applied_idx;
 
   std::optional<uint64_t> primary_flushed_lsn;
   std::optional<uint64_t> standby_applied_lsn;
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & leader;
+    ar & applied_idx;
+    ar & primary_flushed_lsn;
+    ar & standby_applied_lsn;
+  }
 };
 
 struct SnapshotRequest {
@@ -36,4 +49,3 @@ struct SnapshotResponse {
 };
 
 using ClientRequest = std::variant<SnapshotRequest, StatusRequest>;
-

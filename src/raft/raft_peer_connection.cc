@@ -118,7 +118,7 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
   }
   next_idx_ = next_idx_ + append_entries.entries.size();
 
-  auto data = mem_blocks(append_entries.entries);
+  auto data = mem_blocks(append_entries.entries, /* full_wal_segment=*/false);
   return send_request(std::move(lk),
                       RaftRequest{
                           .term    = leadership_term,
@@ -144,7 +144,7 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
     std::reverse(entries.begin(), entries.end());
     idx -= entries.size();
 
-    auto data = mem_blocks(entries);
+    auto data = mem_blocks(entries, true);
     send_request(std::move(lk),
                  RaftRequest{
                      .term = leadership_term,
@@ -159,16 +159,22 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
   }
 }
 
-inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& entries) {
+inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& entries,
+                                                           bool                 full_wal_segment) {
   map<LogSeqNumber, std::tuple<off_t, off_t>> regions;
   for (auto const& e : entries) {
     if (auto const* wal_cmd = &e.cmd) {
       if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command)) {
+        WriteOp op = std::get<WriteOp>(wal_cmd->command);
+
         auto pos = regions.find(wal_cmd->segment.value());
         if (pos == regions.end())
-          pos = regions.emplace(wal_cmd->segment.value(), std::make_tuple(0, 0)).first;
+          pos = regions
+                    .emplace(wal_cmd->segment.value(),
+                             full_wal_segment ? std::make_tuple(0, kWalSegmentSize)
+                                              : std::make_tuple(op.offset, op.offset + op.size))
+                    .first;
 
-        WriteOp op  = std::get<WriteOp>(wal_cmd->command);
         auto [s, e] = pos->second;
         s           = std::min(op.offset, s);
         e           = std::max(op.offset + static_cast<off_t>(op.size), e);
@@ -176,6 +182,7 @@ inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& 
       }
     }
   }
+  assert(regions.size() <= 2);
 
   inplace_vector<MemBlock, 2> result;
   for (auto [lsn, reg] : regions)

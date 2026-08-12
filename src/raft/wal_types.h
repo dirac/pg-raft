@@ -47,6 +47,9 @@ struct CloseOp {
 
 struct WalCommand {
   /// The data before flushed_lsn is ready to be consumed.
+  /// This is the current flushed lsn at the primary. Given this is computed by polling, the value
+  /// is stale but safe. When this entry is committed at the follower, the wal sender is advanced to
+  /// the flush_lsn.
   LogSeqNumber flushed_lsn;
 
   /// The op is w.r.t the segment.

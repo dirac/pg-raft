@@ -18,46 +18,8 @@ lib raft_server
     deps
   ;
 
-lib zookeeper_client
-  : raft_server_connection.cpp
-    raft_ensemble_connection.cpp
+lib raft_client
+  : raft_server_connection.cc
     deps
   ;
 
-lib zk_test
-  : zk_test_service.cpp
-    raft_server
-  ;
-
-unit-test raft_ensemble_test
-  : raft_ensemble_test.cpp
-    zk_test
-    zookeeper_client
-    raft_server
-    deps
-    ../../base//testing
-  ;
-
-unit-test zk_types_test
-  : zk_types_test.cpp
-    ../../base//testing
-    deps
-  ;
-
-unit-test zk_state_test
-  : zk_state_test.cpp
-    zookeeper_server
-    ../../base//testing
-  ;
-
-unit-test raft_log_test
-  : raft_log_test.cc
-    raft_server
-    ../base//testing
-  ;
-
-unit-test raft_log_snapshot_test
-  : raft_log_snapshot_test.cpp
-    zookeeper_server
-    ../../base//testing
-  ;

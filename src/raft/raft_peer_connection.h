@@ -220,7 +220,8 @@ class RaftPeerConnection : public Connection {
   static bool trim(vector<Entry>& entries);
 
   // The region spaned by the write op entries.
-  static inplace_vector<MemBlock, 2> mem_blocks(vector<Entry> const& entries);
+  static inplace_vector<MemBlock, 2> mem_blocks(vector<Entry> const& entries,
+                                                bool                 full_wal_segment);
 
  private:
   RaftNodeId const self_id_;
