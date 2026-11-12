@@ -1,114 +1,119 @@
 #include "src/net/data.h"
 
 namespace {
-std::array<char, 4> const end_marker{'#', 'E', 'N', 'D'};
+
+/// Read-only streambuf over the pages of a Data.
+class Istreambuf : public std::basic_streambuf<char> {
+ public:
+  using chunk_t = Data::chunk_t;
+
+  // total_size = logical byte count; the last chunk may be partially used.
+  Istreambuf(std::vector<chunk_t*> chunks, std::size_t total_size)
+      : chunks_(std::move(chunks)), total_size_(total_size) {
+    if (!chunks_.empty() && total_size_ > 0) {
+      char* base = chunks_[0]->data();
+      setg(base, base, base + chunk_len(0));
+    } else {
+      setg(nullptr, nullptr, nullptr);
+    }
+  }
+
+ protected:
+  int_type underflow() override {
+    if (gptr() < egptr())
+      return traits_type::to_int_type(*gptr());
+
+    std::size_t next = cur_chunk_ + 1;
+    if (next >= chunks_.size() || next * kPageSize >= total_size_)
+      return traits_type::eof();
+
+    cur_chunk_ = next;
+    char* base = chunks_[cur_chunk_]->data();
+    setg(base, base, base + chunk_len(cur_chunk_));
+    return traits_type::to_int_type(*gptr());
+  }
+
+  std::streamsize xsgetn(char* s, std::streamsize n) override {
+    std::streamsize total = 0;
+    while (total < n) {
+      if (gptr() == egptr() && underflow() == traits_type::eof())
+        break;
+      std::streamsize avail = egptr() - gptr();
+      std::streamsize k     = std::min(avail, n - total);
+      std::memcpy(s + total, gptr(), static_cast<std::size_t>(k));
+      gbump(static_cast<int>(k));
+      total += k;
+    }
+    return total;
+  }
+
+  std::streamsize showmanyc() override {
+    auto consumed = (cur_chunk_ * kPageSize) + static_cast<std::size_t>(gptr() - eback());
+    return static_cast<std::streamsize>(total_size_ - consumed);
+  }
+
+ private:
+  std::size_t chunk_len(std::size_t idx) const {
+    std::size_t start = idx * kPageSize;
+    return std::min<size_t>(kPageSize, total_size_ - start);
+  }
+
+  std::vector<chunk_t*> chunks_;
+  std::size_t           total_size_;
+  std::size_t           cur_chunk_ = 0;
+};
+
 }  // namespace
 
 Data::Data(uint32_t capacity) : capacity_(capacity) {
-  while (capacity) {
+  while (capacity != 0) {
     add_block();
     capacity -= std::min(u4(front()->size()), capacity);
   }
 }
 
-Data::Data(char format) : capacity_(1) {
-  add_block();
-  StreamBase::setp(back()->begin(), back()->end());
-  StreamBase::pbump(1);
-
-  *front()->begin() = format;
+Data::Data(char format) {
+  overflow(format);
 }
 
-char Data::format() {
-  assert(consumed_ == 0);
-
-  char f = *front()->begin();
-  ++consumed_;
-
-  return f;
+std::unique_ptr<std::basic_streambuf<char>> Data::istream() const {
+  return std::make_unique<Istreambuf>(*this, capacity_);
 }
 
-/// Called from the completion handler for the async_write_some.
-bool Data::consumed(size_t& bytes) {
-  size_t length = std::min(bytes, capacity_ - consumed_);
+std::vector<::boost::asio::const_buffer> Data::const_buffer() const {
+  auto result = std::vector<::boost::asio::const_buffer>{};
+  result.reserve(BufferBase::size() + 3U);
 
-  bytes -= length;
-  consumed_ += length;
-
-  // Delete a block?
-  if (capacity_ && consumed_ >= std::min<size_t>(kPageSize, capacity_)) {
-    del_block(begin());
-    consumed_ -= std::min<size_t>(kPageSize, capacity_);
-    capacity_ -= std::min<size_t>(kPageSize, capacity_);
-  }
-  return capacity_ == consumed_;
-}
-
-/// Get the buffers to async_write_some
-boost::container::static_vector<::boost::asio::const_buffer, 2> Data::const_buffer() const {
-  auto result = boost::container::static_vector<::boost::asio::const_buffer, 2>{};
-
-  size_t consumed = consumed_;
-  size_t avail    = capacity_ - consumed_;
-
+  size_t avail = capacity_;
   for (auto const& block : *this) {
-    // Skip the data is already consumed
-    if (consumed >= block->size())
-      consumed -= block->size();
-    else {
-      auto size = std::min(block->size() - consumed, avail);
-      result.emplace_back(block->data() + consumed, size);
-
-      consumed = 0;
-      avail -= size;
-    }
-    if (result.size() == result.capacity())
-      return result;
+    if (avail == 0)
+      break;
+    auto size = std::min(block->size(), avail);
+    result.emplace_back(block->data(), size);
+    avail -= size;
   }
   return result;
 }
 
-/// Called from the completion handler for the async_read_some.
-bool Data::filled(size_t length) {
-  filled_ += length;
-  assert(filled_ <= capacity_);
+std::vector<::boost::asio::mutable_buffer> Data::mutable_buffer() {
+  auto result = std::vector<::boost::asio::mutable_buffer>{};
+  result.reserve(BufferBase::size() + 1U);
 
-  return filled_ >= capacity_;
-}
-
-/// Get the buffers to async_read_some
-boost::container::static_vector<::boost::asio::mutable_buffer, 2> Data::mutable_buffer() {
-  auto result = boost::container::static_vector<::boost::asio::mutable_buffer, 2>{};
-
-  size_t filled = filled_;
-  size_t avail  = capacity_ - filled_;
-
+  size_t avail = capacity_;
   for (auto& block : *this) {
-    if (filled >= block->size()) {
-      filled -= block->size();
-    } else {
-      auto size = std::min(block->size() - filled, avail);
-      result.emplace_back(block->data() + filled, size);
-
-      filled = 0;
-      avail -= size;
-
-      if (result.size() == result.capacity())
-        return result;
-    }
+    if (avail == 0)
+      break;
+    auto size = std::min(block->size(), avail);
+    result.emplace_back(block->data(), size);
+    avail -= size;
   }
   return result;
 }
 
 void Data::pack() {
   assert(front()->at(0) == 't' || front()->at(0) == 'b');
-
-  for (auto ch : end_marker)
-    sputc(ch);
-
-  capacity_ = filled_ =
-      (size() - 1U) * kPageSize + (reinterpret_cast<std::uintptr_t>(StreamBase::pptr()) -
-                                   reinterpret_cast<std::uintptr_t>(StreamBase::pbase()));
+  capacity_ = ((size() - 1U) * kPageSize) + (reinterpret_cast<std::uintptr_t>(StreamBase::pptr()) -
+                                             reinterpret_cast<std::uintptr_t>(StreamBase::pbase()));
 }
 
 Data::int_type Data::overflow(Data::int_type ch) {
@@ -118,43 +123,7 @@ Data::int_type Data::overflow(Data::int_type ch) {
   add_block();
   StreamBase::setp(back()->begin(), back()->end());
 
-  auto c = traits_type::to_char_type(ch);
-  StreamBase::xsputn(&c, 1);
+  *pptr() = traits_type::to_char_type(ch);
+  pbump(1);
   return ch;
-}
-
-Data::int_type Data::underflow() {
-  if (consumed_ >= capacity_)
-    return traits_type::eof();
-
-  while (consumed_ >= front()->size()) {
-    consumed_ -= front()->size();
-    capacity_ -= front()->size();
-    del_block(begin());
-  }
-
-  auto* gbeg  = front()->data() + consumed_;
-  auto* gcurr = gbeg;
-  auto* gend  = gbeg + std::min(front()->size() - consumed_, capacity_ - consumed_);
-
-  StreamBase::setg(gbeg, gcurr, gend);
-  consumed_ += reinterpret_cast<std::uintptr_t>(gend) - reinterpret_cast<std::uintptr_t>(gbeg);
-
-  return static_cast<int_type>(*gcurr);
-}
-
-void Data::consume_all(Bytes& bytes) {
-  boost::container::static_vector<char, end_marker.size()> end;
-  while (end.size() != end_marker.size() ||
-         memcmp(end.data(), end_marker.data(), end.size()) != 0) {
-    if (end.size() == end_marker.size())
-      end.erase(end.begin());
-    end.emplace_back(static_cast<char>(sbumpc()));
-  }
-
-  do {
-    auto n = reinterpret_cast<std::uintptr_t>(egptr()) - reinterpret_cast<std::uintptr_t>(gptr());
-    bytes.insert(bytes.end(), gptr(), gptr() + n);
-    gbump(i4(n));
-  } while (underflow() != traits_type::eof());
 }

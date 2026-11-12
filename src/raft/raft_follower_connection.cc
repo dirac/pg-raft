@@ -6,12 +6,12 @@ void RaftFollowerConnection::start() {
 }
 
 void RaftFollowerConnection::read_request() {
-  read_data([this, s = self()](Result<Data> msg) {
+  read_data_and_buff([this, s = self()](Result<std::tuple<Data, Bytes>> msg) {
     if (!msg)
       return shutdown(msg.error());
 
-    Bytes bytes;
-    if (auto r = from_data<RaftRequest>(std::move(msg.value()), bytes); r)
+    auto& [data, bytes] = msg.value();
+    if (auto r = from_data<RaftRequest>(data); r)
       received(std::move(r.value()), std::move(bytes));
     else
       return shutdown(r.error());

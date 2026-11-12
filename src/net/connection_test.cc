@@ -191,16 +191,14 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::tim
 
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-      client->self()->read_data([&t1, &c, &b1](Result<Data> r) {
-        Bytes bytes;
-        BOOST_TEST((t1 == from_data<T>(std::move(r.value()), bytes).value()));
-        BOOST_TEST(bytes == b1);
+      client->self()->read_data_and_buff([&t1, &c, &b1](Result<std::tuple<Data, Bytes>> r) {
+        BOOST_TEST((t1 == from_data<T>(std::get<Data>(r.value())).value()));
+        BOOST_TEST(b1 == std::get<Bytes>(r.value()));
         c.fetch_add(1);
       });
-      client->self()->read_data([&t2, &c, &b2](Result<Data> r) {
-        Bytes bytes;
-        BOOST_TEST((t2 == from_data<T>(std::move(r.value()), bytes).value()));
-        BOOST_TEST(bytes == b2);
+      client->self()->read_data_and_buff([&t2, &c, &b2](Result<std::tuple<Data, Bytes>> r) {
+        BOOST_TEST((t2 == from_data<T>(std::get<Data>(r.value())).value()));
+        BOOST_TEST(b2 == std::get<Bytes>(r.value()));
         c.fetch_add(1);
       });
     }
@@ -477,4 +475,98 @@ BOOST_FIXTURE_TEST_CASE(files, TestSetup, * boost::unit_test::timeout(60)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
   conn->shutdown();
+}
+
+// pg-raft: a message can carry two attached buffers (raft sends WAL bytes from two segments);
+// the peer receives them as one buffer.
+BOOST_FIXTURE_TEST_CASE(messages_with_two_buffers, TestSetup, *boost::unit_test::timeout(60)) {
+  auto conn = connect();
+
+  BOOST_REQUIRE(conn);
+  BOOST_REQUIRE(client);
+
+  auto t = T::instance(kPageSize);
+
+  auto b1 = Bytes{};
+  while (b1.size() < (2 * kPageSize + 5))
+    b1.emplace_back(static_cast<uint8_t>(rand()));
+
+  auto b2 = Bytes{};
+  while (b2.size() < 7)
+    b2.emplace_back(static_cast<uint8_t>(rand()));
+
+  auto expected = b1;
+  expected.insert(expected.end(), b2.begin(), b2.end());
+
+  auto c = std::atomic<unsigned>{0};
+
+  conn->write_data(to_data(t),
+                   {boost::asio::const_buffer(b1.data(), b1.size()),
+                    boost::asio::const_buffer(b2.data(), b2.size())},
+                   [&c](Result<void> r) {
+                     BOOST_TEST(!r.has_error());
+                     c.fetch_add(1);
+                   });
+
+  client->read_data_and_buff([&t, &c, &expected](Result<std::tuple<Data, Bytes>> r) {
+    BOOST_REQUIRE(r.has_value());
+    BOOST_TEST((t == from_data<T>(std::get<Data>(r.value())).value()));
+    BOOST_TEST(expected == std::get<Bytes>(r.value()));
+    c.fetch_add(1);
+  });
+
+  while (c != 2)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  conn->shutdown();
+}
+
+// A connection that receives nothing (its own writes, including its status requests, are delayed
+// by 5 seconds) is closed after the timeout.
+BOOST_FIXTURE_TEST_CASE(timeout, TestSetup, *boost::unit_test::timeout(60)) {
+  auto conn = connect(std::chrono::milliseconds(1000));
+
+  BOOST_REQUIRE(conn);
+  BOOST_REQUIRE(client);
+
+  auto t = T::instance(3 * kPageSize);
+  auto c = std::atomic_uint{0};
+
+  conn->self()->read_data([&c](Result<Data>) { c.fetch_add(1); });
+  client->self()->write_data(to_data(t), [&c](Result<void>) { c.fetch_add(1); });
+
+  while (c != 2)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  /// 5 seconds delay.
+  conn->self()->write_test_delay();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(4000));
+  BOOST_TEST(conn->closed());
+}
+
+BOOST_AUTO_TEST_CASE(timeout_and_times_values) {
+  BOOST_TEST(std::get<0>(timeout_and_times(std::chrono::milliseconds(0))) ==
+             std::chrono::milliseconds(0));
+  BOOST_TEST(std::get<1>(timeout_and_times(std::chrono::milliseconds(0))) == 0);
+
+  for (unsigned i = 10; i < 20 * 1000; i += 10) {
+    auto t = std::chrono::milliseconds(i);
+
+    auto [timeout, times] = timeout_and_times(t);
+
+    BOOST_TEST(timeout >= std::chrono::milliseconds(100));
+    BOOST_TEST(timeout <= std::chrono::milliseconds(1000));
+
+    if (t <= std::chrono::milliseconds(1000)) {
+      BOOST_TEST(timeout == std::chrono::milliseconds(100));
+      BOOST_TEST(times == 10U);
+    } else if (t >= std::chrono::milliseconds(10000)) {
+      BOOST_TEST(timeout == std::chrono::milliseconds(1000));
+      BOOST_TEST(times == (t.count() / timeout.count()));
+    } else {
+      BOOST_TEST(timeout == (t / 10));
+      BOOST_TEST(times == 10U);
+    }
+  }
 }

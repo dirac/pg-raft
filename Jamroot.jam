@@ -22,7 +22,7 @@ project pg_raft
       <visibility>hidden
       <address-sanitizer>norecover:<cxxflags>-DUSE_ASAN=1
       <thread-sanitizer>norecover:<cxxflags>-DUSE_TSAN=1
-      <thread-sanitizer>norecover:<cxxflags>-Wno-tsan
+      <toolset>gcc,<thread-sanitizer>norecover:<cxxflags>-Wno-tsan
     ;
 
 

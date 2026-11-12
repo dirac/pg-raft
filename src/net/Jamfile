@@ -8,7 +8,6 @@ lib net
     async_connect.cc
     connection.cc
     server.cc
-    sha256.cc
     deps
   ;
 
@@ -34,13 +33,6 @@ unit-test data_test
 unit-test connection_test
   : connection_test.cc
     libs
-    ../base//testing
-  ;
-
-unit-test sha256_test
-  : sha256_test.cc
-    sha256.cc
-    deps
     ../base//testing
   ;
 

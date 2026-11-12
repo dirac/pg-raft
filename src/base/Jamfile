@@ -15,6 +15,7 @@ lib base
     base.cc
     wal_segment.cc
     error_code.cc
+    xxhash.cc
     deps
   ;
 
@@ -36,6 +37,12 @@ alias libs
 
 unit-test semaphore_lock_test
   : semaphore_lock_test.cc
+    libs
+    testing
+  ;
+
+unit-test xxhash_test
+  : xxhash_test.cc
     libs
     testing
   ;

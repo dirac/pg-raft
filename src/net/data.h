@@ -4,13 +4,17 @@
 
 constexpr unsigned kPageSize = 4096 * 2;
 
+/// Pool-backed buffer of kPageSize pages. Objects are serialized into it with to_data() (it is the
+/// streambuf of the output archive) and deserialized with from_data(). The connection reads and
+/// writes it as scatter/gather buffers.
 struct Data : public std::basic_streambuf<char>, public vector<std::array<char, kPageSize>*> {
-  using StreamBase  = std::basic_streambuf<char>;
-  using char_type   = typename StreamBase::char_type;
-  using int_type    = typename StreamBase::int_type;
-  using traits_type = typename std::char_traits<char_type>;
+  using StreamBase = std::basic_streambuf<char>;
+  using StreamBase::char_type;
+  using StreamBase::int_type;
+  using traits_type = std::char_traits<char_type>;
 
-  using BufferBase = vector<std::array<char, kPageSize>*>;
+  using chunk_t    = std::array<char, kPageSize>;
+  using BufferBase = vector<chunk_t*>;
 
   Data(Data const&)            = delete;
   Data& operator=(Data const&) = delete;
@@ -18,59 +22,43 @@ struct Data : public std::basic_streambuf<char>, public vector<std::array<char, 
   Data(Data&&)            = default;
   Data& operator=(Data&&) = default;
 
-  /// Construct a mutable message to write to with the given capacity.
-  Data(uint32_t capacity = 0U);
+  /// Construct a buffer of the given size, to receive into.
+  explicit Data(uint32_t capacity = 0U);
 
-  ~Data() {
+  ~Data() override {
     while (!empty())
       del_block(begin());
   }
 
-  /// Called from the completion handler for the async_read_some.
-  /// Returns true if the buffers are full.
-  bool filled(size_t length);
+  /// A streambuf to read the content.
+  std::unique_ptr<std::basic_streambuf<char>> istream() const;
 
-  /// Called to get buffers for async_read_some.
-  boost::container::static_vector<::boost::asio::mutable_buffer, 2> mutable_buffer();
+  /// The buffers to receive into.
+  std::vector<::boost::asio::mutable_buffer> mutable_buffer();
 
-  /// Called from the completion handler for the async_write_some.
-  /// Returns true if the buffers have been consumed to the full.
-  bool consumed(size_t& length);
+  /// The buffers to send.
+  std::vector<::boost::asio::const_buffer> const_buffer() const;
 
-  /// Called to get buffers for async_write_some.
-  boost::container::static_vector<::boost::asio::const_buffer, 2> const_buffer() const;
-
-  // The size of the buffer.
+  /// The size of the content.
   size_t capacity() const { return capacity_; }
 
  protected:
   int_type overflow(int_type ch) final;
-  int_type underflow() final;
 
-  // Updates the filled_ and capacity_ position.
-  // flush is called after serializing the object, not it can be used to read the object back.
+  /// Called after serializing the object: sets the size of the content.
   void pack();
 
-  char format();
-
-  void consume_all(Bytes& bytes);
-
-  /// Construct a buffer to store data of the given format. Used during serialization.
-  Data(char format);
+  /// Construct a buffer to store data of the given format ('b' or 't'). Used by to_data().
+  explicit Data(char format);
 
   template <typename T>
   friend Data to_data(T const& t, bool binary);
 
-  template <typename T>
-  friend Result<T> from_data(Data msg, Bytes& bytes);
-
  private:
-  size_t filled_{0};
-  size_t consumed_{0};
-  size_t capacity_;
+  size_t capacity_{0};
 
   void add_block() {
-    emplace_back(reinterpret_cast<std::array<char, kPageSize>*>(MemoryPool<kPageSize>::malloc()));
+    emplace_back(reinterpret_cast<chunk_t*>(MemoryPool<kPageSize>::malloc()));
   }
   void del_block(auto iter) {
     MemoryPool<kPageSize>::free(*iter);
@@ -84,15 +72,11 @@ Data to_data(T const& t, bool binary) {
   auto str = std::basic_ostream{&msg};
 
   if (binary) {
-    {
-      auto oa = boost::archive::binary_oarchive{str, boost::archive::no_header};
-      oa << t;
-    }
+    auto oa = boost::archive::binary_oarchive{str, boost::archive::no_header};
+    oa << t;
   } else {
-    {
-      auto oa = boost::archive::text_oarchive{str};
-      oa << t;
-    }
+    auto oa = boost::archive::text_oarchive{str};
+    oa << t;
   }
   msg.pack();
   return msg;
@@ -103,29 +87,30 @@ Data to_data(T const& t) {
   return to_data<T>(t, /*binary=*/true);
 }
 
+/// Deserialize. A malformed message is an EBADMSG error.
 template <typename T>
-Result<T> from_data(Data msg, Bytes& bytes) {
-  // Get the format.
-  char f = msg.format();
+Result<T> from_data(Data const& msg) {
+  auto istream = msg.istream();
+  auto str     = std::basic_istream{istream.get()};
 
-  T t;
+  try {
+    T t;
+    switch (str.get()) {
+      case 'b': {
+        boost::archive::binary_iarchive ia(str, boost::archive::no_header);
+        ia >> t;
+      } break;
 
-  std::basic_istream str{&msg};
-  if (f == 'b') {
-    boost::archive::binary_iarchive ia(str, boost::archive::no_header);
-    ia >> t;
-  } else {
-    boost::archive::text_iarchive ia(str);
-    ia >> t;
+      case 't': {
+        boost::archive::text_iarchive ia(str);
+        ia >> t;
+      } break;
+
+      default:
+        return system_error_code(EBADMSG);
+    }
+    return t;
+  } catch (std::exception const&) {
+    return system_error_code(EBADMSG);
   }
-  msg.consume_all(bytes);
-  return t;
-}
-
-template <typename T>
-Result<T> from_data(Data msg) {
-  Bytes bytes;
-  auto  t = from_data<T>(std::move(msg), bytes);
-  assert(bytes.empty());
-  return t;
 }

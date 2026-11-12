@@ -2,17 +2,32 @@
 
 #include "src/net/data.h"
 #include "src/net/host_address.h"
-#include "src/net/sha256.h"
+#include "src/net/socket.h"
 
-using tcp_socket  = boost::asio::ip::tcp::socket;
-using ssl_socket  = boost::asio::ssl::stream<boost::asio::ip::tcp::socket>;
-using socket_type = std::variant<tcp_socket, ssl_socket>;
-
+// Ported from sparrowdb lib/net/connection.hpp. Differences: no added header words (the
+// kHeaderSize template), no roles, loggers or metrics, and a message can carry up to two attached
+// buffers (raft sends WAL bytes from two segments).
+//
+// Every frame starts with six little-endian 32-bit words:
+//
+//   w0  0xDEADBEEF
+//   w1  frame counter (1, 2, 3, ... per direction)
+//   w2  top two bits: 0x = data, 10 = file, 11 = status
+//
+//   data:    w2 = data size (< 2^31)   w3 = attached buffer size
+//            w4 = xxhash32(data)       w5 = xxhash32(attached buffer)
+//            followed by the data and then the attached buffer.
+//   file:    w2 = 0x80000000 | size >> 32, w3 = size & 0xFFFFFFFF
+//            followed by chunks of [xxhash32 of the chunk][up to 64 KiB of content].
+//   status:  w2 low byte 0 = request, s + 1 = response with peer status s.
+//
+// The public functions can be called from any thread; callbacks are posted to the io_context.
 class Connection : public std::enable_shared_from_this<Connection> {
  public:
-  Connection(string                    peer,
-             socket_type               socket,
-             std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
+  Connection(string peer, socket_type socket, std::chrono::milliseconds timeout);
+
+  Connection(string peer, socket_type socket)
+      : Connection(std::move(peer), std::move(socket), std::chrono::milliseconds(0)) {}
 
   virtual ~Connection();
 
@@ -40,16 +55,41 @@ class Connection : public std::enable_shared_from_this<Connection> {
   virtual uint8_t status() const;
   virtual void    set_peer_status(uint8_t s);
 
-  void read_data(std::function<void(Result<Data>)> handler);
+  /// Read the next message and the buffer attached to it.
+  void read_data_and_buff(std::function<void(Result<std::tuple<Data, Bytes>>)> handler);
+
+  /// Read the next message, which has no attached buffer.
+  void read_data(std::function<void(Result<Data>)> handler) {
+    read_data_and_buff([h = std::move(handler)](Result<std::tuple<Data, Bytes>> r) mutable {
+      if (!r)
+        return h(r.error());
+      assert(std::get<Bytes>(r.value()).empty());
+
+      h(std::move(std::get<Data>(r.value())));
+    });
+  }
+
   void read_file(std::function<void(Result<std::filesystem::path>)> handler);
 
+  /// Send |data| followed by the buffers in |buff|, which the peer receives as one attached
+  /// buffer. The memory of |buff| must stay valid until the handler is called.
   void write_data(Data                                         data,
                   inplace_vector<boost::asio::const_buffer, 2> buff,
-                  std::function<void(Result<void>)>            handler);
-  void write_data(Data data, std::function<void(Result<void>)> handler) {
-    write_data(std::move(data), {}, std::move(handler));
+                  std::function<void(Result<void>)>            handler) {
+    assert(handler);
+    write_data_internal(std::move(data), std::move(buff), std::move(handler));
   }
+
+  void write_data(
+      Data data, std::function<void(Result<void>)> handler = [](Result<void>) {}) {
+    assert(handler);
+    write_data_internal(std::move(data), {}, std::move(handler));
+  }
+
   void write_file(std::filesystem::path file, std::function<void(Result<void>)> handler);
+
+  /// Delay the writes by 5 seconds (testing).
+  void write_test_delay();
 
   void request_peer_status() { async_write_status(true); }
 
@@ -59,10 +99,10 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   bool closed() const { return closed_.test(std::memory_order_relaxed); }
 
-  /// Function called when the connect is getting shutdown.
+  /// Function called when the connection is getting shutdown.
   virtual void on_shutdown();
 
-  bool ssl_enabled() const { return socket_.index() == 1; }
+  boost::asio::io_context& io_context();
 
   void set_log_prefix(string prefix) {
     std::unique_lock<std::mutex> lk{log_prefix_mtx_};
@@ -71,22 +111,43 @@ class Connection : public std::enable_shared_from_this<Connection> {
   }
   char const* log_prefix() const { return log_prefix_.load(std::memory_order_relaxed); }
 
+  bool ssl_enabled() const { return socket_.index() == 1; }
+
  private:
-  /// File read and write.
-  Result<size_t> fwrite(int fd, void const* buf, size_t count);
-  Result<size_t> fread(int fd, void* buf, size_t count);
+  static constexpr unsigned kHeaderWords = 6U;
 
-  void enqueue_status_req();
-  void enqueue_timeout_check(unsigned curr = 0, unsigned last = 0);
+  using ExtraBuffers = inplace_vector<boost::asio::const_buffer, 2>;
 
+  auto counter() const {
+    return std::visit([](auto&& s) { return s.counter(); }, socket_);
+  }
+
+  void breakpoint(char const*);
+
+  void enqueue_timeout_check(unsigned times = 0, uint64_t last_counter = 0);
+
+  void write_data_internal(Data data, ExtraBuffers buff, std::function<void(Result<void>)> handler);
+
+  /// Elements are wrapped in non-template structs so std::expected is not an ADL-associated
+  /// class of the std::deque iterators. With C++26, libc++'s constrained std::expected operator==
+  /// would otherwise make the iterator comparison in ~deque recurse infinitely.
   template <typename M>
   struct ReadQ {
-    std::mutex                                 mtx;
-    std::deque<Result<M>>                      queue;
-    std::deque<std::function<void(Result<M>)>> handlers;
+    struct Elem {
+      Result<M> v;
+    };
+    struct Handler {
+      std::function<void(Result<M>)> f;
+    };
+
+    std::mutex          mtx;
+    std::deque<Elem>    queue;
+    std::deque<Handler> handlers;
   };
 
-  ReadQ<Data>                  read_data_q_;
+  using ReadData = std::tuple<Data, Bytes>;
+
+  ReadQ<ReadData>              read_data_q_;
   ReadQ<std::filesystem::path> read_file_q_;
 
   template <typename M>
@@ -109,10 +170,11 @@ class Connection : public std::enable_shared_from_this<Connection> {
     kStatusResponse,
     kData,
     kFile,
+    kInsertTestDelay,
   };
 
-  /// Data and the subsequent buffer.
-  using WriteData = std::tuple<Data, inplace_vector<boost::asio::const_buffer, 2>>;
+  /// Data and the attached buffers.
+  using WriteData = std::tuple<Data, ExtraBuffers>;
 
   std::mutex                    write_mtx_;
   std::deque<WriteToken>        write_queue_;
@@ -138,150 +200,81 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   void do_write(std::unique_lock<std::mutex> lk);
 
-  template <typename F>
-  void do_write_header(boost::asio::const_buffer buff, F h);
-
-  void do_write_data(shared_ptr<Connection>                       self,
-                     Data                                         data,
-                     inplace_vector<boost::asio::const_buffer, 2> buff);
-  void do_write_file(shared_ptr<Connection>    self,
-                     int                       fd,
-                     size_t                    size,
-                     boost::asio::const_buffer buff);
-  void do_write_checksum(shared_ptr<Connection> self);
-  void do_write_checksum(shared_ptr<Connection> self, asio::const_buffer buff);
+  void do_write_file(shared_ptr<Connection> self, int fd, size_t size);
 
   uint32_t recv_packet_ = 0;
   uint32_t sent_packet_ = 0;
 
-  std::array<uint32_t, 4U> read_header_;
-  std::array<uint32_t, 4U> write_header_;
+  std::array<uint32_t, kHeaderWords> read_header_{};
+  std::array<uint32_t, kHeaderWords> write_header_{};
 
-  void process_header(unsigned idx);
-  void do_read_header(unsigned idx = 0, unsigned e = 3);
-  void do_read_header_some(boost::asio::mutable_buffer buff, unsigned idx);
+  void process_header();
+  void do_read_header();
 
-  void cleanup(std::error_code ec, int fd, std::filesystem::path file);
-
-  void do_read_data(shared_ptr<Connection> self, Data data);
-  void do_read_data(uint32_t length);
-  void do_read_file(uint64_t length);
+  void cleanup(std::error_code ec, int fd, std::filesystem::path const& file);
   void do_read_file(shared_ptr<Connection> self,
                     int                    fd,
                     uint64_t               length,
                     std::filesystem::path  file);
-  void do_read_checksum(shared_ptr<Connection> self, std::filesystem::path file);
-  void do_read_checksum(shared_ptr<Connection>      self,
-                        std::filesystem::path       file,
-                        boost::asio::mutable_buffer buff);
+  void do_read_file(uint64_t length);
+
+  void do_read_data(uint32_t data_size, uint32_t buff_size, uint32_t data_chk, uint32_t buff_chk);
 
   void shutdown(shared_ptr<Connection> self);
-  void async_shutdown(std::function<void()> invoke_on_shutdown);
+  void do_shutdown(ssl_socket&);
+  void do_shutdown(tcp_socket&);
 
-  template <typename T>
-  void socket_close(T& socket, std::function<void()> invoke_on_shutdown);
+  // The frame header words are little-endian on the wire, so that peers of different byte orders
+  // can talk, at no cost on little-endian machines.
+  static uint32_t ntoh(uint32_t t) { return boost::endian::little_to_native(t); }
+  static uint32_t hton(uint32_t t) { return boost::endian::native_to_little(t); }
 
-  template <typename T>
-  void socket_shutdown(T& socket, std::function<void()> invoke_on_shutdown);
+  void clear(std::atomic_flag& f) { f.clear(std::memory_order_relaxed); }
+  bool test(std::atomic_flag& f) { return f.test(std::memory_order_relaxed); }
+  bool test_and_set(std::atomic_flag& f) { return f.test_and_set(std::memory_order_relaxed); }
 
-  boost::asio::io_context& io_context() {
-    switch (socket_.index()) {
-      case 0:
-        return static_cast<boost::asio::io_context&>(std::get<0>(socket_).get_executor().context());
-      case 1:
-        return static_cast<boost::asio::io_context&>(std::get<1>(socket_).get_executor().context());
-    }
-    std::unreachable();
-  }
-
-  static uint32_t ntoh(uint32_t t) { return t; }
-  static uint32_t hton(uint32_t t) { return t; }
-
-  static constexpr bool split = true;
-
-  template <typename Handler>
-  void async_read_some(boost::asio::mutable_buffer buff, Handler handler) {
+  template <typename MutableBuffer, typename Handler>
+  void async_read(MutableBuffer const& buff, Handler handler) {
     if (closed())
-      return handler(boost::asio::error::connection_aborted, 0);
+      return boost::asio::post(io_context(), [h = std::move(handler)]() mutable {
+        h(boost::asio::error::connection_aborted, 0);
+      });
+
+    if (test_and_set(outstanding_read_req_)) [[unlikely]]
+      breakpoint("more than one outstanding read requests");
 
     switch (socket_.index()) {
       case 0:
-        std::get<0>(socket_).async_read_some(
-            buff, boost::asio::bind_executor(strand_, std::move(handler)));
+        boost::asio::async_read(std::get<0>(socket_), buff, std::move(handler));
         break;
 
       case 1:
-        std::get<1>(socket_).async_read_some(
-            buff, boost::asio::bind_executor(strand_, std::move(handler)));
+        boost::asio::async_read(
+            std::get<1>(socket_), buff, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
   }
 
-  template <typename Handler>
-  void async_read_some(boost::container::static_vector<::boost::asio::mutable_buffer, 2> buffs,
-                       Handler                                                           handler) {
-    assert(!buffs.empty());
+  template <typename ConstBuffer, typename Handler>
+  void async_write(ConstBuffer const& buff, Handler handler) {
     if (closed())
-      return handler(boost::asio::error::connection_aborted, 0);
+      return boost::asio::post(io_context(), [h = std::move(handler)]() mutable {
+        h(boost::asio::error::connection_aborted, 0);
+      });
+
+    if (test_and_set(outstanding_write_req_)) [[unlikely]]
+      breakpoint("more than one outstanding write requests");
 
     switch (socket_.index()) {
       case 0:
-        std::get<0>(socket_).async_read_some(
-            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
+        boost::asio::async_write(std::get<0>(socket_), buff, std::move(handler));
         break;
 
       case 1:
-        std::get<1>(socket_).async_read_some(
-            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
+        boost::asio::async_write(
+            std::get<1>(socket_), buff, boost::asio::bind_executor(strand_, std::move(handler)));
         break;
     }
-  }
-
-  template <typename Handler>
-  void async_write_some(boost::asio::const_buffer buff, Handler handler) {
-    if (closed())
-      return handler(boost::asio::error::connection_aborted, 0);
-
-    switch (socket_.index()) {
-      case 0:
-        std::get<0>(socket_).async_write_some(
-            buff, boost::asio::bind_executor(strand_, std::move(handler)));
-        break;
-
-      case 1:
-        std::get<1>(socket_).async_write_some(
-            buff, boost::asio::bind_executor(strand_, std::move(handler)));
-        break;
-    }
-  }
-
-  template <typename Handler>
-  void async_write_some(boost::container::static_vector<::boost::asio::const_buffer, 2> buffs,
-                        Handler                                                         handler) {
-    if (closed())
-      return handler(boost::asio::error::connection_aborted, 0);
-
-    switch (socket_.index()) {
-      case 0:
-        std::get<0>(socket_).async_write_some(
-            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
-        break;
-
-      case 1:
-        assert(ssl_enabled());
-        std::get<1>(socket_).async_write_some(
-            buffs, boost::asio::bind_executor(strand_, std::move(handler)));
-        break;
-    }
-  }
-
-  void set_last_epoch(std::atomic_flag& f) {
-    last_epoch_.store(epoch_msec(), std::memory_order_relaxed);
-    f.clear(std::memory_order_relaxed);
-  }
-  unsigned last_epoch() const {
-    static_assert(std::atomic<unsigned>::is_always_lock_free);
-    return last_epoch_.load(std::memory_order_relaxed);
   }
 
   // Identity of the remote peer.
@@ -293,23 +286,40 @@ class Connection : public std::enable_shared_from_this<Connection> {
   boost::asio::io_context::strand strand_;
 
   // File transfers
-  unique_ptr<std::array<char, kPageSize>> do_read_file_buff_;
-  unique_ptr<std::array<char, kPageSize>> do_write_file_buff_;
+  static constexpr unsigned kFileTransferSize = kPageSize * 8;
 
-  ChecksumContext write_checksum_ctx_;
-  Checksum        write_checksum_;
+  unique_ptr<std::array<char, kFileTransferSize + 4U>> send_file_buff_;  ///< Staging to send.
+  unique_ptr<std::array<char, kFileTransferSize + 4U>> recv_file_buff_;  ///< Staging to receive.
 
-  ChecksumContext read_checksum_ctx_;
-  Checksum        read_checksum_;
+  struct Timer : boost::asio::steady_timer {
+   public:
+    Timer(boost::asio::io_context& io_context) : boost::asio::steady_timer(io_context) {}
 
-  // The last epoch that we read a character.
-  std::atomic<unsigned> last_epoch_;
+    template <typename Handler>
+    void async_wait(std::chrono::milliseconds timeout, Handler&& handler) {
+      auto lk = std::unique_lock{mtx_};
+      boost::asio::steady_timer::expires_after(timeout);
+      boost::asio::steady_timer::async_wait(std::forward<Handler>(handler));
+    }
 
+    // Intentionally hides steady_timer::cancel to serialize it with async_wait.
+    size_t cancel() {  // NOLINT(bugprone-derived-method-shadowing-base-method)
+      auto lk = std::unique_lock{mtx_};
+      return boost::asio::steady_timer::cancel();
+    }
+
+   private:
+    mutable std::mutex mtx_;
+  };
+
+  /// Check the socket's counter every timeout period, if the counter has not
+  /// changed in so many invocations, close the socket.
+  Timer                           timeout_timer_;
   std::chrono::milliseconds const timeout_;
-  boost::asio::steady_timer       timeout_timer_;
+  unsigned const                  times_;
 
-  std::chrono::milliseconds const status_;
-  boost::asio::steady_timer       status_timer_;
+  // Delay timer used for testing.
+  Timer delay_timer_;
 
   std::atomic_flag closed_                     = ATOMIC_FLAG_INIT;
   std::atomic_flag started_                    = ATOMIC_FLAG_INIT;
@@ -322,3 +332,16 @@ class Connection : public std::enable_shared_from_this<Connection> {
   list<string>             log_prefixes_;
   std::atomic<char const*> log_prefix_{""};
 };
+
+/// If the timeout is 5 seconds, check every 5/10 seconds, no more often then 100 milliseconds and
+/// not delayed by more than 1 second.
+inline std::tuple<std::chrono::milliseconds, unsigned> timeout_and_times(
+    std::chrono::milliseconds t) {
+  if (t.count() == 0)
+    return std::tuple<std::chrono::milliseconds, unsigned>{0, 0};
+
+  auto timeout =
+      std::min(std::chrono::milliseconds(1000), std::max(std::chrono::milliseconds(100), t / 10));
+  auto times = std::max<unsigned>(10U, static_cast<unsigned>(t.count() / timeout.count()));
+  return std::tuple<std::chrono::milliseconds, unsigned>{timeout, times};
+}
