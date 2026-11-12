@@ -105,8 +105,7 @@ restore(dest) / restore_and_start(dest);  // empty data_dir (keep it), rsync -a 
   with the files (for example, until they have been shipped).
 - **Primary** backups use `pg_basebackup -h 127.0.0.1 --checkpoint=fast -X stream`, which is a
   hot backup.
-- **Standby** backups do a Fast stop, then `rsync -a` the data directory, which is a cold
-  backup. The instance is left stopped.
+- **Standby** backups are a `pg_basebackup` too; the instance keeps running.
 - **Verification** compares `pg_controldata` output for the live directory and the backup:
   - The *Database system identifier* must match.
   - If the cluster state is `shut down` or `shut down in recovery`, it runs

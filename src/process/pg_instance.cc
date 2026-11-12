@@ -293,8 +293,31 @@ bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {
     Process p(pg_bin_ / "pg_isready",
               {"-h", "localhost", "-p", std::to_string(port), "-d", "postgres", "-q"});
     p.start();
-    if (p.wait() == 0)
-      return true;
+    if (p.wait() == 0) {
+      // A server answers on |port|: it must be this one, not another PostgreSQL that holds the
+      // port while ours failed to bind it. postmaster.pid names our postmaster on its first line,
+      // and its 8th line is the postmaster's status: "ready" (or "standby" for a hot standby)
+      // once it accepts connections. One that fails to bind its port writes the file, then exits
+      // without reaching either.
+      std::ifstream            in(data_dir_ / "postmaster.pid");
+      std::vector<std::string> lines;
+      for (std::string line; std::getline(in, line);)
+        lines.push_back(line);
+      auto const ours =
+          !lines.empty() && postgres_.pid() > 0 && lines.at(0) == std::to_string(postgres_.pid());
+      auto const ready = lines.size() >= 8 &&
+                         (lines.at(7).starts_with("ready") || lines.at(7).starts_with("standby"));
+      if (ours && ready)
+        return true;
+      if (!ours) {
+        log(ERROR,
+            "A server answers on port {}, but it is not PostgreSQL {} of {}",
+            port,
+            postgres_.pid(),
+            data_dir_);
+        return false;
+      }
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
   }
   return false;
@@ -309,25 +332,21 @@ SemaphoreLock PgInstance::backup(std::filesystem::path const& dest_dir) {
     return lk;
   }
   std::lock_guard guard(mu_);
-  bool            ok;
-  if (role_ == Role::kStandby) {
-    if (postgres_.is_running())
-      stop(StopMode::Fast);
-    ok = copy_dir(data_dir_, dest_dir);
-  } else {
-    std::filesystem::remove_all(dest_dir);
-    Process p(pg_bin_ / "pg_basebackup",
-              {"-h",
-               "127.0.0.1",
-               "-p",
-               std::to_string(port_),
-               "-D",
-               dest_dir,
-               "--checkpoint=fast",
-               "-X",
-               "stream"});
-    ok = p.start() && p.wait() == 0;
-  }
+
+  // A pg_basebackup on a primary or a standby alike: the instance keeps running, and the backup has
+  // a backup_manifest (its End-LSN names the backup in the store, docs/backup.md).
+  std::filesystem::remove_all(dest_dir);
+  Process p(pg_bin_ / "pg_basebackup",
+            {"-h",
+             "127.0.0.1",
+             "-p",
+             std::to_string(port_),
+             "-D",
+             dest_dir,
+             "--checkpoint=fast",
+             "-X",
+             "stream"});
+  bool    ok = p.start() && p.wait() == 0;
   if (!ok)
     lk.release();
   return lk;

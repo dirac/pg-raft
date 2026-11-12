@@ -144,7 +144,8 @@ Result<void> Node::start() {
     return elog(ec, "Unable to create the directories under {}", base_dir_);
 
   store_ = make_shared<DirBackupStore>(config_.backup_store);
-  pg_    = make_unique<PgInstance>(pg_bin(config_), data_dir_, pg_port());
+  (void)store_->abort(id_);  // a lease (and a partial copy) this node left before a restart
+  pg_ = make_unique<PgInstance>(pg_bin(config_), data_dir_, pg_port());
 
   // Raft first: it knows whether the node needs a backup (an InstallSnapshot replaced its log).
   auto endpoint =
@@ -223,6 +224,7 @@ Result<void> Node::start() {
   started_.store(true);
   transition_thread_ = std::thread([this] { transitions(); });
   poll_thread_       = std::thread([this] { poll(); });
+  backup_thread_     = std::thread([this] { backups(); });
   log(INFO, "Node {} started: PostgreSQL on {} as a standby", id_, pg_port());
   return ok();
 }
@@ -546,6 +548,84 @@ void Node::poll() {
     conn->close();
 }
 
+// ── backups ───────────────────────────────────────────────────────────────────
+
+bool Node::wait_stopping(std::chrono::milliseconds timeout) {
+  auto lk = std::unique_lock{role_mtx_};
+  return role_cv_.wait_for(lk, timeout, [this] { return stopping_; });
+}
+
+void Node::backups() {
+  while (!wait_stopping(options_.backup_check_interval))
+    maybe_backup();
+}
+
+void Node::maybe_backup() {
+  // A standby with a running PostgreSQL; never the primary's node.
+  if (primary_.load() || needs_restart_.load() || raft_->is_leader() || !pg_->is_running())
+    return;
+  auto const state = raft_->applied_state();
+  if (state.needs_backup)
+    return;
+
+  auto const policy = BackupPolicy{
+      .interval        = std::chrono::seconds{config_.backup_interval_secs},
+      .wal_size        = config_.backup_wal_size,
+      .pending_timeout = std::chrono::seconds{config_.backup_pending_timeout_secs},
+  };
+  auto const now    = std::time(nullptr);
+  auto const latest = store_->latest();
+  if (!latest)
+    return;
+  if (!backup_due(policy, INT(id_), u4(config_.servers.size()), *latest, now, state.wal_end))
+    return;
+  auto const pending = store_->pending();
+  if (!pending || pending_blocks(policy, *pending, id_, now))
+    return;
+
+  auto lease = store_->begin(id_, now);
+  if (!lease)
+    return;
+  log(INFO,
+      "Node {}: taking a backup (the latest is {})",
+      id_,
+      latest->has_value() ? (*latest)->name() : "none");
+
+  // The lease is refreshed while pg_basebackup and the verification run.
+  std::atomic_bool done{false};
+  std::thread      refresher([&] {
+    auto const every =
+        std::chrono::duration_cast<std::chrono::milliseconds>(policy.pending_timeout) / 4;
+    while (!done.load()) {
+      for (auto waited = 0ms; waited < every && !done.load(); waited += 100ms)
+        std::this_thread::sleep_for(100ms);
+      if (!done.load())
+        (void)store_->refresh(*lease, std::time(nullptr));
+    }
+  });
+
+  auto const scratch = base_dir_ / "backup";
+  auto       lk      = pg_->backup(scratch);
+  if (lk)
+    lk = pg_->verify_backup(scratch, std::move(lk));
+  auto lsn = lk ? backup_end_lsn(scratch) : Result<LogSeqNumber>{system_error_code(EIO)};
+
+  done.store(true);
+  refresher.join();
+
+  if (lsn) {
+    if (auto b = store_->put(*lease, scratch, *lsn); b)
+      log(INFO, "Node {}: stored the backup {}", id_, *b);
+    else
+      (void)store_->abort(id_);
+  } else {
+    log(ERROR, "Node {}: the backup failed", id_);
+    (void)store_->abort(id_);
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(scratch, ec);
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────────
 
 void Node::shutdown() {
@@ -561,6 +641,8 @@ void Node::shutdown() {
     transition_thread_.join();
   if (poll_thread_.joinable())
     poll_thread_.join();
+  if (backup_thread_.joinable())
+    backup_thread_.join();
 
   // PostgreSQL first, cleanly: on the primary its shutdown checkpoint still commits through raft
   // (the node still leads), and a clean stop releases its System V shared memory and semaphores,

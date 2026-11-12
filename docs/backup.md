@@ -115,6 +115,9 @@ refresh time.
 
 ## 4. Taking backups
 
+Implemented in `Node` (`maybe_backup`, checked every `NodeOptions::backup_check_interval`,
+60 s by default); `node_backup_test` covers it.
+
 Every backup is taken with **`pg_basebackup -X stream`**, both by `pg_raft_initdb` and afterwards. There is
 no other backup method:
 
@@ -300,8 +303,8 @@ between the backup and those entries, so it changes (decision 7 in
 
 ## 7. Open items
 
-1. **Code changes in `process`:** `PgInstance::backup` stops a standby and copies its data
-   directory with `rsync`; it has to run `pg_basebackup` for a standby too, and keep it running.
+1. **Code changes in `process`:** `PgInstance::backup` runs `pg_basebackup` on a standby too, and
+   keeps it running (done).
    `write_hba`'s defaults need `host replication all 127.0.0.1/32 trust` (and `::1/128`). Their
    order is also wrong: the `0.0.0.0/0 scram-sha-256` rule comes before the loopback `trust` rule,
    so it matches loopback first. Today this is masked by `initdb`'s own loopback rules at the top

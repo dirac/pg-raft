@@ -215,8 +215,7 @@ BOOST_AUTO_TEST_CASE(verify_backup_standby, *boost::unit_test::timeout(60)) {
   auto      data_dir   = tmp() / "pgdata";
   auto      backup_dir = tmp() / "backup";
 
-  // kStandby: backup() stops the instance and copies, producing a cleanly
-  // shut-down backup_dir that pg_checksums can verify.
+  // kStandby: backup() is a pg_basebackup too, and the instance keeps running.
   PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kStandby);
   BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
   BOOST_REQUIRE(pg.write_config({}));
@@ -226,6 +225,8 @@ BOOST_AUTO_TEST_CASE(verify_backup_standby, *boost::unit_test::timeout(60)) {
 
   auto lk = pg.backup(backup_dir);
   BOOST_REQUIRE(lk);
+  BOOST_TEST(pg.is_running());
+  BOOST_TEST(std::filesystem::exists(backup_dir / "backup_manifest"));
   lk = pg.verify_backup(backup_dir, std::move(lk));
   BOOST_TEST(bool(lk));
 }
@@ -434,4 +435,31 @@ BOOST_AUTO_TEST_CASE(kill_releases_ipc, *boost::unit_test::timeout(120)) {
   BOOST_TEST(a.wait_ready(kPort));
   a.stop(PgInstance::StopMode::Fast);
   b.stop(PgInstance::StopMode::Fast);
+}
+
+// wait_ready() checks that the server answering is this instance: one that failed to bind a port
+// another PostgreSQL holds is not ready.
+BOOST_AUTO_TEST_CASE(wait_ready_is_for_this_instance, *boost::unit_test::timeout(120)) {
+  if (!pg_available()) {
+    BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
+    return;
+  }
+  IoThreads threads{2};
+  TmpDir    tmp;
+
+  PgInstance a(kPgBin, tmp() / "a", kPort, PgInstance::Role::kPrimary);
+  PgInstance b(kPgBin, tmp() / "b", kPort, PgInstance::Role::kPrimary);  // the same port
+  for (auto* pg : {&a, &b}) {
+    BOOST_REQUIRE(pg->init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
+    BOOST_REQUIRE(pg->write_config({}));
+    BOOST_REQUIRE(pg->write_hba({}));
+  }
+  BOOST_REQUIRE(a.start());
+  BOOST_REQUIRE(a.wait_ready(kPort));
+
+  BOOST_REQUIRE(b.start());  // exits: the port is taken
+  BOOST_TEST(!b.wait_ready(kPort, 10));
+
+  b.stop(PgInstance::StopMode::Fast);
+  a.stop(PgInstance::StopMode::Fast);
 }

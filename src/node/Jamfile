@@ -57,3 +57,9 @@ unit-test wal_rebuild_test
     libs
     ../base//testing
   ;
+
+unit-test node_backup_test
+  : node_backup_test.cc
+    libs
+    ../base//testing
+  ;

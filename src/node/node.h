@@ -31,6 +31,7 @@ struct NodeOptions {
   Options                   raft;
   std::chrono::milliseconds poll_interval{500};
   std::chrono::seconds      promote_timeout{60};  // per step of a promotion
+  std::chrono::seconds      backup_check_interval{60};
 };
 
 class Node : public std::enable_shared_from_this<Node> {
@@ -83,6 +84,12 @@ class Node : public std::enable_shared_from_this<Node> {
   // The status poller.
   void poll();
 
+  // Backups after bootstrap (docs/backup.md §4): a standby takes one when its staggered deadline
+  // has passed and no other node holds a live lease.
+  void backups();
+  void maybe_backup();
+  bool wait_stopping(std::chrono::milliseconds timeout);
+
   void advance_senders(LogSeqNumber lsn);
 
   Config const      config_;
@@ -124,4 +131,5 @@ class Node : public std::enable_shared_from_this<Node> {
 
   std::thread transition_thread_;
   std::thread poll_thread_;
+  std::thread backup_thread_;
 };

@@ -88,8 +88,7 @@ class PgInstance {
   // On success the returned lock owns the semaphore and evaluates to true.
   // On error the lock is released and evaluates to false.
   //
-  // Primary: runs pg_basebackup (instance stays running).
-  // Standby: stops the instance and copies data_dir.
+  // pg_basebackup -X stream, on a primary or a standby; the instance stays running.
   SemaphoreLock backup(std::filesystem::path const& dest_dir);
 
   // Verify a backup directory. Runs pg_controldata on both data_dir_ and
