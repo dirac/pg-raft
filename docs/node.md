@@ -211,7 +211,8 @@ the old primary is served after this point.
 On the node strand:
 
 1. `set_serving(false)`.
-2. Reap the killed postmaster (`PgInstance::stop`). (Demotion is implemented: `Node::demote` /
+2. Reap the killed postmaster (`PgInstance::stop`), which also releases the System V shared
+   memory and semaphores it left (`PgInstance::release_ipc`). (Demotion is implemented: `Node::demote` /
    `restart_as_standby`; `node_test` hands the leadership over and checks the old primary comes
    back as a standby.)
 3. **Rebuild `pg/pg_wal` from `raft/wal`** (`rebuild_pg_wal`, `src/node/wal_rebuild.h`;

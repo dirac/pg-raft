@@ -68,6 +68,15 @@ class PgInstance {
   // The postmaster's pid, or -1.
   pid_t pid() const;
 
+  // Remove the System V IPC that a killed PostgreSQL left: the shared memory segment that
+  // postmaster.pid names (key and id on its 7th line), and the semaphore sets it created (macOS;
+  // on Linux PostgreSQL uses POSIX semaphores inside its shared memory). Only if the postmaster of
+  // postmaster.pid is gone and nothing is attached to the segment (no backend is alive). A
+  // semaphore set is removed only if it is PostgreSQL's own, by PostgreSQL's test: its last
+  // semaphore holds PGSemaMagic (537) and was last operated on by that postmaster. stop() calls
+  // it when it reaps a postmaster that a signal killed. Returns the number of objects removed.
+  int release_ipc();
+
   // Poll pg_isready on |localhost|:|port| until it returns OK or timeout elapses.
   bool wait_ready(uint16_t port, int timeout_s = 30) const;
 

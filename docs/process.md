@@ -149,4 +149,9 @@ not installed.
    frees, but a 56-byte System V segment and (on macOS) 7 System V semaphore sets outlive a
    SIGKILL. A postmaster started in the same data directory removes them (their keys come from
    the directory's inode); one started in a new directory doesn't, so they leak until reboot.
-   `restore()` therefore keeps the data directory and replaces its contents.
+   `restore()` therefore keeps the data directory and replaces its contents. And `stop()`, when it
+   reaps a postmaster that a signal killed, calls `release_ipc()`: it removes the segment that
+   `postmaster.pid` names (if the postmaster is gone and nothing is attached) and the semaphore
+   sets that pass PostgreSQL's own test (the last semaphore holds 537 and was last operated on by
+   that postmaster). `kill_releases_ipc` kills one of two running instances and checks that only
+   its objects are removed.

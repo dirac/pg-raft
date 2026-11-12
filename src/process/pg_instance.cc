@@ -1,5 +1,12 @@
 #include "src/process/pg_instance.h"
 
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
+
+#include <fstream>
+#include <sstream>
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 static std::vector<std::string> build_postgres_args(std::string const& data_dir, uint16_t port) {
@@ -141,15 +148,97 @@ void PgInstance::stop(StopMode mode, int timeout_ms) {
   }
   ::kill(postgres_.pid(), sig);
 
+  std::optional<int> code;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (postgres_.try_wait().has_value())
-      return;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  while (!code && std::chrono::steady_clock::now() < deadline) {
+    code = postgres_.try_wait();
+    if (!code)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (!code) {
+    postgres_.kill();
+    code = postgres_.wait();
   }
 
-  postgres_.kill();
-  postgres_.wait();
+  // Killed by a signal (kill(), or the SIGKILL above): it could not release its IPC.
+  if (*code < 0)
+    release_ipc();
+}
+
+namespace {
+
+#if !defined(__APPLE__)
+union semun {
+  int              val;
+  struct semid_ds* buf;
+  unsigned short*  array;
+};
+#endif
+
+constexpr int kPGSemaMagic = 537;  // sysv_sema.c
+
+}  // namespace
+
+int PgInstance::release_ipc() {
+  std::lock_guard lk(mu_);
+
+  std::ifstream            in(data_dir_ / "postmaster.pid");
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);)
+    lines.push_back(line);
+  if (lines.size() < 7)
+    return 0;
+
+  pid_t postmaster = 0;
+  long  key        = 0;
+  int   id         = -1;
+  try {
+    postmaster = static_cast<pid_t>(std::stol(lines.at(0)));
+    std::istringstream ss(lines.at(6));
+    ss >> key >> id;
+  } catch (std::exception const&) {
+    return 0;
+  }
+  if (postmaster <= 0 || key == 0 || ::kill(postmaster, 0) == 0)
+    return 0;  // not a killed postmaster's file, or it still runs
+
+  int removed = 0;
+
+  // The segment: still the one postmaster.pid names, and nothing attached (no backend alive).
+  if (int shmid = ::shmget(static_cast<key_t>(key), 0, 0); shmid >= 0 && shmid == id) {
+    struct shmid_ds ds{};
+    if (::shmctl(shmid, IPC_STAT, &ds) != 0 || ds.shm_nattch > 0)
+      return 0;
+    if (::shmctl(shmid, IPC_RMID, nullptr) == 0) {
+      log(INFO,
+          "Removed the shared memory segment {} of the killed postmaster {}",
+          shmid,
+          postmaster);
+      ++removed;
+    }
+  }
+
+  // The semaphore sets: PostgreSQL takes keys from the data directory's inode (the segment's key)
+  // on, skipping those in use.
+  for (long k = key; k < key + 256; ++k) {
+    int semid = ::semget(static_cast<key_t>(k), 0, 0);
+    if (semid < 0)
+      continue;
+    struct semid_ds ds{};
+    union semun     arg{};
+    arg.buf = &ds;
+    if (::semctl(semid, 0, IPC_STAT, arg) != 0 || ds.sem_nsems < 1)
+      continue;
+    int const magic = static_cast<int>(ds.sem_nsems) - 1;
+    if (::semctl(semid, magic, GETVAL) != kPGSemaMagic ||
+        ::semctl(semid, magic, GETPID) != postmaster)
+      continue;
+    if (::semctl(semid, 0, IPC_RMID) == 0)
+      ++removed;
+  }
+  if (removed > 0)
+    log(INFO, "Released {} System V IPC objects of the killed postmaster {}", removed, postmaster);
+  return removed;
 }
 
 void PgInstance::reload() {
