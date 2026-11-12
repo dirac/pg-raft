@@ -3,8 +3,6 @@
 #include "src/base/config.h"
 #include "src/raft/raft_peer_connection.h"
 
-// Ported from sparrowdb lib/servers/zqlite/peer_connection_mgr.hpp (without TLS contexts).
-
 /// The identity a raft server sends in the connection handshake: "Raft:<node id>".
 inline string raft_identity(RaftNodeId id) {
   return std::format("Raft:{0}", INT(id));

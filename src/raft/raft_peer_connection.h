@@ -6,10 +6,8 @@
 #include "src/raft/raft_log.h"
 #include "src/raft/raft_types.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_peer_connection.hpp. Differences: the requests
-// carry the WAL bytes of their entries (MemBlocks, sent as attached buffers straight from the
-// segment mmap); an InstallSnapshot sends the latest entries and their segments instead of an LMDB
-// file.
+// The requests carry the WAL bytes of their entries (MemBlocks, copied from the segment mmap and
+// sent as an attached buffer); an InstallSnapshot sends the latest entries and their segments.
 
 class RaftPeerConnection;
 
@@ -160,9 +158,9 @@ class RaftPeerConnection : public Connection {
     request.info.request_idx  = static_cast<uint16_t>(request.request.index());
 
     // This function is invoked with a lock (mtx_).
-    request.info.request_seq = u4(
-        (sequence_.at(request.info.request_idx).fetch_add(1U, std::memory_order_relaxed) + 1U) &
-        kSeqMask);
+    request.info.request_seq =
+        u4((sequence_.at(request.info.request_idx).fetch_add(1U, std::memory_order_relaxed) + 1U) &
+           kSeqMask);
 
     // Fix if we overflow.
     if (kSeqMask == request.info.request_seq) {

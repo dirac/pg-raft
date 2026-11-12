@@ -1,8 +1,7 @@
 # `raft` — Consensus over the WAL stream
 
-Source: `src/raft/`. The module is a port of sparrowdb's `lib/servers/zqlite` raft, which is the
-reference implementation. §8 lists the differences. It is built, and it is tested by
-`raft_log_test` plus four in-process ensemble tests.
+Source: `src/raft/`. The module is built, and it is tested by `raft_log_test` plus four in-process
+ensemble tests.
 
 ## 1. Purpose
 
@@ -60,7 +59,7 @@ An entry only names a region; the bytes go in the same message as the request:
 
 ### 2.3 State machine (`raft_state.h`)
 
-`RaftState` takes the place of sparrowdb's `ZqState`. The replicated data is the WAL in the
+`RaftState` is the state machine. The replicated data is the WAL in the
 segment files, which is written as entries are received. "Applying" an entry only advances a
 position:
 
@@ -77,7 +76,7 @@ A `RaftApplier` (set by the node) receives `applied(idx, entry, state)` for each
 
 ### 2.4 Persistent state (`RaftLog`, LMDB)
 
-This is sparrowdb's `RaftLog` without the ZqState tables. It keeps:
+`RaftLog` keeps:
 
 - Page checksums (xxhash32) and 16 KiB pages.
 - The thread-local check that no transaction or cursor leaks.
@@ -103,8 +102,7 @@ Operations:
 
 ## 3. Protocol
 
-The message types follow sparrowdb exactly, apart from the `data` field and the `InstallSnapshot`
-contents:
+The message types:
 
 ```
 RaftRequest  { term, node_id, variant<monostate /*ping*/, RequestVote, AppendEntries,
@@ -128,8 +126,6 @@ gets a `RaftClientConnection` (§6). `PeerConnectionMgr` reconnects closed slots
 `reconnect_interval_msecs`. A peer that connects to us triggers an immediate reconnect back to it.
 
 ### 3.2 Elections
-
-These follow sparrowdb.
 
 - **Gathering terms.** A node that restarts with term 0 pings its peers. It votes only after a
   majority has answered, so it never votes in a term it has already seen.
@@ -182,8 +178,7 @@ entries inherited from earlier leaders have no handler.
 
 - **Compaction**: after `compaction_lag` entries have been applied since the last compaction, a
   node saves its `RaftState` and deletes entries older than `log_idx - keep_old_logs`. **The leader
-  compacts too.** sparrowdb's leader steps down to compact instead, which here would mean a
-  PostgreSQL failover. Entries are small (the WAL is in the segments), so compacting on the leader
+  compacts too.** Stepping down to compact would mean a PostgreSQL failover. Entries are small (the WAL is in the segments), so compacting on the leader
   is cheap.
 - **InstallSnapshot, phase 1 (raft)**: the leader sends its latest `snapshot_entries` entries,
   trimmed to those that touch at most 2 segments, together with the **full contents** of those
@@ -194,7 +189,7 @@ entries inherited from earlier leaders have no handler.
   channel (`RaftServerConnection::backup`), preferably from a standby (stop the instance, copy the
   data directory), otherwise from the primary (`pg_basebackup`). It then reconciles the WAL records
   in the backup with the WAL it received in phase 1. The channel and the hooks are implemented; the
-  node logic that triggers the backup and reconciles is not yet written (§9).
+  node logic that triggers the backup and reconciles is not yet written (§8).
 
 ## 4. Integration with `wal_fuse` and `wal_sender` (node, to be written)
 
@@ -210,7 +205,7 @@ backs, through one `WalSegmentCache`. On a follower it creates a missing segment
 
 ## 5. Concurrency
 
-This is sparrowdb's model:
+The model:
 
 - Role and term state are atomics, and role transitions take `mtx_`.
 - `usage_lock_` (shared) guards against shutdown. Request and response handlers take it, and
@@ -237,7 +232,7 @@ backup.
 
 | Test | What |
 |---|---|
-| `raft_log_test` | sparrowdb's fault injection (every LMDB call fails in turn, and no txn or cursor leaks), plus appends and conflicts, entries and latest entries, snapshot and compaction, `install_snapshot`, term and vote, key encoding |
+| `raft_log_test` | fault injection (every LMDB call fails in turn, and no txn or cursor leaks), plus appends and conflicts, entries and latest entries, snapshot and compaction, `install_snapshot`, term and vote, key encoding |
 | `raft_ensemble_sanity_test` | 5 nodes for 20 s under the Writer |
 | `raft_ensemble_leader_stopped_test` | the leader crashes 3 times and restarts |
 | `raft_ensemble_stepdown_test` | 4 hand-overs via `RequestElection` |
@@ -252,18 +247,7 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 - That every acknowledged write is an accepted entry.
 - That every server has identical bytes for every acknowledged write it applied (by xxhash32).
 
-## 8. Differences from sparrowdb `lib/servers/zqlite`
-
-| sparrowdb | pg-raft | Why |
-|---|---|---|
-| Clients send `ZqRequest`s; sqlite / ZooKeeper state (`ZqState`) | The primary generates `WalCommand`s; `RaftState` is a position | The replicated state is the WAL |
-| — | WAL bytes attached to requests (`MemBlock`), copied from the mmap, written once accepted | WAL travels with the log |
-| InstallSnapshot = LMDB copy of the state, sent as a file | Latest entries + full segments in one message; PostgreSQL backup afterwards | The state is the WAL and the PostgreSQL data directory |
-| Leader steps down to compact | Leader compacts | A step-down is a PostgreSQL failover |
-| Sessions, watches, locks, `zq_connection`, `raft_ensemble_connection` | Status and backup client channel | No client sessions |
-| TLS, roles, metrics, `Logger&`, `move_only_function`, `uptime()` µs | None / `std::function` / `epoch_msec()` | As in `src/net` |
-
-## 9. Open items
+## 8. Open items
 
 1. **Node**: wire `WalTracker`, `RaftApplier`, `PgInstance`, `PgClient` and `WalSender` into a
    pg-raft node process (§4), including `set_serving` once promotion is done.

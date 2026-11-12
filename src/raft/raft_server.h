@@ -14,16 +14,15 @@
 #include "src/raft/raft_types.h"
 #include "src/raft/vote_tally.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_server.hpp. Differences:
+// The raft server:
 //
 //  - The leader's own WAL interception generates the entries: exec(WalCommand, handler), whose
-//    handler is called when the entry is committed (where sparrowdb executes clients' ZqRequests).
+//    handler is called when the entry is committed.
 //  - The state machine is RaftState (see raft_state.h); a RaftApplier is told of each applied entry
 //    (e.g. to advance the WalSender to the committed flushed_lsn).
 //  - The WAL bytes travel with the entries and are written to the segments in wal_dir as they are
 //    accepted.
-//  - A leader compacts its own log (a sparrowdb leader steps down to compact, which here would be a
-//    PostgreSQL failover).
+//  - A leader compacts its own log (stepping down to compact would be a PostgreSQL failover).
 //  - InstallSnapshot sends the latest entries and their segments; the node then needs a PostgreSQL
 //    backup (RaftState::needs_backup), which it fetches over the client channel (backup()).
 

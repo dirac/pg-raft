@@ -3,8 +3,6 @@
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
-// Ported from sparrowdb lib/servers/zqlite/zq_test_service.cpp.
-
 using namespace std::chrono_literals;
 
 void TestRaftServer::new_connection(string peer, socket_type socket) {
@@ -55,7 +53,8 @@ RaftTestService::RaftTestService(boost::asio::io_context& io_context,
 
     endpoints_.emplace_back(boost::asio::ip::tcp::v4(), port);
 
-    config.servers.emplace_back(Config::Server{.hostname = "127.0.0.1", .pg_port = 0, .ha_port = port});
+    config.servers.emplace_back(
+        Config::Server{.hostname = "127.0.0.1", .pg_port = 0, .ha_port = port});
   }
   servers_.resize(nodes_);
 }
@@ -124,7 +123,7 @@ RaftIndex RaftTestService::commit_idx() const {
 void RaftTestService::start(unsigned idx) {
   auto id = RaftNodeId{u2(idx)};
 
-  auto a = std::move(acceptors_.at(idx));
+  auto a             = std::move(acceptors_.at(idx));
   acceptors_.at(idx) = std::nullopt;
   if (!a)
     a.emplace(io_context(), endpoints_.at(idx));
@@ -225,8 +224,9 @@ RaftIndex accepted_idx(vector<ServerView> const& views,
 
 }  // namespace
 
-RaftTestService::Consistency RaftTestService::check_consistency(vector<Write> const& writes,
-                                                                std::chrono::seconds timeout) const {
+RaftTestService::Consistency RaftTestService::check_consistency(
+    vector<Write> const& writes,
+    std::chrono::seconds timeout) const {
   auto result = Consistency{};
 
   // Wait until every running server has the same log and has applied all of it.
@@ -292,14 +292,19 @@ RaftTestService::Consistency RaftTestService::check_consistency(vector<Write> co
     if (v.state.log_idx != w.state.log_idx)
       continue;
     if (v.state.timestamp != w.state.timestamp || !(v.state.flushed_lsn == w.state.flushed_lsn))
-      result.violations.emplace_back(std::format(
-          "The state of node {0} differs from node {1}: {2} vs {3}", v.node, w.node, v.state, w.state));
+      result.violations.emplace_back(
+          std::format("The state of node {0} differs from node {1}: {2} vs {3}",
+                      v.node,
+                      w.node,
+                      v.state,
+                      w.state));
   }
 
   // The acknowledged writes are accepted, and every server has their bytes if it has their entries.
   for (auto const& w : writes) {
     if (w.idx > accepted) {
-      result.violations.emplace_back(std::format("The acknowledged write {0} is not accepted", w.idx));
+      result.violations.emplace_back(
+          std::format("The acknowledged write {0} is not accepted", w.idx));
       continue;
     }
     if (auto pos = result.log.find(w.idx); pos != result.log.end()) {

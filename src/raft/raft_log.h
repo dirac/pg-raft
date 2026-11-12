@@ -4,9 +4,8 @@
 #include "src/raft/raft_state.h"
 #include "src/raft/raft_types.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_log.hpp. The snapshot is the RaftState (saved in
-// the meta database) instead of the ZqState databases; install_snapshot() replaces the log with
-// the entries of an InstallSnapshot.
+// The raft log (LMDB). The snapshot is the RaftState (saved in the meta database);
+// install_snapshot() replaces the log with the entries of an InstallSnapshot.
 class RaftLog {
  public:
   constexpr static size_t kLmdbPageSize = 16384U;

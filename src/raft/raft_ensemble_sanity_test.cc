@@ -1,7 +1,7 @@
 #define BOOST_TEST_MODULE raft_ensemble_sanity
 #include "src/raft/raft_ensemble_test_common.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_ensemble_sanity_test.cpp.
+// Five servers under the Writer.
 
 BOOST_AUTO_TEST_CASE(sanity, *boost::unit_test::timeout(timeout)) {
   auto io = boost::asio::io_context{};

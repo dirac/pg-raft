@@ -4,9 +4,6 @@ Source: `src/net/` — `connection.{h,cc}`, `socket.h`, `server.{h,cc}`,
 `async_connect.{h,cc}`, `data.{h,cc}`, `host_address.h`. The checksum is
 `src/base/xxhash.{h,cc}`.
 
-This module is ported from sparrowdb's `lib/net`, which is the reference implementation. §6
-lists where pg-raft deliberately differs.
-
 ## 1. Purpose
 
 `net` is the transport for every pg-raft node-to-node and client-to-node channel. Raft peers,
@@ -221,7 +218,7 @@ The client half of the handshake works in these steps:
 All of these pass in a normal build, under AddressSanitizer (except `data_test`'s time limit),
 and under ThreadSanitizer.
 
-## 5. Changes from the previous pg-raft version
+## 5. Changes from the previous version
 
 - The header was 3–4 host-order words. It is now 6 little-endian words, so the wire format is
   incompatible with the old version.
@@ -236,22 +233,19 @@ and under ThreadSanitizer.
   identity `strncpy` used `max` instead of `min`, which could overflow its buffer.
 - `Server` gained the handshake timeout, the accept-error handling, and the TLS byte.
 
-## 6. Differences from sparrowdb `lib/net`
+## 6. Design notes
 
-| sparrowdb | pg-raft | Why |
+| Feature | Current state | Why |
 |---|---|---|
-| TLS with generated certificates (`ssl::Context`, `Certificates`) | TLS byte always 0. `ssl_socket` is kept in the variant. | pg-raft's `base` has no certificate support yet |
-| Roles parsed from the identity (`role:peer`), unknown roles refused | Identity passed through as `peer` | pg-raft dispatches on the identity itself (`Raft:<id>`) |
-| `Connection<kHeaderSize>` with extra header words | Non-templated `Connection` | Not needed yet |
-| One attached `const_buffer` | Up to two (`inplace_vector<const_buffer, 2>`) | Raft sends WAL from two segments in one message |
-| `Metrics` (bytes, waits, op times) | None | No metric registry in `base` |
-| `std::move_only_function`, `Logger&` | `std::function`, global `log()` | Apple clang 17's libc++ lacks `move_only_function`. pg-raft uses a global logger. |
-| `from_data` returns `T` | Returns `Result<T>` (`EBADMSG` on a bad message) | pg-raft's error convention |
+| TLS | The TLS byte is always 0; `ssl_socket` is kept in the variant | `base` has no certificate support yet |
+| Peer identity | The handshake identity is passed through as `peer` | Raft dispatches on the identity itself (`Raft:<id>`) |
+| Attached buffers | Up to two (`inplace_vector<const_buffer, 2>`) | Raft sends WAL from two segments in one message |
+| Callbacks | `std::function` | Apple clang 17's libc++ lacks `std::move_only_function` |
+| `from_data` | Returns `Result<T>` (`EBADMSG` on a bad message) | pg-raft's error convention |
 
 ## 7. Open items
 
-1. **TLS**: needs certificate support in `base` (ported from sparrowdb's `Certificates` /
-   `CertFunctions` / `ssl::Context`). The handshake and `Connection` already handle both
+1. **TLS**: needs certificate support in `base` (certificates, key pairs and an SSL context). The handshake and `Connection` already handle both
    alternatives of `socket_type`.
 2. `Server::acceptor_cancel` still sleeps in 10 ms steps while waiting for the accept loop to
-   finish. sparrowdb does the same.
+   finish.

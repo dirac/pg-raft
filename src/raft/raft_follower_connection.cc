@@ -2,8 +2,6 @@
 
 #include "src/base/logger.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_follower_connection.cpp.
-
 void RaftFollowerConnection::start() {
   Connection::start();
   read_request();
@@ -24,12 +22,11 @@ void RaftFollowerConnection::read_request() {
 }
 
 bool RaftFollowerConnection::valid(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes) {
-  auto size = std::accumulate(std::begin(blocks),
-                              std::end(blocks),
-                              size_t{0},
-                              [](size_t result, MemBlock const& b) { return result + b.size; });
-  return size == bytes.size() &&
-         std::ranges::all_of(blocks, [](MemBlock const& b) {
+  auto size = std::accumulate(
+      std::begin(blocks), std::end(blocks), size_t{0}, [](size_t result, MemBlock const& b) {
+        return result + b.size;
+      });
+  return size == bytes.size() && std::ranges::all_of(blocks, [](MemBlock const& b) {
            return b.offset >= 0 && b.offset + static_cast<off_t>(b.size) <= kWalSegmentSize;
          });
 }

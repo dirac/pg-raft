@@ -3,8 +3,8 @@
 
 #include "src/base/testing.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_log_test.cpp, with tests of the pg-raft
-// additions (RaftState snapshot, compaction, install_snapshot).
+// Fault injection (every LMDB call fails in turn), and the log operations: appends, entries,
+// snapshot and compaction, install_snapshot, term and vote.
 
 namespace {
 
@@ -156,7 +156,7 @@ struct BaseTest {
       BOOST_REQUIRE(log.open_txn == nullptr);
       BOOST_REQUIRE(log.open_cursor == nullptr);
 
-      auto r = test_fn(log);
+      auto r   = test_fn(log);
       log.fail = false;
 
       BOOST_TEST(log.open_txn == nullptr);
@@ -205,8 +205,7 @@ vector<Entry> entries(std::time_t from, size_t n, uint64_t term) {
 }  // namespace
 
 BOOST_FIXTURE_TEST_CASE(open_term_db, BaseTest) {
-  auto r =
-      exec<RaftTerm>([](RaftLog& log) -> Result<RaftTerm> { return log.open_term_db(); });
+  auto r = exec<RaftTerm>([](RaftLog& log) -> Result<RaftTerm> { return log.open_term_db(); });
   BOOST_TEST(!r.has_error());
 }
 
@@ -291,9 +290,9 @@ BOOST_FIXTURE_TEST_CASE(snapshot_and_compaction, Test) {
       .timestamp   = 90,
       .flushed_lsn = LogSeqNumber{.timeline = 1, .lsn = 712},
   };
-  auto r = exec<void>([&state](RaftLog& log) -> Result<void> {
-    return log.save_snapshot(state, /*log_size=*/20);
-  }, /*max=*/500);
+  auto r = exec<void>(
+      [&state](RaftLog& log) -> Result<void> { return log.save_snapshot(state, /*log_size=*/20); },
+      /*max=*/500);
   BOOST_TEST(r.has_value());
   BOOST_TEST((log.load_snapshot().value() == state));
 
@@ -346,8 +345,8 @@ BOOST_FIXTURE_TEST_CASE(term_and_vote, Test) {
   BOOST_TEST(log.set_current_term(RaftTerm(4)).value() == RaftTerm(4));
   BOOST_TEST(log.vote(RaftTerm(4), RaftNodeId(2)).value());
 
-  auto r = exec<bool>(
-      [](RaftLog& log) -> Result<bool> { return log.vote(RaftTerm(4), RaftNodeId(2)); });
+  auto r =
+      exec<bool>([](RaftLog& log) -> Result<bool> { return log.vote(RaftTerm(4), RaftNodeId(2)); });
   BOOST_TEST(r.value());
 }
 

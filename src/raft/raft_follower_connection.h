@@ -3,9 +3,8 @@
 #include "src/net/connection.h"
 #include "src/raft/raft_types.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_follower_connection.hpp. Difference: a request is
-// read with the WAL bytes that follow it, which are given to the server with AppendEntries and
-// InstallSnapshot (the server writes them only once it has accepted the request).
+// A request is read with the WAL bytes that follow it, which are given to the server with
+// AppendEntries and InstallSnapshot (the server writes them only once it has accepted the request).
 
 struct FollowerConnectionApi {
   virtual ~FollowerConnectionApi() = default;

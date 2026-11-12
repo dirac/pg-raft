@@ -1,4 +1,3 @@
-// Ported from sparrowdb lib/servers/zqlite.
 #pragma once
 
 #include "src/base/base.h"
@@ -29,4 +28,3 @@ struct VoteTally {
 
   mutable std::mutex mtx_;
 };
-

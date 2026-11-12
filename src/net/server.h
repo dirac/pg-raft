@@ -2,8 +2,6 @@
 
 #include "src/net/connection.h"
 
-// Ported from sparrowdb lib/net/server.hpp, without TLS (certificates) and roles.
-//
 // Handshake of an accepted connection: the server sends one byte, 1 if TLS follows (not yet
 // supported, always 0), then reads the client's 64-byte NUL-terminated identity, which is passed
 // to new_connection() as |peer|. The handshake must complete within 10 seconds.

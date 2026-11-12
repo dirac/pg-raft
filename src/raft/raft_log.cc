@@ -4,8 +4,6 @@
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_log.cpp (without the ZqState databases).
-
 namespace {
 
 /// The MDB_txn/MDB_cursor currently open on this thread, tracked by the txn_*/cursor_*
@@ -220,11 +218,14 @@ Result<RaftTerm> RaftLog::open_term_db() {
     return elog(system_error_code(rc), "env_set_maxdbs failed : {}", strerror(rc));
 
   if (int rc = env_set_checksum(term_env_, checksum_fn, sizeof(uint32_t)); rc != 0)
-    return elog(
-        system_error_code(rc), "env_set_checksum for file {0} failed : {1}", term_file, strerror(rc));
+    return elog(system_error_code(rc),
+                "env_set_checksum for file {0} failed : {1}",
+                term_file,
+                strerror(rc));
 
   if (int rc = env_open(term_env_, term_file.c_str(), no_sync_ ? MDB_NOSYNC : 0U); rc != 0)
-    return elog(system_error_code(rc), "env_open for file {0} failed : {1}", term_file, strerror(rc));
+    return elog(
+        system_error_code(rc), "env_open for file {0} failed : {1}", term_file, strerror(rc));
 
   if (int rc = txn_wbegin(term_env_, &txn); rc != 0)
     return elog(system_error_code(rc), "txn_wbegin failed : {}", strerror(rc));
@@ -318,20 +319,23 @@ Result<void> RaftLog::open_logs_db(unsigned factor, std::filesystem::path const&
         system_error_code(rc), "env_set_pagesize to {0} failed : {1}", kLmdbPageSize, strerror(rc));
 
   if (int rc = env_set_checksum(logs_env_, checksum_fn, sizeof(uint32_t)); rc != 0)
-    return elog(
-        system_error_code(rc), "env_set_checksum for file {0} failed : {1}", logs_file, strerror(rc));
+    return elog(system_error_code(rc),
+                "env_set_checksum for file {0} failed : {1}",
+                logs_file,
+                strerror(rc));
 
   // With sync_commits_ every commit syncs, otherwise the sync thread syncs the commits.
   if (int rc = env_open(logs_env_, logs_file.c_str(), sync_commits_ ? 0U : MDB_NOSYNC); rc != 0)
-    return elog(system_error_code(rc), "env_open for file {0} failed : {1}", logs_file, strerror(rc));
+    return elog(
+        system_error_code(rc), "env_open for file {0} failed : {1}", logs_file, strerror(rc));
 
   start_sync();
 
   if (int rc = txn_wbegin(logs_env_, &txn); rc != 0)
     return elog(system_error_code(rc), "txn_wbegin failed : {}", strerror(rc));
 
-  for (auto [dbi, nm] : vector<std::tuple<MDB_dbi*, char const*>>{{&logs_, "logs_"},
-                                                                  {&meta_, "meta_"}}) {
+  for (auto [dbi, nm] :
+       vector<std::tuple<MDB_dbi*, char const*>>{{&logs_, "logs_"}, {&meta_, "meta_"}}) {
     if (int rc = dbi_open(txn, nm, dbi); rc != 0) {
       txn_abort(txn);
       return elog(system_error_code(rc), "dbi_open {0} failed : {1}", nm, strerror(rc));

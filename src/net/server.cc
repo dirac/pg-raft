@@ -2,8 +2,6 @@
 
 #include "src/base/logger.h"
 
-// Ported from sparrowdb lib/net/server.cpp, without TLS (certificates) and roles.
-
 Server::Server(boost::asio::ip::tcp::acceptor acceptor)
     : io_context_(static_cast<boost::asio::io_context&>(acceptor.get_executor().context())),
       acceptor_(std::move(acceptor)),

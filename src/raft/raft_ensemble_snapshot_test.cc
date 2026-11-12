@@ -1,9 +1,8 @@
 #define BOOST_TEST_MODULE raft_ensemble_snapshot
 #include "src/raft/raft_ensemble_test_common.h"
 
-// pg-raft (sparrowdb's delete_leader / compaction tests): with frequent compaction, a node that
-// lost its files gets an InstallSnapshot (the latest entries and their segments), catches up, and
-// needs a PostgreSQL backup.
+// With frequent compaction, a node that lost its files gets an InstallSnapshot (the latest entries
+// and their segments), catches up, and needs a PostgreSQL backup.
 
 BOOST_AUTO_TEST_CASE(install_snapshot, *boost::unit_test::timeout(timeout)) {
   auto io = boost::asio::io_context{};

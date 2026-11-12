@@ -4,10 +4,6 @@
 #include "src/net/host_address.h"
 #include "src/net/socket.h"
 
-// Ported from sparrowdb lib/net/connection.hpp. Differences: no added header words (the
-// kHeaderSize template), no roles, loggers or metrics, and a message can carry up to two attached
-// buffers (raft sends WAL bytes from two segments).
-//
 // Every frame starts with six little-endian 32-bit words:
 //
 //   w0  0xDEADBEEF
@@ -80,8 +76,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
     write_data_internal(std::move(data), std::move(buff), std::move(handler));
   }
 
-  void write_data(
-      Data data, std::function<void(Result<void>)> handler = [](Result<void>) {}) {
+  void write_data(Data data, std::function<void(Result<void>)> handler = [](Result<void>) {}) {
     assert(handler);
     write_data_internal(std::move(data), {}, std::move(handler));
   }

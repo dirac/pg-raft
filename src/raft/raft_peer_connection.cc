@@ -2,8 +2,6 @@
 
 #include "src/base/logger.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_peer_connection.cpp.
-
 void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   std::unique_lock<std::mutex> lk{mtx_};
 

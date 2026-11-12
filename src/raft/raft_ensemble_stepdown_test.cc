@@ -1,8 +1,7 @@
 #define BOOST_TEST_MODULE raft_ensemble_stepdown
 #include "src/raft/raft_ensemble_test_common.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_ensemble_stepdown_test.cpp: the leader hands over
-// the leadership (RequestElection) a few times.
+// The leader hands over the leadership (RequestElection) a few times.
 
 BOOST_AUTO_TEST_CASE(stepdown, *boost::unit_test::timeout(timeout)) {
   auto io = boost::asio::io_context{};

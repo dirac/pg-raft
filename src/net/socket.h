@@ -2,8 +2,6 @@
 
 #include "src/base/base.h"
 
-// Ported from sparrowdb lib/net/socket.hpp.
-//
 // Socket wrappers that serialize the calls on the socket with a mutex (reads and writes are
 // initiated from different threads) and count the reads, which the connection uses to detect a
 // silent peer.

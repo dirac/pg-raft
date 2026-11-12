@@ -10,9 +10,9 @@ RaftIndex MatchIndexes::commit_index(RaftIndex const commit_idx) {
   std::ranges::sort(tmp_);
 
   unsigned c = 0;
-  std::ranges::for_each(std::ranges::reverse_view(tmp_), [&c](std::tuple<RaftIndex, unsigned>& elem) {
-    c = (std::get<unsigned>(elem) += c);
-  });
+  std::ranges::for_each(
+      std::ranges::reverse_view(tmp_),
+      [&c](std::tuple<RaftIndex, unsigned>& elem) { c = (std::get<unsigned>(elem) += c); });
 
   while (!tmp_.empty() && std::get<unsigned>(tmp_.back()) < quorum_)
     tmp_.pop_back();
@@ -22,4 +22,3 @@ RaftIndex MatchIndexes::commit_index(RaftIndex const commit_idx) {
 
   return std::get<RaftIndex>(tmp_.back());
 }
-

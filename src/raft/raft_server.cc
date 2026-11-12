@@ -4,9 +4,6 @@
 #include "src/base/logger.h"
 #include "src/net/async_connect.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_server.cpp (see raft_server.h for the
-// differences).
-
 RaftServer::RaftServer(RaftNodeId                     id,
                        boost::asio::ip::tcp::acceptor acceptor,
                        Config const&                  config,
@@ -258,8 +255,8 @@ Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) cons
     if (fd == -1 && errno != EEXIST)
       return elog(system_error_code(errno), "{}Unable to create {}", log_prefix_, file);
     if (fd != -1) {
-      int rc = ::ftruncate(fd, kWalSegmentSize);
-      auto e = errno;
+      int  rc = ::ftruncate(fd, kWalSegmentSize);
+      auto e  = errno;
       ::close(fd);
       if (rc != 0)
         return elog(system_error_code(e), "{}Unable to size {}", log_prefix_, file);
@@ -286,9 +283,8 @@ bool RaftServer::tick(bool force) {
   if (!is_leader())
     return false;
 
-  if (!force && std::time(nullptr) <
-                    (last_entry_time_.load(std::memory_order_relaxed) +
-                     static_cast<std::time_t>(options_.tick_seconds)))
+  if (!force && std::time(nullptr) < (last_entry_time_.load(std::memory_order_relaxed) +
+                                      static_cast<std::time_t>(options_.tick_seconds)))
     return false;
 
   last_entry_time_.store(std::time(nullptr), std::memory_order_relaxed);

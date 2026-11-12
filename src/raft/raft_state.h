@@ -2,8 +2,8 @@
 
 #include "src/raft/raft_types.h"
 
-/// The state machine, in place of sparrowdb's ZqState. The replicated state is the WAL itself (the
-/// segment files, written as the entries are received); what is applied is the position:
+/// The state machine. The replicated state is the WAL itself (the segment files, written as the
+/// entries are received); what is applied is the position:
 ///
 ///  - log_idx: the last entry applied.
 ///  - timestamp: the time of the last entry applied.

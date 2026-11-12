@@ -2,8 +2,7 @@
 
 #include "src/base/base.h"
 
-// Ported from sparrowdb's Config::ZqConfig (session and lock options dropped, snapshot_entries
-// added, no leader_compaction_lag: a pg-raft leader compacts its own log).
+// The options of the raft servers.
 struct Options {
   unsigned election_timeout_msecs   = 200;
   unsigned reconnect_interval_msecs = 2000;  // Attempt reconnect after 2 seconds.

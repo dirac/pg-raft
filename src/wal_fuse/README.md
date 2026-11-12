@@ -31,7 +31,7 @@ PostgreSQL writes WAL as if to `pg_wal/` normally. Every `write` and `fsync` cal
 - `debug_wal_ops` — interactive WAL operation debugger (not in any test suite)
 - `wal_fuse_bench` — microbenchmark for FUSE write throughput
 
-Build either with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
+Build either with `/opt/pg_raft/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
 ## FUSE include note
 

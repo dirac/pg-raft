@@ -1,8 +1,7 @@
 #define BOOST_TEST_MODULE raft_ensemble_leader_stopped
 #include "src/raft/raft_ensemble_test_common.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_ensemble_leader_stopped_test.cpp: the leader
-// crashes three times, and comes back.
+// The leader crashes three times, and comes back.
 
 BOOST_AUTO_TEST_CASE(leader_stopped, *boost::unit_test::timeout(timeout)) {
   auto io = boost::asio::io_context{};

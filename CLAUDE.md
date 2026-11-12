@@ -9,58 +9,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **WAL interception** (`wal_fuse`) — a FUSE filesystem that mounts over `pg_wal` so that all WAL writes are transparently redirected to a separate `raft_dir/pg_wal` directory under pg-raft's control.
 2. **WAL streaming** (`wal_sender`) — a C++ server that speaks the PostgreSQL physical streaming replication protocol, streaming WAL from disk to a real PostgreSQL standby.
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
-4. **Raft** (`raft`) — consensus over the WAL stream (ported from sparrowdb's zqlite raft). `src/proxy/` is empty.
+4. **Raft** (`raft`) — consensus over the WAL stream. `src/proxy/` is empty.
 
 Per-component design documents are in `docs/design/` (one per module, plus `README.md`).
 
 ## Build system
 
-This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/sparrow/bin/b2`. All external dependencies (Boost, OpenSSL, lmdb, fuse) are installed under `/opt/pg_raft/` and `/usr/local/` (see `Jamroot.jam` for exact search paths).
+This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/pg_raft/bin/b2`. All external dependencies (Boost, OpenSSL, lmdb, fuse) are installed under `/opt/pg_raft/` and `/usr/local/` (see `Jamroot.jam` for exact search paths).
 
 All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
 ```bash
 # Build everything
-/opt/sparrow/bin/b2
+/opt/pg_raft/bin/b2
 
 # Build + run all tests
-/opt/sparrow/bin/b2 test
+/opt/pg_raft/bin/b2 test
 
 # Build only a module
-/opt/sparrow/bin/b2 src/process
-/opt/sparrow/bin/b2 src/wal_sender
-/opt/sparrow/bin/b2 src/wal_fuse
-/opt/sparrow/bin/b2 src/net
-/opt/sparrow/bin/b2 src/status
-/opt/sparrow/bin/b2 src/raft
+/opt/pg_raft/bin/b2 src/process
+/opt/pg_raft/bin/b2 src/wal_sender
+/opt/pg_raft/bin/b2 src/wal_fuse
+/opt/pg_raft/bin/b2 src/net
+/opt/pg_raft/bin/b2 src/status
+/opt/pg_raft/bin/b2 src/raft
 
 # Build + run a specific unit-test target (auto-runs after build)
-/opt/sparrow/bin/b2 src/base//semaphore_lock_test
-/opt/sparrow/bin/b2 src/base//xxhash_test
-/opt/sparrow/bin/b2 src/process//process_test
-/opt/sparrow/bin/b2 src/process//pg_instance_test
-/opt/sparrow/bin/b2 src/wal_sender//wal_sender_test
-/opt/sparrow/bin/b2 src/wal_sender//pg_wal_switch_test
-/opt/sparrow/bin/b2 src/wal_sender//standby_wal_reset_test
-/opt/sparrow/bin/b2 src/wal_fuse//fuse_test
-/opt/sparrow/bin/b2 src/wal_fuse//wal_fuse_ops_test
-/opt/sparrow/bin/b2 src/wal_fuse//wal_state_test
-/opt/sparrow/bin/b2 src/wal_fuse//wal_shadow_test
-/opt/sparrow/bin/b2 src/net//async_connect_test
-/opt/sparrow/bin/b2 src/net//data_test
-/opt/sparrow/bin/b2 src/net//connection_test
-/opt/sparrow/bin/b2 src/status//pg_client_test
-/opt/sparrow/bin/b2 src/raft//raft_log_test
-/opt/sparrow/bin/b2 src/raft//raft_ensemble_sanity_test   # also _leader_stopped_, _stepdown_, _snapshot_
+/opt/pg_raft/bin/b2 src/base//semaphore_lock_test
+/opt/pg_raft/bin/b2 src/base//xxhash_test
+/opt/pg_raft/bin/b2 src/process//process_test
+/opt/pg_raft/bin/b2 src/process//pg_instance_test
+/opt/pg_raft/bin/b2 src/wal_sender//wal_sender_test
+/opt/pg_raft/bin/b2 src/wal_sender//pg_wal_switch_test
+/opt/pg_raft/bin/b2 src/wal_sender//standby_wal_reset_test
+/opt/pg_raft/bin/b2 src/wal_fuse//fuse_test
+/opt/pg_raft/bin/b2 src/wal_fuse//wal_fuse_ops_test
+/opt/pg_raft/bin/b2 src/wal_fuse//wal_state_test
+/opt/pg_raft/bin/b2 src/wal_fuse//wal_shadow_test
+/opt/pg_raft/bin/b2 src/net//async_connect_test
+/opt/pg_raft/bin/b2 src/net//data_test
+/opt/pg_raft/bin/b2 src/net//connection_test
+/opt/pg_raft/bin/b2 src/status//pg_client_test
+/opt/pg_raft/bin/b2 src/raft//raft_log_test
+/opt/pg_raft/bin/b2 src/raft//raft_ensemble_sanity_test   # also _leader_stopped_, _stepdown_, _snapshot_
 
 # Run a single Boost.Test case within a unit-test binary (pass args after --):
-/opt/sparrow/bin/b2 src/process//process_test -- --run_test=TestCaseName
+/opt/pg_raft/bin/b2 src/process//process_test -- --run_test=TestCaseName
 # Or run the binary directly for full Boost.Test flags (--log_level=all, etc.):
 ./src/process/bin/clang-darwin-17/debug/cxxstd-23-iso/link-static/visibility-hidden/process_test --run_test=TestCaseName
 
 # Build with sanitizers
-/opt/sparrow/bin/b2 address-sanitizer=norecover
-/opt/sparrow/bin/b2 thread-sanitizer=norecover
+/opt/pg_raft/bin/b2 address-sanitizer=norecover
+/opt/pg_raft/bin/b2 thread-sanitizer=norecover
 ```
 
 Build artifacts land in `src/<module>/bin/clang-darwin-17/debug/cxxstd-23-iso/link-static/visibility-hidden/` (sanitizer builds add a `thread-sanitizer-norecover/` or `address-sanitizer-norecover/` path component).
@@ -104,13 +104,13 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 - **`formatter.h`** — Specializes `std::formatter<std::filesystem::path>` so paths work directly in `std::format` calls.
 - **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, `Bytes`, etc.) and `asio` as an alias for `boost::asio`.
 - **`base.h`** — Also exposes: `kWalBlockSize` (8192), `kWalSegmentSize` (16 MiB), `LogSeqNumber`, `log_seq_number(path)` (parses a 24-hex-char WAL file name), `filename(lsn)`, `epoch_msec()` (wall-clock ms), `pcounter()`/`gcounter()` (monotonic counters), `tmp_dir()`/`tmp_file()` (temp path helpers), `file_mode()`, `system_error_code(errno)`.
-- **`xxhash.h`** — `xxhash32(buffer | vector<const_buffer> | ptr+size | Bytes, seed)`, ported from sparrowdb. The hash of a buffer vector equals the hash of their concatenation. Used as the frame checksum in `net`.
+- **`xxhash.h`** — `xxhash32(buffer | vector<const_buffer> | ptr+size | Bytes, seed)`. The hash of a buffer vector equals the hash of their concatenation. Used as the frame checksum in `net`.
 - **`WalSegment`** (`wal_segment.h/cc`) — Shared, ref-counted mmap wrapper for a WAL segment file on disk: `WalSegment(shared_ptr<WalSegmentCache>, dir, lsn)`. `open()` mmap's the file `PROT_READ|PROT_WRITE|MAP_SHARED` and registers it in the `WalSegmentCache` (`mutex` + `map<LogSeqNumber, Mapping>`) so that openers sharing a cache share the mapping; if `X` doesn't exist it opens `.X` (see `WalFuseOps::op_unlink`). `mapping()` returns the base pointer; `write(buf, off, size)` copies into it; `const_buffer(off, size)` is a zero-copy view; `fsync(off, size)` page-aligns and `msync`s. GC on every `open`/destructor evicts unreferenced mappings idle for ≥ 5 s, and all unreferenced ones when more than 5 remain. Used by `wal_fuse` and `raft`.
 - **`WalTracker`** (`wal_segment.h`) — Receiver of WAL events, with default implementations: `async_publish(segment, offset, size)` (no-op) is called as WAL bytes are validated; `async_fsync(segment, offset, size, completion)` is called on fsync and must call `completion(Result<void>)` once the range is durable (default: local `msync`). The raft layer is meant to implement it.
 - **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
 - **`SemaphoreLock`** (`semaphore_lock.h`) — RAII guard for `std::binary_semaphore`, analogous to `std::unique_lock`. Constructor does a non-blocking `try_acquire`; call `acquire()` to block if needed. `owns()` / `operator bool()` test ownership. Explicit `release()` available before destruction.
 
-**`src/net/`** — Async framed messaging on Boost.Asio, **ported from sparrowdb `lib/net`, which is the reference implementation** — follow it when changing this module. Deliberate differences: no TLS setup (no certificates in `base` yet), no roles, no metrics, `std::function`, `from_data` returns `Result<T>`, and up to two attached buffers per message. See `docs/design/net.md`.
+**`src/net/`** — Async framed messaging on Boost.Asio. No TLS setup yet (no certificates in `base`), `std::function` callbacks, `from_data` returns `Result<T>`, and up to two attached buffers per message. See `docs/design/net.md`.
 
 - **`socket.h`** — `tcp_socket` / `ssl_socket` wrappers that serialize socket calls with a mutex and count reads (`counter()`). `socket_type = std::variant<tcp_socket, ssl_socket>`; keep the `ssl_socket` alternative so TLS can be enabled later (nothing creates one yet).
 - **`Connection`** — Framed-message connection. Every frame has a 6-word little-endian header (magic `0xDEADBEEF`, frame counter, kind/sizes, xxhash32 checksums). `write_data(Data, {buf0, buf1}, handler)` / `write_data(Data, handler)` send a message plus up to two attached buffers (caller keeps them alive until the handler runs); `read_data_and_buff(handler)` receives `Result<tuple<Data, Bytes>>` (attached bytes concatenated), `read_data(handler)` receives messages without attached bytes. `read_file()` / `write_file()` stream files in 64 KiB chunks, each xxhash32-checked. Checksum mismatches close the connection with `EBADMSG`. All calls are thread-safe and callbacks are posted. With a timeout, a status request goes out every `clamp(timeout/10, 100 ms, 1 s)` and the connection closes with `ETIMEDOUT` if the socket read counter stops moving (`timeout_and_times()`). `status()` / `set_peer_status()` carry a one-byte peer status on heartbeats. `write_test_delay()` delays writes 5 s (tests). Instantiate via `Connection::create<DerivedType>(...)`, which calls `start()` (once). Override `on_shutdown()` to clean up.
@@ -152,14 +152,14 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 - **`WalTracker`** — defined in `src/base/wal_segment.h` (see `base`).
 
-Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
+Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/pg_raft/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
-**`src/raft/`** — Raft over the WAL stream, **ported from sparrowdb `lib/servers/zqlite`, which is the reference implementation**; follow it when changing this module. Built and tested. See `docs/design/raft.md`.
+**`src/raft/`** — Raft over the WAL stream. Built and tested. See `docs/design/raft.md`.
 
 - **Entries** (`raft_types.h`, `wal_types.h`): `Entry{time, term, WalCommand}`. The primary generates the `WalCommand`s itself (`WriteOp`/`FlushOp`/... on a segment, plus its `flushed_lsn`); a tick entry has a `monostate` command. A `RaftRequest` carries up to two `MemBlock`s, whose WAL bytes follow the request as an attached buffer. `send_request` copies them out of the mmap, because PostgreSQL keeps writing to the segment and the frame checksum must match.
-- **`RaftState`** (`raft_state.h`, replaces `ZqState`): `log_idx`, `timestamp`, committed `flushed_lsn`, `needs_backup`. `RaftApplier::applied()` / `installed()` notify the node (for example to advance the WalSender).
-- **`RaftLog`**: sparrowdb's LMDB log (xxhash32 page checksums, 16 KiB pages, background sync unless `sync_commits`, `no_sync` for tests) with a `meta_` table holding `RaftState`. Provides `save_snapshot(state, keep)` and `install_snapshot(log_idx, entries, state)`.
-- **`RaftServer`**: elections, two-phase leadership, step-down and compaction, as in sparrowdb, except that the leader also compacts. `exec(WalCommand, handler)` is leader-only; the handler gets the index on commit or `ErrorCode::kNotLeader`, and runs with the server lock held. `segment(lsn)` returns `wal_dir` segments through one `WalSegmentCache`. A follower writes WAL blocks only after it has accepted the request. `raft_log()` is the log accessor (not `log()`, which would hide the global logger). The node sets `set_serving()`, `set_pg_status()` and `set_backup_provider()`.
+- **`RaftState`** (`raft_state.h`, the state machine): `log_idx`, `timestamp`, committed `flushed_lsn`, `needs_backup`. `RaftApplier::applied()` / `installed()` notify the node (for example to advance the WalSender).
+- **`RaftLog`**: LMDB log (xxhash32 page checksums, 16 KiB pages, background sync unless `sync_commits`, `no_sync` for tests) with a `meta_` table holding `RaftState`. Provides `save_snapshot(state, keep)` and `install_snapshot(log_idx, entries, state)`.
+- **`RaftServer`**: elections, two-phase leadership, step-down and compaction; the leader also compacts (stepping down to compact would be a PostgreSQL failover). `exec(WalCommand, handler)` is leader-only; the handler gets the index on commit or `ErrorCode::kNotLeader`, and runs with the server lock held. `segment(lsn)` returns `wal_dir` segments through one `WalSegmentCache`. A follower writes WAL blocks only after it has accepted the request. `raft_log()` is the log accessor (not `log()`, which would hide the global logger). The node sets `set_serving()`, `set_pg_status()` and `set_backup_provider()`.
 - **InstallSnapshot**: the latest `snapshot_entries` entries plus the full contents of their at most 2 segments. The follower then has `needs_backup` set and must fetch a PostgreSQL backup (phase 2, not yet wired).
 - **Connections**: `RaftPeerConnection` (outbound, identity `Raft:<id>`), `RaftFollowerConnection` (inbound), `PeerConnectionMgr`, and `RaftClientConnection` / `RaftServerConnection` for the client channel (`client_types.h`: `StatusRequest`; `SnapshotRequest` → `SnapshotResponse` followed by the backup files; used by the proxy and by nodes that need a backup).
 - **Tests**: `raft_log_test`; `raft_ensemble_{sanity,leader_stopped,stepdown,snapshot}_test` run in-process ensembles (`RaftTestService`) with a `Writer` that plays the primary, checked by `check_consistency` (log matching, states, WAL bytes of every acknowledged write).

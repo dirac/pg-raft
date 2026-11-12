@@ -2,7 +2,7 @@
 
 #include "src/base/base.h"
 
-/// xxHash32 (https://github.com/Cyan4973/xxHash). Ported from sparrowdb lib/base/xxhash.
+/// xxHash32 (https://github.com/Cyan4973/xxHash).
 /// Used as the frame checksum in src/net.
 
 uint32_t xxhash32(::boost::asio::const_buffer const& input, uint32_t seed = 0);

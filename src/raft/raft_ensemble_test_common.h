@@ -6,9 +6,8 @@
 #include "src/base/xxhash.h"
 #include "src/raft/raft_test_service.h"
 
-// Ported from sparrowdb lib/servers/zqlite/raft_ensemble_test_common.hpp. Where sparrowdb's
-// clients send ZqRequests, a Writer plays the primary: it writes WAL bytes into the leader's
-// segments and appends WriteOp/FlushOp entries with exec().
+// A Writer plays the primary: it writes WAL bytes into the leader's segments and appends
+// WriteOp/FlushOp entries with exec().
 
 using namespace std::chrono_literals;
 
@@ -94,11 +93,10 @@ struct Writer {
       }
 
       // Now and then an fsync, the durability barrier.
-      if ((++n % 16U) == 0)
-        (void)exec(s,
-                   WalCommand{.flushed_lsn = flushed,
-                              .segment     = lsn,
-                              .command     = FlushOp{.offset = 0, .size = static_cast<size_t>(op.offset) + size}});
+      if ((++n % 16U) == 0) {
+        auto const flush = FlushOp{.offset = 0, .size = static_cast<size_t>(op.offset) + size};
+        (void)exec(s, WalCommand{.flushed_lsn = flushed, .segment = lsn, .command = flush});
+      }
     }
   }
 

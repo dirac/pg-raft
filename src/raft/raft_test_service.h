@@ -2,8 +2,7 @@
 
 #include "src/raft/raft_server.h"
 
-// Ported from sparrowdb lib/servers/zqlite/zq_test_service.hpp: an ensemble of raft servers in one
-// process, for the tests.
+// An ensemble of raft servers in one process, for the tests.
 
 /// A RaftServer that can simulate a crash: the shutdown skips the leadership transfer and closes
 /// every accepted connection, as the OS does when the process dies.

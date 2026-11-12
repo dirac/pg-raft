@@ -2,8 +2,8 @@
 
 #include "src/base/base.h"
 
-// The command of a raft log entry. Where sparrowdb's clients send ZqRequests, here the primary
-// generates the commands itself, from the WAL writes that the FUSE layer intercepts.
+// The command of a raft log entry. The primary generates the commands itself, from the WAL writes
+// that the FUSE layer intercepts.
 
 struct TimelineOp {
   uint64_t timeline;

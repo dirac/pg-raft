@@ -2,8 +2,8 @@
 
 #include "src/base/logger.h"
 
-// Ported from sparrowdb lib/net/async_connect.cpp, without TLS: if the server asks for TLS (its
-// first byte is not 0) the connect fails with ENOTSUP.
+// TLS is not supported yet: if the server asks for TLS (its first byte is not 0) the connect fails
+// with ENOTSUP.
 
 Result<socket_type> connect(boost::asio::io_context& io_context,
                             string const&            self,

@@ -3,8 +3,6 @@
 #include "src/base/logger.h"
 #include "src/net/async_connect.h"
 
-// Ported from sparrowdb lib/servers/zqlite/peer_connection_mgr.cpp.
-
 PeerConnectionMgr::PeerConnectionMgr(boost::asio::io_context& io_context,
                                      RaftNodeId               self_id,
                                      Config const&            config,
@@ -66,10 +64,9 @@ void PeerConnectionMgr::close() {
   log(INFO,
       "{}Connections hanging around {}",
       log_prefix_,
-      std::accumulate(
-          std::begin(weak_ptrs), std::end(weak_ptrs), 0L, [](long result, auto& ptr) {
-            return result + ptr.use_count();
-          }));
+      std::accumulate(std::begin(weak_ptrs), std::end(weak_ptrs), 0L, [](long result, auto& ptr) {
+        return result + ptr.use_count();
+      }));
 }
 
 vector<shared_ptr<RaftPeerConnection>> PeerConnectionMgr::get_connections() {
@@ -98,13 +95,13 @@ void PeerConnectionMgr::set_connection(
   } else {
     log(INFO, "{}Connected to node={}", log_prefix_, idx);
 
-    auto created =
-        Connection::create<RaftPeerConnection>(self_id_,
-                                               /*peer_id=*/RaftNodeId{idx},
-                                               server,
-                                               std::move(socket.value()),
-                                               std::chrono::seconds(options_.connection_timeout_secs),
-                                               options_);
+    auto created = Connection::create<RaftPeerConnection>(
+        self_id_,
+        /*peer_id=*/RaftNodeId{idx},
+        server,
+        std::move(socket.value()),
+        std::chrono::seconds(options_.connection_timeout_secs),
+        options_);
 
     if (auto conn = set_connection(idx, created); conn)
       on_connect(conn);
@@ -127,9 +124,9 @@ void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi> const&            
       continue;
 
     auto       last_connect = last_connect_attempt_.at(idx).load();
-    auto const due          = last_connect == 0 ||
-                     (last_connect != kConnecting &&
-                      last_connect + options().reconnect_interval_msecs < epoch_msec());
+    auto const due =
+        last_connect == 0 || (last_connect != kConnecting &&
+                              last_connect + options().reconnect_interval_msecs < epoch_msec());
     if (due && last_connect_attempt_.at(idx).compare_exchange_strong(last_connect, kConnecting)) {
       log(INFO, "{}Connecting to node={} last try @ {}", log_prefix_, idx, last_connect);
 
@@ -140,7 +137,8 @@ void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi> const&            
                         .port    = config.servers.at(idx).ha_port,
                     },
                     [this, s = self(), idx, server, on_connect](Result<socket_type> socket) {
-                      set_connection(static_cast<uint16_t>(idx), server, on_connect, std::move(socket));
+                      set_connection(
+                          static_cast<uint16_t>(idx), server, on_connect, std::move(socket));
                     });
     }
   }

@@ -3,8 +3,6 @@
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
-// Ported from sparrowdb lib/net/connection.cpp.
-
 using ::boost::system::error_code;
 
 namespace {
@@ -263,37 +261,34 @@ void Connection::do_read_data(uint32_t data_size,
   if (buff_size != 0U)
     buffs.emplace_back(buff.data(), buff.size());
 
-  auto handler = [this,
-                  s    = self(),
-                  data = std::move(data),
-                  buff = std::move(buff),
-                  data_chk,
-                  buff_chk](error_code const& ec, size_t length) mutable {
-    clear(outstanding_read_req_);
-    if (ec) {
-      enqueue<ReadData>(ec, read_data_q_);
-      return shutdown(ec);
-    }
-    assert(length == (data.capacity() + buff.size()));
-    (void)length;
+  auto handler =
+      [this, s = self(), data = std::move(data), buff = std::move(buff), data_chk, buff_chk](
+          error_code const& ec, size_t length) mutable {
+        clear(outstanding_read_req_);
+        if (ec) {
+          enqueue<ReadData>(ec, read_data_q_);
+          return shutdown(ec);
+        }
+        assert(length == (data.capacity() + buff.size()));
+        (void)length;
 
-    if (auto v = xxhash32(data.const_buffer()); v != data_chk) {
-      auto ec = system_error_code(EBADMSG);
-      log(ERROR, "{}Data checksum did not match {} vs {}", log_prefix(), data_chk, v);
-      enqueue<ReadData>(ec, read_data_q_);
-      return shutdown(ec);
-    }
+        if (auto v = xxhash32(data.const_buffer()); v != data_chk) {
+          auto ec = system_error_code(EBADMSG);
+          log(ERROR, "{}Data checksum did not match {} vs {}", log_prefix(), data_chk, v);
+          enqueue<ReadData>(ec, read_data_q_);
+          return shutdown(ec);
+        }
 
-    if (auto v = xxhash32(buff); v != buff_chk) {
-      auto ec = system_error_code(EBADMSG);
-      log(ERROR, "{}Buffer checksum did not match {} vs {}", log_prefix(), buff_chk, v);
-      enqueue<ReadData>(ec, read_data_q_);
-      return shutdown(ec);
-    }
+        if (auto v = xxhash32(buff); v != buff_chk) {
+          auto ec = system_error_code(EBADMSG);
+          log(ERROR, "{}Buffer checksum did not match {} vs {}", log_prefix(), buff_chk, v);
+          enqueue<ReadData>(ec, read_data_q_);
+          return shutdown(ec);
+        }
 
-    enqueue<ReadData>(std::make_tuple(std::move(data), std::move(buff)), read_data_q_);
-    return do_read_header();
-  };
+        enqueue<ReadData>(std::make_tuple(std::move(data), std::move(buff)), read_data_q_);
+        return do_read_header();
+      };
 
   async_read(std::move(buffs), std::move(handler));
 }
