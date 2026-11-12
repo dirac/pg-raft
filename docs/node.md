@@ -76,11 +76,13 @@ primary by up to one poll interval.
 - The WAL sender reads `raft/wal`. `RaftObserver::applied()` calls
   `WalSender::advance(state.flushed_lsn)` for each connected sender, so the standby receives only
   committed WAL.
-- **Why `flushed_lsn` and not the end of the `WriteOp`s:** PostgreSQL writes and fsyncs WAL in
-  whole pages. A write covers the whole page even when only 10 bytes of it are new, and so does an
-  fsync. From FUSE, the `WriteOp` and `FlushOp` ranges therefore don't tell how far the WAL has
-  really progressed. Only PostgreSQL's own flush LSN (`pg_current_wal_flush_lsn()`, polled from
-  the primary, §2.1) marks a point the standby may safely stream to. The cost is that standbys lag
+- **Why `flushed_lsn` and not the end of the `WriteOp`s:** PostgreSQL writes WAL in whole pages,
+  and a page can end with a record whose space is reserved but whose body hasn't been copied yet.
+  The FUSE parser only walks record lengths (it checks no CRC), so a `WriteOp` can end inside such
+  an incomplete record (see [wal_fuse.md](wal_fuse.md#25-walfusesegment-parse-publish-and-fsync)).
+  The `WriteOp` and `FlushOp` ranges therefore don't tell how far the valid, flushed WAL reaches.
+  Only PostgreSQL's own flush LSN (`pg_current_wal_flush_lsn()`, polled from the primary, §2.1)
+  marks a point the standby may safely stream to. The cost is that standbys lag
   the primary by up to one poll interval.
 - The standby writes what it receives into its own `pg_wal`, which is the FUSE mount (backed by
   `pg/pg_wal`), with the tracker in **follower mode**. On a follower the FUSE layer does **not**
@@ -156,10 +158,10 @@ is a polled value and always stale, so it can stop short of WAL the old primary 
 acknowledged. At full leadership every entry in the log is committed, so everything in `raft/wal`
 is committed WAL.
 
-1. Advance the WAL sender to the **end of the WAL in `raft/wal`**: `state.wal_end`, the end of the
-   last applied `WriteOp` (segment + offset + size). This is a small raft change: `RaftState`
-   tracks `wal_end` as it applies entries. `wal_end` is page-granular (a `WriteOp` covers whole
-   pages, §2.2), so it can be past the last valid record; that is fine here, because PostgreSQL
+1. Advance the WAL sender to the **end of the WAL in `raft/wal`**: `state.wal_end`, the highest
+   end (segment + offset + size) of the applied `WriteOp`s. It is a maximum, not the end of the
+   last `WriteOp`, because a rewritten page is published again over earlier offsets. A `WriteOp` can end inside an incomplete record
+   (§2.2), so `wal_end` can be past the last valid record; that is fine here, because PostgreSQL
    stops replaying at the last complete record.
 2. Wait until the standby has received all of it: its `StandbyStatusUpdate` (the WAL sender's
    `StatusCb`, which `WalSenderServer` must now pass on) reports

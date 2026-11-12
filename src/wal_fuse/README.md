@@ -11,9 +11,9 @@ data_dir/pg_wal/      ← FUSE mount point (left empty by PgInstance::create_raf
 raft_dir/pg_wal/      ← backing directory with the real segment files
 ```
 
-PostgreSQL writes WAL to `pg_wal/` as usual. Each write is validated as XLog and published to a
-`WalTracker`; each fsync blocks until the `WalTracker` reports the range durable. The raft node's
-`WalTracker` reports that only once the range is committed on a quorum.
+PostgreSQL writes WAL to `pg_wal/` as usual. Each write is parsed for record boundaries and
+published to a `WalTracker`; each fsync blocks until the `WalTracker` reports the range durable.
+The raft node's `WalTracker` reports that only once the range is committed on a quorum.
 
 ## Classes
 
@@ -39,11 +39,13 @@ mapping. For WAL files:
 Other files pass through to `FuseOps`.
 
 **`WalFuseSegment`** — the per-handle parse and publish logic:
-- The first write parses the existing file to find where the valid data ends (`next_`, `synced_`).
-- `write()` advances the parse cursor with `WalState::update()`. That validates page headers
-  (`xlp_magic`, the remaining length of a record continued from the previous page) and record
-  lengths, and stops at a zeroed page. Only validated bytes are copied into the mapping and
-  published with `WalTracker::async_publish()`. A rewrite of bytes already parsed is compared, and
+- The first write parses the existing file to find where its data ends (`next_`, `synced_`).
+- `write()` advances the parse cursor with `WalState::update()`. That walks page headers
+  (`xlp_rem_len`, the remaining length of a record continued from the previous page) and record
+  lengths (`xl_tot_len`), and stops at a page whose `xlp_magic` is zero or a record whose length is
+  zero. It does not validate the WAL: no CRC, `xl_prev`, `xlp_pageaddr` or exact magic check.
+  Only the bytes it walked over are copied into the mapping and published with
+  `WalTracker::async_publish()`. A rewrite of bytes already parsed is compared, and
   re-published if it differs. A write beyond `next_` is ignored, because PostgreSQL writes it again
   later.
 - `fsync()` calls `WalTracker::async_fsync(segment, synced_, next_ - synced_, cb)` and blocks the

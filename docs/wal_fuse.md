@@ -10,8 +10,8 @@ it does this without patching PostgreSQL. `wal_fuse` mounts a user-space filesys
 `$PGDATA/pg_wal`. PostgreSQL keeps doing ordinary file I/O, and pg-raft sees each WAL `write`
 and `fsync`:
 
-- **write**: the bytes are parsed and validated as XLog, copied into the real segment file
-  through mmap, and *published* to a `WalTracker`.
+- **write**: the bytes are parsed for XLog page and record boundaries, copied into the real
+  segment file through mmap, and *published* to a `WalTracker`.
 - **fsync**: the call blocks PostgreSQL until the `WalTracker` reports that the dirty range is
   durable. The Raft implementation of `WalTracker` reports durability only after a quorum of
   nodes has the range. That turns PostgreSQL's local `synchronous_commit` into cluster-wide
@@ -103,7 +103,7 @@ State for each open handle:
 
 | Field | Meaning |
 |---|---|
-| `next_` | Parse cursor. Bytes in `[0, next_)` have been validated as XLog and published. |
+| `next_` | Parse cursor. Bytes in `[0, next_)` have been walked by the parser and published. |
 | `synced_` | Bytes in `[0, synced_)` are known durable. |
 | `state_` (`WalState`) | Incremental XLog parser state: `curr_` and the remaining bytes of the record currently being consumed (`rsize_`). |
 
@@ -117,10 +117,16 @@ most one unit** per call. Each call does one of these:
 - If `rsize_ == 0`, a record starts here. It sets `rsize_ = MAXALIGN(xl_tot_len)`.
 - It consumes `min(available, space left on the page, rsize_)` bytes.
 
-The caller loops until `consumed == 0`. The result is that **`next_` only ever lands on
-validated record or page boundaries, and never runs past the bytes PostgreSQL has actually
-produced**. PostgreSQL pre-zeroes pages ahead of time, and the zero magic marks where its output
-ends.
+The caller loops until `consumed == 0`. The result is that **`next_` stops where the bytes start
+to look unwritten**: at a page whose `xlp_magic` is zero, or at a record whose `xl_tot_len` is zero.
+PostgreSQL pre-zeroes pages ahead of time, so this is where its output ends.
+
+This is a structural walk, not validation. The parser checks only that the magic is non-zero, and
+does not check `xlp_pageaddr`, `xlp_tli`, `xl_prev` or the CRC. `XLogWrite` writes whole pages, and
+a page can hold a record whose space has been reserved and whose header has been copied but whose
+body is still zeros. The parser trusts that `xl_tot_len`, so `next_` (and the published range) can
+end inside an incomplete record. PostgreSQL's own reader rejects such a record by its CRC when a
+standby replays it.
 
 **`write(buf, size, off)`**:
 
@@ -134,7 +140,7 @@ ends.
 3. If the write starts after `next_`, it is ignored. This happens with pre-zeroing or out-of-order
    writes ahead of the parse cursor. The bytes will be written again when they become valid.
 4. Otherwise the overlapping prefix is checked as in step 2, and the new suffix is parsed with
-   `WalState`. Only the validated prefix `[begin, next_)` is `memcpy`'d into the mmap and
+   `WalState`. Only the walked prefix `[begin, next_)` is `memcpy`'d into the mmap and
    published through `tracker_.async_publish(map_, begin, len)`.
 
 **`fsync()`**: if `next_ > synced_`, it calls

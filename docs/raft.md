@@ -69,6 +69,7 @@ position:
 | `timestamp` | time of the last applied entry |
 | `flushed_lsn` | highest `flushed_lsn` applied: the committed WAL a standby may replay |
 | `needs_backup` | set when the log was replaced by an InstallSnapshot; the WAL before the snapshot's segments is missing until a PostgreSQL backup restores it |
+| `wal_end` | highest end (segment + offset + size) of the `WriteOp`s applied: the end of the WAL in `wal_dir`. A new leader's standby replays up to it before promotion (see [node.md](node.md#32-promotion-became_leader)). A maximum, because a rewritten page is published again over earlier offsets. It can end inside an incomplete record |
 
 A `RaftApplier` (set by the node) receives `applied(idx, entry, state)` for each applied entry and
 `installed(state)` after a snapshot. On a follower, `applied` advances the WalSender to

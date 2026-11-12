@@ -14,7 +14,9 @@ on a majority. See `docs/raft.md` for the full design.
   bytes are copied out of the leader's segment mmap and sent as the attached buffer of the message.
   A follower writes and msyncs them only once it has accepted the request.
 - **`RaftState`** (`raft_state.h`) — the state machine: `log_idx`, `timestamp`, the committed
-  `flushed_lsn` (how far a standby may replay), and `needs_backup` (set by InstallSnapshot).
+  `flushed_lsn` (how far a standby may replay), `needs_backup` (set by InstallSnapshot), and
+  `wal_end` (the highest end of the applied `WriteOp`s, how far a new leader's standby replays
+  before promotion).
 
 ## RaftLog
 

@@ -291,7 +291,8 @@ RaftTestService::Consistency RaftTestService::check_consistency(
     auto const& w = views.front();
     if (v.state.log_idx != w.state.log_idx)
       continue;
-    if (v.state.timestamp != w.state.timestamp || !(v.state.flushed_lsn == w.state.flushed_lsn))
+    if (v.state.timestamp != w.state.timestamp || !(v.state.flushed_lsn == w.state.flushed_lsn) ||
+        !(v.state.wal_end == w.state.wal_end))
       result.violations.emplace_back(
           std::format("The state of node {0} differs from node {1}: {2} vs {3}",
                       v.node,

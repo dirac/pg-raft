@@ -88,7 +88,8 @@ the page checksum of the raft log.
 **`WalTracker`** (`wal_segment.h`) — receives WAL events from `wal_fuse`. It has default
 implementations:
 
-- `async_publish(segment, offset, size)` — called as WAL bytes are validated (no-op by default).
+- `async_publish(segment, offset, size)` — called for WAL bytes as the FUSE parser walks over
+  them (no-op by default).
 - `async_fsync(segment, offset, size, completion)` — called on fsync. It must call
   `completion(Result<void>)` once the range is durable; the default does a local `msync`. The raft
   node implements this so that durability means a quorum (`WalSegment::kNoConsensus` reports

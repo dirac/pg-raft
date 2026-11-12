@@ -606,6 +606,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
       .timestamp    = state_.timestamp,
       .flushed_lsn  = state_.flushed_lsn,
       .needs_backup = true,
+      .wal_end      = state_.wal_end,
   };
   value(log_.install_snapshot(request.log_idx, request.entries, state));
 
