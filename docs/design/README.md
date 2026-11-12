@@ -12,7 +12,7 @@ way, and the known gaps.
 | `wal_fuse` | [wal_fuse.md](wal_fuse.md) | Implemented, tested |
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
 | `raft` | [raft.md](raft.md) | Partially implemented; not in the top-level build |
-| `proxy` | [proxy.md](proxy.md) | Not started (empty directory) |
+| `proxy` | [proxy.md](proxy.md) | Designed; not started (empty directory) |
 
 `base` is shared infrastructure (logger, `Result<T>`, `Int<T,L>`, `Config`, `IoThreads`,
 `WalSegment`), and `CLAUDE.md` describes it. This set covers `WalSegment` because `wal_fuse` and
@@ -36,8 +36,10 @@ log**:
    `WalSenderServer` (`wal_sender`) that is advanced only to the *committed* LSN.
 5. `process` runs the PostgreSQL instances (initdb, start/stop, promote, backup/restore).
    `status` queries them (LSNs, recovery state) without libpq.
-6. `proxy` (planned) is the client entry point. It forwards PostgreSQL connections to the
-   current leader.
+6. `proxy` (planned) is the client entry point. It is a plain TCP proxy, not built on `net`.
+   Port `proxy_pg_port` forwards to the current leader, and `proxy_pg_port + 1 + i` forwards to
+   `servers[i]`. TLS passes through to PostgreSQL. The proxy learns the leader from the nodes
+   over `RaftServerConnection`.
 
 ```
             client ──▶ proxy ──▶ leader postgres

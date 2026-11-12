@@ -153,7 +153,7 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 
 **`src/raft/`** — Raft over the WAL stream. **Not built**: `raft` is missing from `src/Jamfile`, and `raft_server.{h,cc}` is a partial port from an older ZooKeeper-style Raft that still references types and headers that do not exist here (`ZkRequest`, `ZkState`, `snapshot.h`, `zk_state.h`, `net/ssl_context.h`, `banyandb::`, `LOG_*`). Written for pg-raft: `raft_types.h` (`RaftRequest`/`RaftResponse` envelopes, `AppendEntries`, `RequestVote`, `InstallSnapshot`, `RequestElection`, `MemBlock`, `Status`), `wal_types.h` (`Entry` payload `WalCommand`: open/write/flush/close/timeline ops on a segment plus the leader's `flushed_lsn`), `client_types.h`, `options.h`, `RaftLog` (LMDB `term.lmdb` + `logs.lmdb`, keys `(idx, term)` big-endian), `RaftPeerConnection` / `RaftFollowerConnection` / `PeerConnectionMgr` (WAL bytes are sent as attached buffers straight from the leader's `WalSegment` mmap and written + msync'd by the follower before it handles the request), `RaftClientConnection` / `RaftServerConnection` (leadership via the heartbeat status byte), `MatchIndexes`, `VoteTally`. `raft_log_test` exists but is not wired into the build. See `docs/design/raft.md`.
 
-**`src/proxy/`** — empty (planned client entry point forwarding to the leader; see `docs/design/proxy.md`).
+**`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/design/proxy.md`.
 
 **`src/status/`** — PostgreSQL client for querying a running instance:
 
