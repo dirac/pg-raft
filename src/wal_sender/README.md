@@ -33,14 +33,21 @@ Handles one replication connection. Everything runs on a strand; `start()`, `adv
    message with AuthenticationOk (no authentication: the socket is local),
    `server_version = 17.0`, `integer_datetimes`, `server_encoding`, BackendKeyData and
    ReadyForQuery.
-2. **Command** (simple query) — `IDENTIFY_SYSTEM`, `TIMELINE_HISTORY` (empty), `SHOW` (only
-   `wal_segment_size` has a value), `SET`, `SELECT` (one empty column), and
-   `START_REPLICATION … X/Y`, which starts streaming from `X/Y`.
+2. **Command** (simple query) — `IDENTIFY_SYSTEM` (the latest timeline), `TIMELINE_HISTORY n`
+   (the history file from `wal_dir`), `SHOW` (only `wal_segment_size` has a value), `SET`,
+   `SELECT` (one empty column), and `START_REPLICATION … X/Y [TIMELINE t]`, which starts
+   streaming timeline `t` from `X/Y`.
 3. **Streaming** (CopyBoth) — `XLogData` messages up to the flush LSN, a keepalive every 5 s, and
    `StandbyStatusUpdate` handling (a keepalive in reply when one is requested).
 
-**WAL delivery.** `advance(flush_lsn)` raises the flush LSN, then reads the segments from
-`wal_dir` with `open`/`pread` and sends them up to it. Segment file names are
+**WAL delivery.** `advance(LogSeqNumber flush_lsn)` raises the committed WAL (with its timeline),
+then reads the segments from `wal_dir` with `open`/`pread` and sends them up to it.
+
+**Timelines.** Later timelines are learned from the history files (`%08X.history`) in `wal_dir`,
+which raft writes when it applies a `TimelineOp`. A historic timeline is streamed up to its
+switch point; then the sender sends CopyDone and, after the standby's, the next timeline
+(`next_tli`, `next_tli_startpos`), and the standby continues on it. Bytes before a timeline's start
+point are read from the parent timeline's segment. Segment file names are
 `%08X%08X%08X` (timeline, segment high word, segment low word). A missing segment stops the
 reading until the next `advance()`.
 
@@ -53,3 +60,5 @@ All three need PostgreSQL and skip if it is absent:
 - `wal_sender_test` — a primary and a standby through `WalSenderServer`, with pgbench.
 - `pg_wal_switch_test` — concurrent `pg_switch_wal()` calls during pgbench.
 - `standby_wal_reset_test` — the standby's WAL is wiped while it is down, and is streamed again.
+- `timeline_switch_test` — a failover: another standby is promoted to timeline 2, and the standby
+  behind `WalSender` follows it onto timeline 2.

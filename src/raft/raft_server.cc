@@ -51,7 +51,8 @@ void RaftServer::start() {
   if (auto r = log_.open_logs_db(1U); !r)
     system_error(r.error());
 
-  state_          = load_snapshot();
+  state_ = load_snapshot();
+  publish_state();
   applied_idx_    = state_.log_idx;
   commit_idx_     = state_.log_idx;
   compaction_idx_ = commit_idx_.load();
@@ -243,6 +244,31 @@ void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
   }
 
   send_append_entries(/*check_sync_flag=*/true);
+}
+
+void RaftServer::publish_state() {
+  auto lk    = std::unique_lock{published_mtx_};
+  published_ = state_;
+}
+
+RaftState RaftServer::applied_state() const {
+  auto lk = std::unique_lock{published_mtx_};
+  return published_;
+}
+
+std::optional<TimelineOp> RaftServer::latest_timeline() const {
+  auto timeline = latest_history_timeline(wal_dir_);
+  if (!timeline)
+    return std::nullopt;
+  auto content = read_history_file(wal_dir_, *timeline);
+  if (!content) {
+    elog(content.error(),
+         "{}Unable to read the history file of timeline {}",
+         log_prefix_,
+         *timeline);
+    return std::nullopt;
+  }
+  return TimelineOp{.timeline = *timeline, .content = std::move(*content)};
 }
 
 Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) const {
@@ -597,20 +623,24 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
 
   update_last_ping(true);
 
-  // The segments of the latest entries, then the entries: the log starts after request.log_idx
-  // and the WAL before the segments is missing until a PostgreSQL backup restores it.
+  // The segments of the latest entries, the latest timeline history file, then the entries: the
+  // log starts after request.log_idx and the WAL before the segments is missing until a
+  // PostgreSQL backup restores it.
   write_blocks(blocks, bytes);
+  if (request.timeline)
+    value(write_history_file(wal_dir_, u4(request.timeline->timeline), request.timeline->content));
 
-  auto state = RaftState{
-      .log_idx      = request.log_idx,
-      .timestamp    = state_.timestamp,
-      .flushed_lsn  = state_.flushed_lsn,
-      .needs_backup = true,
-      .wal_end      = state_.wal_end,
-  };
+  // The leader's state. If it is within the entries, the follower has applied them up to it (the
+  // leader has, and the follower has their WAL, in the segments); otherwise the leader applies
+  // behind request.log_idx and its values, from earlier entries, are never ahead of the log.
+  auto state = request.state;
+  if (state.log_idx < request.log_idx || state.log_idx > request.log_idx + request.entries.size())
+    state.log_idx = request.log_idx;
+  state.needs_backup = true;
   value(log_.install_snapshot(request.log_idx, request.entries, state));
 
   state_ = state;
+  publish_state();
   applied_idx_.store(state_.log_idx);
   commit_idx_.store(state_.log_idx);
   compaction_idx_.store(state_.log_idx);
@@ -863,6 +893,13 @@ RaftIndex RaftServer::apply_entries(bool check_delay) {
 
     Entry e = entry(idx);
     state_.apply(idx, e);
+    publish_state();
+
+    // A new timeline (a promotion on the primary): its history file goes next to the segments,
+    // where the WalSender serves it (TIMELINE_HISTORY) and learns the timeline's switch point.
+    if (auto const* t = std::get_if<TimelineOp>(&e.cmd.command))
+      value(write_history_file(wal_dir_, u4(t->timeline), t->content));
+
     applied_idx_.store(idx, std::memory_order_relaxed);
     applier_->applied(idx, e, state_);
 

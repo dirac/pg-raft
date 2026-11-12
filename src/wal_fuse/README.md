@@ -35,6 +35,8 @@ mapping. For WAL files:
 - `op_write` / `op_read` / `op_fsync` go to the `WalFuseSegment`; `op_flush` does nothing.
 - `op_release` deletes the `WalFuseSegment`.
 - `op_unlink` renames `X` to `.X` instead of deleting it, because the HA layer owns WAL retention.
+- `op_rename` to a timeline history file (`%08X.history`, installed on promotion) reads it and
+  calls `WalTracker::async_timeline(timeline, content)`.
 
 Other files pass through to `FuseOps`.
 

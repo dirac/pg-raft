@@ -52,6 +52,9 @@ struct Writer {
 
   unsigned errors() const { return errors_.load(); }
 
+  /// Whether the writer now and then appends a new timeline (on by default).
+  void set_timelines(bool on) { timelines_.store(on); }
+
  private:
   void run() {
     auto     rd = std::mt19937{std::random_device{}()};
@@ -97,6 +100,19 @@ struct Writer {
         auto const flush = FlushOp{.offset = 0, .size = static_cast<size_t>(op.offset) + size};
         (void)exec(s, WalCommand{.flushed_lsn = flushed, .segment = lsn, .command = flush});
       }
+
+      // Now and then a new timeline: every server that applies it writes its history file
+      // (check_consistency).
+      if (timelines_.load() && (n % 1024U) == 0) {
+        auto const timeline = TimelineOp{
+            .timeline = 1U + n / 1024U,
+            .content  = std::format("{}\t{:X}/{:X}\tno recovery target specified\n",
+                                   n / 1024U,
+                                   o >> 32U,
+                                   o & 0xFFFFFFFFU),
+        };
+        (void)exec(s, WalCommand{.flushed_lsn = flushed, .command = timeline});
+      }
     }
   }
 
@@ -119,6 +135,7 @@ struct Writer {
   mutable std::mutex             mtx_;
   vector<RaftTestService::Write> writes_;
   std::atomic_uint               errors_{0};
+  std::atomic_bool               timelines_{true};
 
   std::atomic_flag stop_ = ATOMIC_FLAG_INIT;
   std::thread      thread_;

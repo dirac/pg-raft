@@ -71,6 +71,7 @@ A path is a WAL segment if `log_seq_number(path)` parses it as 24 hex characters
 | `op_fsync` | `segment->fsync()`, which can block (see below). |
 | `op_flush` | No-op (logged). |
 | `op_release` | Deletes the `WalFuseSegment`, which releases its `WalSegment` reference. |
+| `op_rename` | Passthrough. When the target is a timeline history file (`%08X.history`, installed by PostgreSQL on promotion), it reads the file and calls `WalTracker::async_timeline(timeline, content)`; raft replicates it as a `TimelineOp`. |
 | `op_unlink` | **Never deletes a WAL file.** Renames `X` to `.X` in the backing directory. Followers and lagging WAL senders may still need the segment, so the HA layer owns WAL retention, not PostgreSQL. `WalSegment::open()` falls back to the `.X` name when it opens a segment. |
 
 **Tagged `fh`**: `fh` is a single `uint64_t` that must distinguish "real fd" from
@@ -180,9 +181,10 @@ quorum".
 
 1. **`WalState` relies on assertions.** A corrupt `xl_tot_len` or `xlp_rem_len` (for example
    after a crash in the middle of a page) is not range-checked. CRC checks are not done.
-2. **Non-WAL writes are not replicated.** Files such as timeline history files
-   (`00000002.history`) and `archive_status/` go straight to the backing directory, even though
-   `WalCommand` has a `TimelineOp` for them. Timeline history needs an intercept path.
+2. **Non-WAL writes are not replicated**, except timeline history files (`op_rename`). Files
+   such as `archive_status/`, and the `xlogtemp.*` copy of the old segment that becomes the new
+   timeline's first segment on promotion, go straight to the backing directory. `WalSender` reads
+   that copied prefix from the parent timeline's segment instead.
 3. **Retention.** Renamed `.X` files are never removed. The Raft layer needs a GC policy based
    on the minimum applied LSN across the cluster.
 4. `op_write` always returns `size`, even when the bytes are ignored (step 3 above). That is

@@ -333,6 +333,23 @@ RaftTestService::Consistency RaftTestService::check_consistency(
     }
   }
 
+  // Every server has the history file of each timeline it applied.
+  for (auto const& v : views) {
+    for (auto idx = v.first; idx <= v.state.log_idx; ++idx) {
+      auto const* e = v.entry(idx);
+      auto const* t = e ? std::get_if<TimelineOp>(&e->cmd.command) : nullptr;
+      if (!t)
+        continue;
+      auto content = read_history_file(wal_dir(v.node), u4(t->timeline));
+      if (!content || *content != t->content)
+        result.violations.emplace_back(std::format(
+            "Node {0} applied the timeline {1} (entry {2}) but has no such history file",
+            v.node,
+            t->timeline,
+            idx));
+    }
+  }
+
   log(INFO,
       "Consistency: {} servers, accepted up to {} (logs from {} to {}), {} writes, {} violations",
       views.size(),

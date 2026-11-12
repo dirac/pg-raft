@@ -57,6 +57,12 @@ struct RecordingTracker : public WalTracker {
   std::vector<Pub> publishes;
   std::vector<Syn> fsyncs;
 
+  std::vector<std::pair<uint32_t, std::string>> timelines;
+
+  void async_timeline(uint32_t timeline, std::string const& content) override {
+    timelines.emplace_back(timeline, content);
+  }
+
   void async_publish(shared_ptr<WalSegment>, off_t off, size_t sz) override {
     publishes.push_back({off, sz});
   }
@@ -353,4 +359,65 @@ BOOST_FIXTURE_TEST_CASE(two_opens_share_segment, WalOpsFixture, *boost::unit_tes
 
   ops.op_release(kWalPath, &fi1);
   ops.op_release(kWalPath, &fi2);
+}
+
+// ── Timeline history files ────────────────────────────────────────────────────
+
+BOOST_AUTO_TEST_CASE(history_file_names) {
+  BOOST_TEST(history_filename(2) == "00000002.history");
+  BOOST_TEST(history_filename(0x1A) == "0000001A.history");
+
+  BOOST_TEST(history_timeline("00000002.history").value() == 2u);
+  BOOST_TEST(history_timeline("/0000001A.history").value() == 0x1Au);
+
+  for (auto const* name : {"00000002.history.tmp",
+                           "0000002.history",
+                           "0000000a.history",
+                           "000000010000000000000001",
+                           "xlogtemp.123",
+                           "000000010000000000000001.partial",
+                           "00000002.backup"})
+    BOOST_TEST(!history_timeline(name).has_value(), name);
+}
+
+BOOST_AUTO_TEST_CASE(history_file_write_read) {
+  TmpDir tmp;
+  auto   content = std::string{"1\t0/5000000\tno recovery target specified\n"};
+
+  BOOST_REQUIRE(write_history_file(tmp(), 2, content).has_value());
+  BOOST_TEST(read_history_file(tmp(), 2).value() == content);
+  BOOST_TEST(!read_history_file(tmp(), 3).has_value());
+
+  // Rewriting replaces it, and leaves no temporary file behind.
+  BOOST_REQUIRE(write_history_file(tmp(), 2, content + "x").has_value());
+  BOOST_TEST(read_history_file(tmp(), 2).value() == content + "x");
+  for (auto const& entry : std::filesystem::directory_iterator(tmp()))
+    BOOST_TEST(!entry.path().filename().string().ends_with(".tmp"), entry.path());
+}
+
+// PostgreSQL installs a history file on promotion by renaming xlogtemp.<pid>: the tracker gets the
+// timeline and the content. Other renames don't reach it.
+BOOST_FIXTURE_TEST_CASE(history_rename_calls_tracker,
+                        WalOpsFixture,
+                        *boost::unit_test::timeout(60)) {
+  WalFuseOps ops(tracker, backing);
+  auto       content = std::string{"1\t0/3000028\tno recovery target specified\n"};
+
+  std::ofstream(backing / "xlogtemp.123") << content;
+  BOOST_REQUIRE_EQUAL(ops.op_rename("/xlogtemp.123", "/00000002.history"), 0);
+  BOOST_REQUIRE_EQUAL(tracker.timelines.size(), 1u);
+  BOOST_TEST(tracker.timelines.at(0).first == 2u);
+  BOOST_TEST(tracker.timelines.at(0).second == content);
+  BOOST_TEST(std::filesystem::exists(backing / "00000002.history"));
+
+  // A segment installed by rename, and a rename to .partial, are not timelines.
+  std::ofstream(backing / "xlogtemp.124") << "x";
+  BOOST_REQUIRE_EQUAL(ops.op_rename("/xlogtemp.124", "/000000020000000000000003"), 0);
+  BOOST_REQUIRE_EQUAL(
+      ops.op_rename("/000000020000000000000003", "/000000020000000000000003.partial"), 0);
+  BOOST_TEST(tracker.timelines.size() == 1u);
+
+  // A failed rename reports the error and calls nothing.
+  BOOST_TEST(ops.op_rename("/missing", "/00000003.history") == -ENOENT);
+  BOOST_TEST(tracker.timelines.size() == 1u);
 }

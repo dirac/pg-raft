@@ -128,3 +128,18 @@ int WalFuseOps::op_unlink(char const* path) {
   } else
     return FuseOps::op_unlink(path);
 }
+
+int WalFuseOps::op_rename(char const* from, char const* to) {
+  if (auto r = FuseOps::op_rename(from, to); r != 0)
+    return r;
+
+  if (auto timeline = history_timeline(to); timeline) {
+    auto content = read_history_file(backing_dir(), *timeline);
+    if (!content)
+      return -content.error().value();
+
+    log(INFO, "Timeline {} installed ({} bytes of history)", *timeline, content->size());
+    tracker_.async_timeline(*timeline, *content);
+  }
+  return 0;
+}

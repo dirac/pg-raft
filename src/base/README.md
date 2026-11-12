@@ -90,10 +90,17 @@ implementations:
 
 - `async_publish(segment, offset, size)` — called for WAL bytes as the FUSE parser walks over
   them (no-op by default).
+- `async_timeline(timeline, content)` — called when PostgreSQL installs a timeline history file
+  (no-op by default); the raft node appends it as a `TimelineOp`.
 - `async_fsync(segment, offset, size, completion)` — called on fsync. It must call
   `completion(Result<void>)` once the range is durable; the default does a local `msync`. The raft
   node implements this so that durability means a quorum (`WalSegment::kNoConsensus` reports
   "local only").
+
+**History files** (`wal_segment.h`) — `history_timeline(path)` parses a `%08X.history` name,
+`history_filename(tli)` builds one, `write_history_file(dir, tli, content)` writes one atomically
+(temporary name, fsync, rename) and `read_history_file(dir, tli)` reads one. Raft writes them when
+it applies a `TimelineOp`; `WalSender` reads them.
 
 ## Testing
 

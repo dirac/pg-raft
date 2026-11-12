@@ -9,6 +9,14 @@ struct StandbyStatus {
 
 // Asio-based WAL sender.  Handles one physical replication connection.
 // Reads WAL from |wal_dir| as advance() notifications arrive.
+//
+// Timelines: |timeline| is the timeline to start from. Later timelines are learned from their
+// history files (`%08X.history`) in |wal_dir|, which raft writes there when it applies a
+// TimelineOp. The sender answers TIMELINE_HISTORY from them, streams a historic timeline up to its
+// switch point, then ends the stream with CopyDone and the (next_tli, next_tli_startpos) row, so
+// that the standby continues on the next timeline. Bytes before a timeline's start point are read
+// from the parent timeline's segment: on promotion PostgreSQL copies them into the new timeline's
+// first segment through a temporary file, which the FUSE layer doesn't replicate.
 class WalSender : public std::enable_shared_from_this<WalSender> {
  public:
   using stream_socket = asio::generic::stream_protocol::socket;
@@ -25,13 +33,27 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
 
   void start();
 
-  // Notify that WAL has been flushed up to flush_lsn.  Thread-safe.
-  void advance(uint64_t flush_lsn);
+  // Notify that WAL has been flushed (committed) up to flush_lsn, on flush_lsn.timeline.
+  // Thread-safe.
+  void advance(LogSeqNumber flush_lsn);
 
   void shutdown();
 
  private:
-  enum class Phase { kStartup, kCommand, kStreaming };
+  enum class Phase {
+    kStartup,
+    kCommand,
+    kStreaming,
+    kEndOfStream,  // Sent CopyDone at the end of a historic timeline, waiting for the standby's.
+  };
+
+  // A timeline's range of WAL in the history of the latest timeline: [begin, end).
+  struct TimelineRange {
+    uint32_t tli;
+    uint64_t begin;
+    uint64_t end;  // kOpenEnd for the latest timeline
+  };
+  static constexpr uint64_t kOpenEnd = ~uint64_t{0};
 
   WalSender(stream_socket socket, std::filesystem::path wal_dir,
             uint64_t system_id, uint32_t timeline, uint64_t flush_lsn,
@@ -59,8 +81,19 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   void drain_sends();
 
   // WAL reading and streaming.
-  void do_advance(uint64_t flush_lsn);
+  void do_advance(LogSeqNumber flush_lsn);
+  void send_wal();
+  void end_of_timeline();
+  void end_of_stream_reply();
   void schedule_keepalive();
+
+  // Timelines.
+  void                   load_timelines(uint32_t hint = 0);
+  uint32_t               latest_tli() const { return history_.back().tli; }
+  std::optional<size_t>  find_tli(uint32_t tli) const;
+  uint64_t               committed_limit(size_t idx) const;
+  static std::optional<vector<TimelineRange>> parse_history(string const& content,
+                                                            uint32_t      tli);
 
   void close_socket();
 
@@ -94,8 +127,9 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   asio::io_context::strand strand_;
   std::filesystem::path    wal_dir_;
   uint64_t                 system_id_;
-  uint32_t                 timeline_;
-  uint64_t                 flush_lsn_;
+  vector<TimelineRange>    history_;     // the latest timeline's history, oldest first
+  LogSeqNumber             flush_;       // committed WAL, see advance()
+  uint32_t                 stream_tli_{0};  // the timeline being streamed
   uint64_t                 sent_lsn_{0};
   uint64_t                 end_lsn_;
   uint32_t                 wal_segment_size_;

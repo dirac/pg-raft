@@ -44,6 +44,13 @@ struct PeerConnectionApi {
   /// The WAL segment, to send its bytes.
   virtual Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const = 0;
 
+  /// The latest timeline history file in wal_dir, to send with an InstallSnapshot.
+  virtual std::optional<TimelineOp> latest_timeline() const = 0;
+
+  /// A copy of the applied state, to send with an InstallSnapshot. It must not take the server
+  /// lock: the caller holds the connection's lock.
+  virtual RaftState applied_state() const = 0;
+
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;
 };
 

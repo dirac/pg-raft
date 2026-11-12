@@ -1,5 +1,11 @@
 #include "src/base/wal_segment.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <charconv>
+#include <fstream>
+
 WalSegment::WalSegment(shared_ptr<WalSegmentCache>  cache,
                        std::filesystem::path const& wal_dir,
                        LogSeqNumber                 lsn)
@@ -120,4 +126,67 @@ Result<void> WalSegment::fsync(off_t offset, size_t size) {
     return elog(
         system_error_code(errno), "msync({}, {}) failed", reinterpret_cast<void*>(buff), p_size);
   return ok();
+}
+
+// ── History files ───────────────────────────────────────────────────────────────────────────────
+
+std::optional<uint32_t> history_timeline(std::string_view path) {
+  if (path.starts_with('/'))
+    path.remove_prefix(1);
+  constexpr std::string_view kSuffix = ".history";
+  if (path.size() != 8 + kSuffix.size() || !path.ends_with(kSuffix))
+    return std::nullopt;
+  for (char c : path.substr(0, 8))
+    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')))
+      return std::nullopt;
+
+  uint32_t timeline = 0;
+  std::from_chars(path.data(), path.data() + 8, timeline, 16);
+  return timeline;
+}
+
+Result<void> write_history_file(std::filesystem::path const& dir,
+                                uint32_t                     timeline,
+                                string const&                content) {
+  auto path = dir / history_filename(timeline);
+  auto tmp  = dir / ("." + history_filename(timeline) + ".tmp");
+
+  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, file_mode());
+  if (fd == -1)
+    return elog(system_error_code(errno), "Unable to create {}", tmp);
+  auto n   = ::write(fd, content.data(), content.size());
+  auto err = errno;
+  if (n == static_cast<ssize_t>(content.size()) && ::fsync(fd) != 0) {
+    err = errno;
+    n   = -1;
+  }
+  ::close(fd);
+  if (n != static_cast<ssize_t>(content.size()))
+    return elog(system_error_code(err), "Unable to write {}", tmp);
+
+  if (::rename(tmp.c_str(), path.c_str()) != 0)
+    return elog(system_error_code(errno), "Unable to rename {} to {}", tmp, path);
+
+  if (int dfd = ::open(dir.c_str(), O_RDONLY); dfd != -1) {
+    ::fsync(dfd);
+    ::close(dfd);
+  }
+  return ok();
+}
+
+Result<string> read_history_file(std::filesystem::path const& dir, uint32_t timeline) {
+  auto          path = dir / history_filename(timeline);
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return system_error_code(ENOENT);
+  return string{std::istreambuf_iterator<char>(in), {}};
+}
+
+std::optional<uint32_t> latest_history_timeline(std::filesystem::path const& dir) {
+  std::optional<uint32_t> latest;
+  std::error_code         ec;
+  for (auto const& entry : std::filesystem::directory_iterator(dir, ec))
+    if (auto t = history_timeline(entry.path().filename().string()); t && (!latest || *t > *latest))
+      latest = t;
+  return latest;
 }

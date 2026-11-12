@@ -92,4 +92,37 @@ struct WalTracker {
                            std::function<void(Result<void>)> completion_handler) {
     completion_handler(segment->fsync(offset, size));
   }
+
+  /// PostgreSQL installed the history file of |timeline| (on promotion), with |content|. The raft
+  /// layer replicates it as a TimelineOp. It is called after the rename that installs the file,
+  /// before PostgreSQL writes WAL on the new timeline.
+  virtual void async_timeline(uint32_t timeline, string const& content) {
+    (void)timeline;
+    (void)content;
+  }
+
+  virtual ~WalTracker() = default;
 };
+
+// Timeline history files, `%08X.history`, in a WAL directory.
+
+/// The timeline of a history file name (with or without a leading '/'), or nullopt.
+std::optional<uint32_t> history_timeline(std::string_view path);
+
+/// The name of the history file of |timeline|.
+inline string history_filename(uint32_t timeline) {
+  return std::format("{:08X}.history", timeline);
+}
+
+/// Write the history file of |timeline| into |dir|: written to a temporary name, fsynced, then
+/// renamed, so that a reader never sees a partial file.
+Result<void> write_history_file(std::filesystem::path const& dir,
+                                uint32_t                     timeline,
+                                string const&                content);
+
+/// Read the history file of |timeline| from |dir|.
+Result<string> read_history_file(std::filesystem::path const& dir, uint32_t timeline);
+
+/// The highest timeline with a history file in |dir|, or nullopt if there is none (timeline 1
+/// has no history file).
+std::optional<uint32_t> latest_history_timeline(std::filesystem::path const& dir);

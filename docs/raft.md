@@ -189,9 +189,16 @@ entries inherited from earlier leaders have no handler.
   are small (the WAL is in the segments), so compacting on the leader is cheap.
 - **InstallSnapshot, phase 1 (raft)**: the leader sends its latest `snapshot_entries` entries,
   trimmed to those that touch at most 2 segments, together with the **full contents** of those
-  segments. The follower writes the segments and calls `install_snapshot(log_idx, entries,
-  {…, needs_backup = true})`. It sets `commit_idx = log_idx` and can follow the leader from there
-  at once.
+  segments, its applied `RaftState`, and its latest timeline history file, if any
+  (`InstallSnapshot::timeline`; the `TimelineOp`s that wrote it may be compacted away). The
+  follower writes the segments and the history file, and installs the entries with the leader's
+  state (`needs_backup = true`). If the state's `log_idx` is within the entries, the follower has
+  applied them up to it (the leader has, and their WAL is in the segments); otherwise, when the
+  leader applies far behind its log, the follower keeps the state's values at the snapshot's
+  `log_idx` (they come from earlier entries, so they are never ahead). It sets `commit_idx` to the
+  state's `log_idx` and can follow the leader from there at once. The connection reads the state
+  from a copy the server publishes under its own mutex (`applied_state()`), since it holds the
+  connection's lock, not the server's.
 - **Phase 2 (PostgreSQL backup)**: a node with `needs_backup` restores the latest backup from the
   cluster's backup store ([backup.md](backup.md)), then replays the backup's WAL and streams the
   rest from `raft/wal` (see [node.md](node.md#43-recovering-from-needs_backup)). The node logic is
@@ -264,8 +271,9 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 2. **Phase 2 of a snapshot**: when `needs_backup` is set, restore the latest backup from the
    backup store, then clear `needs_backup` (`set_needs_backup`, to be added; while it is set the
    node must not start elections).
-3. `OpenOp`, `CloseOp` and `TimelineOp` need FUSE hooks; today only writes and fsyncs are
-   generated.
+3. `OpenOp` and `CloseOp` need FUSE hooks; today only writes, fsyncs and timelines (a rename to
+   `<timeline>.history`, `WalTracker::async_timeline`) are generated. Applying a `TimelineOp`
+   writes the history file into `wal_dir` on every node.
 4. WAL retention: segments are never removed from `raft/wal`, and the renamed `.X` segments are
    never removed from `pg/pg_wal`. Planned: a WAL deletion thread removes the segments before
    `RaftState::first_segment`, the segment of the oldest entry compaction left

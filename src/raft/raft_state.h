@@ -1,6 +1,6 @@
 #pragma once
 
-#include "src/raft/raft_types.h"
+#include "src/raft/entry.h"
 
 /// The state machine. The replicated state is the WAL itself (the segment files, written as the
 /// entries are received); what is applied is the position:

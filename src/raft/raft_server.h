@@ -141,6 +141,14 @@ class RaftServer : public ClientConnectionApi,
   /// The WAL segment in wal_dir, created (zero filled) if it doesn't exist.
   Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const override;
 
+  /// The latest timeline history file in wal_dir (written when a TimelineOp is applied, or by an
+  /// InstallSnapshot), or nullopt before the first promotion.
+  std::optional<TimelineOp> latest_timeline() const override;
+
+  /// A copy of the state, published under its own mutex after every change, so that a peer
+  /// connection can read it without the server lock.
+  RaftState applied_state() const override;
+
   RaftResponse handle_peer_request(RaftNodeId node_id, RaftTerm term, std::monostate) override;
 
   RaftResponse handle_peer_request(RaftNodeId  candidate,
@@ -361,7 +369,12 @@ class RaftServer : public ClientConnectionApi,
   RaftLog log_;
 
   // The state machine.
-  RaftState               state_;
+  RaftState state_;
+
+  /// A copy of state_ for applied_state(), under published_mtx_ (a leaf lock).
+  mutable std::mutex      published_mtx_;
+  RaftState               published_;
+  void                    publish_state();
   std::atomic<RaftIndex>  applied_idx_{RaftIndex{0}};
   shared_ptr<RaftApplier> applier_;
 

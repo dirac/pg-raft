@@ -47,30 +47,51 @@ it, so they are safe from any thread.
 #### Phase 2: Command (simple-query `'Q'` only)
 | Query (case-insensitive substring/prefix) | Reply |
 |---|---|
-| `IDENTIFY_SYSTEM` | One row: `systemid`, `timeline`, `xlogpos=end_lsn_`, `dbname=NULL` |
-| `TIMELINE_HISTORY` | Empty row set. Single-timeline only, see the open items. |
+| `IDENTIFY_SYSTEM` | One row: `systemid`, the latest `timeline`, `xlogpos=end_lsn_`, `dbname=NULL` |
+| `TIMELINE_HISTORY n` | One row: `filename` (`%08X.history`) and `content` (the file, from `wal_dir`), or an error if there is no such file |
 | `SHOW wal_segment_size` | The configured segment size. Any other `SHOW` returns an empty string. |
 | `SET …` | `SET` |
 | `SELECT …` | One empty text column |
-| `START_REPLICATION [SLOT s] [PHYSICAL] X/Y [TIMELINE t]` | Parses the first `hex/hex` token as `start_lsn`, sets `sent_lsn_ = start_lsn`, sends `CopyBothResponse`, and enters Streaming |
+| `START_REPLICATION [SLOT s] [PHYSICAL] X/Y [TIMELINE t]` | Parses the first `hex/hex` token as `start_lsn` and `TIMELINE t` (default: the latest). An unknown `t`, or a start past `t`'s switch point, is an error. Otherwise sets `sent_lsn_ = start_lsn`, sends `CopyBothResponse`, and enters Streaming on `t` |
 | `'X'` Terminate | close |
 | any other | `ErrorResponse` + `ReadyForQuery` |
 
 #### Phase 3: Streaming (CopyBoth)
-- **Outbound WAL**: `do_advance(new_flush)` raises `flush_lsn_` and `end_lsn_`. Then, while
-  `sent_lsn_ < flush_lsn_`:
-  1. Work out the segment and file name `%08X%08X%08X` (tli, seg>>32, seg&0xFFFFFFFF).
-  2. `pread` from `sent_lsn_` up to `min(segment end, flush_lsn_)`.
+- **Outbound WAL**: `advance(LogSeqNumber)` raises `flush_` (the committed WAL, on its timeline)
+  and `end_lsn_`, then `send_wal()` streams the timeline `t` up to the limit: the committed WAL
+  (if `flush_` is on an earlier timeline than `t`, only up to where that timeline ended) and
+  `t`'s switch point. For each chunk:
+  1. Find the timeline whose range holds the position: `t`, or for bytes before `t`'s start point
+     an ancestor (see below). Work out its segment file `%08X%08X%08X` (that timeline, seg>>32,
+     seg&0xFFFFFFFF).
+  2. `pread` up to `min(segment end, limit, that timeline's end)`.
   3. Send `XLogData('w', start=chunk_lsn, end=end_lsn_, now)` with that payload.
   4. Advance `sent_lsn_`.
 
   A missing file or a short read stops the loop. The next `advance()` call retries.
+- **Timelines**: the sender starts on its `timeline` and learns later ones from the history files
+  (`%08X.history`) in `wal_dir`, which raft writes when it applies a `TimelineOp`. It checks for
+  new ones on `IDENTIFY_SYSTEM`, `START_REPLICATION`, and when `advance()` brings a later
+  timeline. The latest history file gives every timeline's range (it is cumulative).
+- **End of a timeline**: when `t` is historic and `sent_lsn_` reaches its switch point, the
+  sender sends CopyDone and waits for the standby's CopyDone, then answers with the result set
+  `(next_tli, next_tli_startpos)`, CommandComplete, CommandComplete `START_STREAMING` and
+  ReadyForQuery, and goes back to the Command phase. The standby then fetches the next
+  timeline's history and starts streaming it, which PostgreSQL's walreceiver does by itself.
+- **The new timeline's first segment**: a standby that moves to timeline `t+1` restarts at the
+  start of the segment that holds the switch point. On promotion PostgreSQL fills the bytes before
+  the switch point by copying the old segment through an `xlogtemp` file, which the FUSE layer
+  doesn't replicate, so in `raft/wal` they are zeros. The sender reads them from the parent
+  timeline's segment, which holds the same bytes.
 - **Keepalive**: every 5 s, a `PrimaryKeepalive('k', end_lsn_, now, reply=0)` is sent.
 - **Inbound** (`CopyData 'd'`):
   - `'r'` StandbyStatusUpdate is decoded into `StandbyStatus{written, flushed, applied}` and
     passed to `status_cb_`. If the reply-requested bit is set, an immediate keepalive is sent.
   - `'h'` HotStandbyFeedback is ignored.
-  - `CopyDone` and `Terminate` close the connection.
+  - `CopyDone` from the standby (it ends the stream) is answered with CopyDone,
+    CommandComplete `START_STREAMING` and ReadyForQuery; at the end of a historic timeline, with
+    the next timeline (above). `Terminate` closes the connection.
+- **Keepalive** messages are only sent while streaming.
 
 #### Write path
 `enqueue_send(Bytes)` pushes onto `send_queue_`. `drain_sends()` keeps exactly one
@@ -110,11 +131,9 @@ On the leader, the same server can feed any standby that is attached directly.
 3. **Message size.** A single `XLogData` can carry up to 16 MiB, and each `advance` allocates a
    new `Bytes`. The chunk size should be capped (PostgreSQL uses 128 KiB) to bound memory and
    latency.
-4. **Timelines.** `TIMELINE_HISTORY` returns nothing, and the requested `TIMELINE` in
-   `START_REPLICATION` is ignored. Following a timeline switch after a failover needs a real
-   history file and an end-of-timeline `CopyDone` + result set.
-5. Command matching is by substring. A `SELECT` whose text contains `IDENTIFY_SYSTEM` would be
-   routed to the wrong handler. It should match on the first token.
+4. **Timelines** — implemented (above), tested by `timeline_switch_test`.
+5. Command matching: `IDENTIFY_SYSTEM`, `START_REPLICATION` and `TIMELINE_HISTORY` match on the
+   start of the command; `SET`/`SHOW`/`SELECT` already did.
 6. `server_version` is hardcoded to `17.0`. It should come from `Config::pg_major_version`.
 7. Some errors close the socket without notifying the owner, which still holds the
    `shared_ptr<WalSender>`. A close callback is needed so the owner can drop it.

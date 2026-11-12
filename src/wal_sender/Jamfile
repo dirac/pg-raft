@@ -35,3 +35,13 @@ unit-test standby_wal_reset_test
       ../status//status
       ../..//external
     ;
+
+unit-test timeline_switch_test
+    : timeline_switch_test.cc
+      wal_sender
+      ../base//libs
+      ../base//testing
+      ../process//process
+      ../status//status
+      ../..//external
+    ;

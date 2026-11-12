@@ -28,6 +28,10 @@ class WalFuseOps : public FuseOps {
   // If it is a wal file do not remove, just rename it.
   int op_unlink(char const* path) override;
 
+  // A rename that installs a timeline history file (`%08X.history`, PostgreSQL writes it as
+  // xlogtemp.<pid> and renames it on promotion) is passed to WalTracker::async_timeline.
+  int op_rename(char const* from, char const* to) override;
+
  private:
   WalTracker&                 tracker_;
   shared_ptr<WalSegmentCache> cache_;

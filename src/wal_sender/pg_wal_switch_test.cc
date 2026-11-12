@@ -157,7 +157,7 @@ BOOST_AUTO_TEST_CASE(wal_switch_during_replication, * boost::unit_test::timeout(
         std::lock_guard lk(sender_mu);
         s = active_sender;
       }
-      if (s) s->advance(lsn);
+      if (s) s->advance(LogSeqNumber{.timeline = 1, .lsn = lsn});
     }
     (*conn)->close();
   });

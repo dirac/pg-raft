@@ -180,7 +180,7 @@ BOOST_AUTO_TEST_CASE(standby_wal_reset, * boost::unit_test::timeout(60)) {
         std::lock_guard lk(sender_mu);
         s = active_sender;
       }
-      if (s) s->advance(lsn);
+      if (s) s->advance(LogSeqNumber{.timeline = 1, .lsn = lsn});
     }
     (*conn)->close();
   });

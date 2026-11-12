@@ -144,14 +144,20 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
 
   next_idx_ = idx + 1U;
 
+  auto server   = server_.lock();
+  auto timeline = server ? server->latest_timeline() : std::nullopt;
+  auto state    = server ? server->applied_state() : RaftState{};
+
   auto data = mem_blocks(entries, /*full_wal_segment=*/true);
   send_request(std::move(lk),
                RaftRequest{
                    .term = leadership_term,
                    .request =
                        InstallSnapshot{
-                           .log_idx = idx - entries.size(),
-                           .entries = std::move(entries),
+                           .log_idx  = idx - entries.size(),
+                           .entries  = std::move(entries),
+                           .state    = state,
+                           .timeline = std::move(timeline),
                        },
                    .data = std::move(data),
                });

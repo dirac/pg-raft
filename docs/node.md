@@ -176,15 +176,15 @@ is committed WAL.
    (§7). An incomplete record at the very end is discarded, and the new timeline starts after the
    last complete one. `PgInstance::promote()` only sends SIGUSR1, which doesn't promote on
    PostgreSQL ≥ 12; it is fixed as part of this work.
-5. Once PostgreSQL is out of recovery and `pg_isready` succeeds, **publish the new timeline**:
-   - Fetch it from PostgreSQL over `PgClient`, for example
-     `SELECT timeline_id FROM pg_control_checkpoint()`, and read its history file
-     (`<timeline>.history`, in `pg/pg_wal`).
-   - Append `exec(WalCommand{…, TimelineOp{timeline, content of the history file}})` and wait
-     for it to commit (quorum). If it fails (`kNotLeader`), the node is no longer the leader, and
-     `stepped_down` takes over.
-6. Once the `TimelineOp` is committed, call `set_serving(true)`. The proxy then routes to this
-   node. Clients only reach the new primary once a majority knows its timeline.
+5. **The new timeline is published by the FUSE layer**, not by this step: on promotion
+   PostgreSQL installs `<timeline>.history` in `pg_wal` with a rename, `WalFuseOps::op_rename`
+   passes it to `WalTracker::async_timeline`, and `NodeWalTracker` (now in leader mode) appends
+   `exec(WalCommand{…, TimelineOp{timeline, content}})` (§7). The node waits until that entry has
+   committed. If it fails (`kNotLeader`), the node is no longer the leader, and `stepped_down`
+   takes over.
+6. Once PostgreSQL is out of recovery, `pg_isready` succeeds and the `TimelineOp` is committed,
+   call `set_serving(true)`. The proxy then routes to this node. Clients only reach the new
+   primary once a majority knows its timeline.
 
 ### 3.3 Demotion (`stepped_down`)
 
@@ -328,18 +328,31 @@ On SIGTERM or SIGINT:
 
 ## 7. Timelines
 
-`pg_promote()` starts a new timeline. Followers need three things:
+`pg_promote()` starts a new timeline. The pieces (implemented, except `NodeWalTracker`):
 
-- `WalSender` must serve `TIMELINE_HISTORY` and handle `START_REPLICATION … TIMELINE t`,
-  including ending one timeline and starting the next.
-- The `.history` file written by the new primary has to be replicated. The node publishes it as a
-  `TimelineOp` after promotion (§3.2, step 5), not through a FUSE hook. A follower that applies a
-  `TimelineOp` writes the history file into `raft/wal`, where its WAL sender serves it for
-  `TIMELINE_HISTORY`.
-- The new primary writes WAL on the new timeline (the end-of-recovery record) before the
-  `TimelineOp` commits, so `WriteOp`s on new-timeline segments can come before it in the log. That
-  is fine: the bytes are replicated as usual, and a follower's WAL sender only switches its standby
-  to the new timeline once it has applied the `TimelineOp`.
+- **FUSE:** PostgreSQL writes the history file as `xlogtemp.<pid>` and renames it to
+  `<timeline>.history`. `WalFuseOps::op_rename` reads the installed file and calls
+  `WalTracker::async_timeline(timeline, content)`; on the leader, `NodeWalTracker` appends a
+  `TimelineOp{timeline, content}`.
+- **Raft:** every node that applies a `TimelineOp` writes the history file into `raft/wal`
+  (`write_history_file`, atomic).
+- **WalSender:** learns the timelines from the history files in `raft/wal`, serves
+  `TIMELINE_HISTORY`, streams `START_REPLICATION … TIMELINE t` up to `t`'s switch point, then
+  ends the stream with CopyDone and the `(next_tli, next_tli_startpos)` row, so the standby moves
+  to the next timeline ([wal_sender.md](wal_sender.md#22-walsender-one-replication-connection)).
+- **The new timeline's first segment:** PostgreSQL creates it by copying the old segment up to
+  the switch point through an `xlogtemp` file, which FUSE doesn't replicate, so in `raft/wal`
+  those bytes are zeros. `WalSender` reads any bytes before a timeline's start point from the
+  parent timeline's segment, which holds the same bytes.
+- **Order:** the history file is installed before PostgreSQL writes any WAL on the new timeline,
+  so the `TimelineOp` is in the log before the `WriteOp`s of the new timeline's segments. A
+  follower's WAL sender only switches its standby to the new timeline once the history file is in
+  `raft/wal`.
+- **InstallSnapshot:** a node whose log is replaced never applies the `TimelineOp`s from before
+  the snapshot (they may be compacted away). So the InstallSnapshot carries the leader's latest
+  history file (`InstallSnapshot::timeline`), which the follower writes into `raft/wal` before it
+  installs the entries. The latest history file lists every earlier timeline, so one file is
+  enough.
 - Segment names carry the timeline. The entries already carry `LogSeqNumber{timeline, lsn}`.
 
 ## 8. Testing

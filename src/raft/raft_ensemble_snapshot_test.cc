@@ -2,7 +2,8 @@
 #include "src/raft/raft_ensemble_test_common.h"
 
 // With frequent compaction, a node that lost its files gets an InstallSnapshot (the latest entries
-// and their segments), catches up, and needs a PostgreSQL backup.
+// and their segments, the leader's state and the latest timeline history file), catches up, and
+// needs a PostgreSQL backup.
 
 BOOST_AUTO_TEST_CASE(install_snapshot, *boost::unit_test::timeout(timeout)) {
   auto io = boost::asio::io_context{};
@@ -29,6 +30,13 @@ BOOST_AUTO_TEST_CASE(install_snapshot, *boost::unit_test::timeout(timeout)) {
   while (service.commit_idx() < RaftIndex{3000})
     std::this_thread::sleep_for(100ms);
 
+  // No new timeline from now on: the node can only get the latest one through the snapshot, since
+  // the TimelineOps were compacted away.
+  writer.set_timelines(false);
+  std::this_thread::sleep_for(500ms);  // Let a TimelineOp in flight commit.
+  auto const latest_timeline = latest_history_timeline(service.wal_dir(leader));
+  BOOST_REQUIRE(latest_timeline.has_value());
+
   service.start(node);
 
   // The node catches up while the leader is busy: it gets a snapshot, then follows the log.
@@ -43,6 +51,16 @@ BOOST_AUTO_TEST_CASE(install_snapshot, *boost::unit_test::timeout(timeout)) {
   }
   log(INFO, "Node {} state {}", node, state);
   BOOST_TEST(caught);
+
+  // The InstallSnapshot carried the leader's state: the node lost its files, so without it these
+  // would be zero until it applies entries after the snapshot.
+  BOOST_TEST(state.flushed_lsn.lsn > 0U);
+  BOOST_TEST(state.wal_end.lsn > 0U);
+
+  // The InstallSnapshot carried the leader's latest history file.
+  BOOST_TEST((latest_history_timeline(service.wal_dir(node)) == latest_timeline));
+  BOOST_TEST(read_history_file(service.wal_dir(node), *latest_timeline).value_or("") ==
+             read_history_file(service.wal_dir(leader), *latest_timeline).value_or("x"));
 
   validate(service, writer);
 
