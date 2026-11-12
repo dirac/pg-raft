@@ -1,12 +1,14 @@
 alias deps
   : ../base//libs
     ../backup//libs
+    ../raft//libs
     ../process//process
     ../..//external
   ;
 
 lib node
   : init.cc
+    node_wal_tracker.cc
     deps
   ;
 
@@ -24,5 +26,12 @@ unit-test init_test
   : init_test.cc
     libs
     ../status//status
+    ../base//testing
+  ;
+
+unit-test node_wal_tracker_test
+  : node_wal_tracker_test.cc
+    libs
+    ../raft//raft_test
     ../base//testing
   ;

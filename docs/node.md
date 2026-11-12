@@ -51,15 +51,22 @@ The PostgreSQL binaries are in `install_dir/<pg_major_version>/bin`.
 
 ### 2.1 Leader (PostgreSQL is the primary)
 
+`NodeWalTracker` (`src/node/node_wal_tracker.h`) is implemented and tested against an in-process
+raft ensemble (`node_wal_tracker_test`).
+
 `NodeWalTracker` runs in **leader mode**:
 
 - `async_publish(seg, off, size)` → copy the published bytes from the FUSE segment (in
   `pg/pg_wal`) into the same segment in `raft/wal`, then
   `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{off, size}}, …)`. The peer connections send the
   bytes from `raft/wal`.
-- `async_fsync(seg, off, size, cb)` → a local `msync`, then
+- `async_fsync(seg, off, size, cb)` → a local `msync` of both copies (`pg/pg_wal`, and the
+  leader's own copy in `raft/wal`, which counts towards the quorum), then
   `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{off, size}}, h)`. `h` calls `cb(ok)` when the
   entry commits, or `cb(kNoConsensus)` when it gets `kNotLeader`.
+
+- `async_timeline(timeline, content)` → `exec(WalCommand{flushed_lsn, TimelineOp{timeline,
+  content}})` (§7).
 
 PostgreSQL's fsync, and therefore its commit, returns only once the WAL is on a majority. Entries
 are appended in WAL order, so committing a `FlushOp` implies that the `WriteOp`s before it are
@@ -146,9 +153,18 @@ new role and posts a transition to a single **node strand**, which runs transiti
 If the role flips again while a transition runs (leader → follower → leader), the strand acts
 only on the latest role when it gets to it. A stale transition is skipped, not queued.
 
-One thing happens **inside** `stepped_down` itself, because it is cheap and must not wait: the
-tracker switches to follower mode, so that nothing PostgreSQL writes after this point is
-published to raft.
+Two things happen **inside** `stepped_down` itself, because they are cheap, must not wait, and
+must not be delayed by the strand:
+
+- **The tracker is fenced** (`NodeWalTracker::Mode::kFenced`): nothing PostgreSQL writes after
+  this point is published, and every fsync fails with `kNoConsensus`. Follower mode would not do:
+  its fsync is a local msync that succeeds, so a backend still running could have a commit
+  acknowledged on the old primary.
+- **PostgreSQL is killed** (`PgInstance::kill()`): SIGSTOP the postmaster so it forks nothing
+  more, SIGKILL each of its children and their process groups, then the postmaster. Every
+  PostgreSQL child calls `setsid()`, so a signal to the postmaster's process group would not reach
+  them, and a backend in the middle of a query only notices the postmaster's death at its next
+  check. `kill()` takes no lock, so it is safe with the server lock held.
 
 ### 3.2 Promotion (`became_leader`)
 
@@ -187,21 +203,25 @@ is committed WAL.
 
 ### 3.3 Demotion (`stepped_down`)
 
-The old leader lost leadership. `make_follower()` already fails every pending `exec()` handler
-with `kNotLeader`, so PostgreSQL's in-flight fsyncs fail with `kNoConsensus` and it PANICs, even
-before the node strand runs. The tracker is already in follower mode (§3.1).
+The old leader lost leadership. **Whenever a node loses leadership, it kills its PostgreSQL**, at
+once, in the hook (§3.1): `make_follower()` has already failed every pending `exec()` handler
+with `kNotLeader`, the tracker is fenced, and every PostgreSQL process is SIGKILLed. No client of
+the old primary is served after this point.
 
 On the node strand:
 
 1. `set_serving(false)`.
-2. Stop PostgreSQL (Immediate) if it is still running.
+2. Reap the killed postmaster (`PgInstance::stop`).
 3. **Cut `pg/pg_wal` back to the committed WAL.** The old primary's `pg_wal` can hold WAL that it
    wrote but never committed (its fsync failed). Truncate it at the end of the committed WAL,
    `state.wal_end` (not `flushed_lsn`, which is stale): zero the rest of that segment and remove
    the later segments. Otherwise the standby would replay that WAL on startup.
 4. Restart it as a standby: `standby.signal`, and `primary_conninfo` pointing at the local
-   `WalSenderServer` port. It replays its own `pg_wal` up to the committed point, then streams the
-   rest from `raft/wal`.
+   `WalSenderServer` port. Switch the tracker to follower mode just before. It replays its own
+   `pg_wal` up to the committed point, then streams the rest from `raft/wal`. Restarting in the same
+   data directory also frees what the killed processes left: PostgreSQL's System V shared memory
+   segment and semaphores outlive a SIGKILL, and the next postmaster in the same directory finds
+   them by the directory's inode and removes them.
 
 Why this is safe without `pg_rewind`:
 
@@ -261,9 +281,13 @@ the latest backup, especially from S3.
 Without a usable data directory:
 
 1. `store.latest()`, then `store.get()` into a scratch directory, then `verify_backup`, and check
-   the system identifier ([backup.md](backup.md#4-checks)).
-2. Move it into place as `data/`, and move its `pg_wal` contents into `pg/pg_wal` (the FUSE
-   backing directory), as `create_raft_wal` does. `data/pg_wal` stays empty for the FUSE mount.
+   the system identifier ([backup.md](backup.md#6-checks)).
+2. Copy it into `data/` with `PgInstance::restore`, which **keeps the directory** and replaces its
+   contents, and move its `pg_wal` contents into `pg/pg_wal` (the FUSE backing directory), as
+   `create_raft_wal` does. `data/pg_wal` stays empty for the FUSE mount. The data directory is
+   never replaced by a new one: PostgreSQL keys its System V shared memory and semaphores by the
+   directory's inode, and what a killed PostgreSQL left in a directory that is gone leaks until
+   reboot (macOS's System V limits are low).
 3. Clear `needs_backup` (`set_needs_backup(false)`, §4.4).
 
 Then, in every case: mount FUSE, start PostgreSQL as a standby (`standby.signal`, and
@@ -279,8 +303,8 @@ senders.
 A node whose log was replaced by an InstallSnapshot has `needs_backup` set: `raft/wal` holds only
 the snapshot's segments, and the WAL before them is missing. The node:
 
-1. Stops PostgreSQL (Immediate) if it is running, and moves the old data directory aside.
-2. Restores the latest backup as in §4.2.
+1. Kills PostgreSQL if it is running (`PgInstance::kill`, then `stop` to reap it).
+2. Restores the latest backup as in §4.2, into the same data directory.
 3. Starts PostgreSQL as a standby. It replays the backup's WAL from `pg/pg_wal`, then streams the
    rest from `raft/wal`.
 

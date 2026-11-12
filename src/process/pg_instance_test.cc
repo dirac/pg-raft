@@ -249,3 +249,74 @@ BOOST_AUTO_TEST_CASE(restore_and_start, * boost::unit_test::timeout(60)) {
   replica.stop();
   BOOST_TEST(!replica.is_running());
 }
+
+// ── kill ──────────────────────────────────────────────────────────────────────
+
+// kill() takes everything down at once, including a backend in the middle of a query, which a
+// signal to the postmaster's process group would miss (every child calls setsid).
+BOOST_AUTO_TEST_CASE(kill_takes_down_every_process, * boost::unit_test::timeout(60)) {
+  if (!pg_available()) { BOOST_TEST_MESSAGE("PostgreSQL not found; skipping"); return; }
+  IoThreads threads{2};
+  TmpDir    tmp;
+  auto data_dir = tmp() / "pgdata";
+
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
+  BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
+  BOOST_REQUIRE(pg.write_config({}));
+  BOOST_REQUIRE(pg.write_hba({}));
+  BOOST_REQUIRE(pg.start());
+  BOOST_REQUIRE(pg.wait_ready(kPort));
+
+  // A backend busy in a query.
+  Process psql(kPgBin + "/psql",
+               {"-h", "127.0.0.1", "-p", std::to_string(kPort), "-c", "SELECT pg_sleep(30)", "postgres"});
+  BOOST_REQUIRE(psql.start());
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto children = child_pids(pg.pid());
+  BOOST_TEST(children.size() >= 5U);  // checkpointer, bgwriter, walwriter, ... and the backend
+  for (pid_t c : children)
+    BOOST_TEST(::getpgid(c) == c);  // each its own group
+
+  pg.kill();
+
+  // Every child is gone at once (they are reparented and reaped by init); psql lost its backend.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  for (pid_t c : children)
+    BOOST_TEST((::kill(c, 0) == -1 && errno == ESRCH), c);
+  BOOST_TEST(psql.wait() != 0);
+
+  // The postmaster is reaped by stop(), and PostgreSQL restarts in the same directory.
+  pg.stop(PgInstance::StopMode::Fast);
+  BOOST_TEST(!pg.is_running());
+  BOOST_REQUIRE(pg.start());
+  BOOST_TEST(pg.wait_ready(kPort));
+  pg.stop(PgInstance::StopMode::Fast);
+}
+
+// restore() keeps the data directory itself (its inode keys PostgreSQL's System V IPC) and replaces
+// its contents.
+BOOST_AUTO_TEST_CASE(restore_keeps_the_directory, * boost::unit_test::timeout(60)) {
+  IoThreads threads{1};
+  TmpDir    tmp;
+  auto data_dir = tmp() / "pgdata";
+  auto backup   = tmp() / "backup";
+  std::filesystem::create_directories(data_dir / "base");
+  std::filesystem::create_directories(backup / "global");
+  std::ofstream(data_dir / "stale") << "old";
+  std::ofstream(backup / "PG_VERSION") << "17\n";
+
+  struct stat before {};
+  BOOST_REQUIRE(::stat(data_dir.c_str(), &before) == 0);
+
+  PgInstance pg(kPgBin, data_dir, kPort);
+  BOOST_REQUIRE(pg.restore(backup));
+
+  struct stat after {};
+  BOOST_REQUIRE(::stat(data_dir.c_str(), &after) == 0);
+  BOOST_TEST(after.st_ino == before.st_ino);
+  BOOST_TEST(!std::filesystem::exists(data_dir / "stale"));
+  BOOST_TEST(!std::filesystem::exists(data_dir / "base"));
+  BOOST_TEST(read_file(data_dir / "PG_VERSION") == "17\n");
+  BOOST_TEST(std::filesystem::is_directory(data_dir / "global"));
+}

@@ -42,6 +42,12 @@ class Process {
   // Sends SIGKILL without waiting.
   void kill();
 
+  // Sends SIGKILL to the whole process group (the child runs in a group of its own, so this reaches
+  // everything it forked, e.g. PostgreSQL's backends). Takes no lock and doesn't wait: safe to call
+  // from any thread, including while another thread is in a method of this object. Reap the
+  // process later with wait() or try_wait().
+  void kill_group();
+
   // Blocks until the process exits and returns its exit code. Negative values
   // indicate termination by signal (-SIGNUM).
   int wait();
@@ -53,10 +59,10 @@ class Process {
   // True when the process has been started and not yet fully reaped.
   bool is_running() const;
 
-  pid_t pid() const { return pid_; }
+  pid_t pid() const { return pid_.load(); }
 
   std::string to_string() const {
-    std::string result = std::format("[{0}] {1}", pid_, executable_);
+    std::string result = std::format("[{0}] {1}", pid_.load(), executable_);
     return std::accumulate(
         std::begin(args_), std::end(args_), std::move(result), [](auto result, auto const& arg) {
           return result + " " + arg;
@@ -113,7 +119,7 @@ class Process {
   string const                   name_;
   std::filesystem::path const    executable_;
   std::vector<std::string> const args_;
-  pid_t                          pid_ = -1;
+  std::atomic<pid_t>             pid_{-1};
 
   string stdout_buffer_;
   string stderr_buffer_;
@@ -122,3 +128,7 @@ class Process {
   std::optional<boost::asio::readable_pipe> stderr_pipe_;
   std::unique_ptr<std::latch>               io_latch_{nullptr};
 };
+
+/// The direct children of |parent| (libproc on macOS, /proc on Linux). Empty if there are none or
+/// they can't be listed.
+std::vector<pid_t> child_pids(pid_t parent);

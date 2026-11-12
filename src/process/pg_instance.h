@@ -57,6 +57,17 @@ class PgInstance {
 
   bool is_running() const;
 
+  // SIGKILL to PostgreSQL and all its processes, right now: the postmaster is stopped (SIGSTOP, so
+  // it forks nothing more), each child and its process group is killed (every child calls setsid,
+  // so a signal to the postmaster's group doesn't reach them), then the postmaster. Takes no lock
+  // and doesn't wait, so it is safe from a raft hook (the server lock held) and while another
+  // thread is in this instance (wait_ready, a backup). The node calls it when it loses leadership.
+  // stop() or start() reaps the postmaster afterwards.
+  void kill();
+
+  // The postmaster's pid, or -1.
+  pid_t pid() const;
+
   // Poll pg_isready on |localhost|:|port| until it returns OK or timeout elapses.
   bool wait_ready(uint16_t port, int timeout_s = 30) const;
 
@@ -81,7 +92,10 @@ class PgInstance {
   // releases it and returns a non-owning lock on any verification failure.
   SemaphoreLock verify_backup(std::filesystem::path const& backup_dir, SemaphoreLock lk) const;
 
-  // Copy |backup_dir| recursively to data_dir_ (data_dir_ must not exist).
+  // Copy |backup_dir| into data_dir_. If data_dir_ exists, its contents are removed first but the
+  // directory itself is kept: PostgreSQL derives its System V shared memory and semaphore keys
+  // from the data directory's inode, so the next postmaster finds and removes what a killed one
+  // left. A new directory would leak them until reboot.
   bool restore(std::filesystem::path const& backup_dir);
 
   // restore() then start().

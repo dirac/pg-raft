@@ -158,6 +158,23 @@ void PgInstance::reload() {
     ::kill(postgres_.pid(), SIGHUP);
 }
 
+void PgInstance::kill() {
+  pid_t const postmaster = postgres_.pid();
+  if (postmaster <= 0)
+    return;
+
+  ::kill(postmaster, SIGSTOP);
+  for (pid_t child : child_pids(postmaster)) {
+    ::kill(-child, SIGKILL);  // its group: whatever it forked (archive_command, ...)
+    ::kill(child, SIGKILL);
+  }
+  ::kill(postmaster, SIGKILL);
+}
+
+pid_t PgInstance::pid() const {
+  return postgres_.pid();
+}
+
 void PgInstance::promote() {
   std::lock_guard lk(mu_);
   if (postgres_.is_running()) {
@@ -293,12 +310,21 @@ SemaphoreLock PgInstance::verify_backup(std::filesystem::path const& backup_dir,
 
 bool PgInstance::restore(std::filesystem::path const& backup_dir) {
   std::lock_guard lk(mu_);
+
+  // Keep the directory (its inode), replace its contents.
+  std::error_code ec;
+  if (std::filesystem::exists(data_dir_, ec)) {
+    for (auto const& entry : std::filesystem::directory_iterator(data_dir_, ec))
+      std::filesystem::remove_all(entry.path(), ec);
+    if (ec)
+      return false;
+  }
   return copy_dir(backup_dir, data_dir_);
 }
 
 bool PgInstance::restore_and_start(std::filesystem::path const& backup_dir) {
   std::lock_guard lk(mu_);
-  return copy_dir(backup_dir, data_dir_) && postgres_.start();
+  return restore(backup_dir) && postgres_.start();
 }
 
 // ── private helpers ───────────────────────────────────────────────────────────

@@ -111,3 +111,25 @@ BOOST_AUTO_TEST_CASE(capture_multiple_lines, * boost::unit_test::timeout(60)) {
   BOOST_TEST(p.out[1] == "line2");
   BOOST_TEST(p.out[2] == "line3");
 }
+
+// kill_group reaches what the child forked: a shell with a background sleep loses both.
+BOOST_AUTO_TEST_CASE(kill_group_kills_descendants, *boost::unit_test::timeout(60)) {
+  IoThreads threads{1};
+  Process   p("/bin/sh", {"-c", "sleep 60 & sleep 60"});
+  BOOST_REQUIRE(p.start());
+  auto pgid = p.pid();
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  BOOST_TEST(::getpgid(pgid) == pgid);  // a group of its own
+
+  p.kill_group();
+  BOOST_TEST(p.wait() == -SIGKILL);
+
+  // The background sleep is gone too: no process is left in the group.
+  bool gone = false;
+  for (int i = 0; i < 50 && !gone; ++i) {
+    gone = ::kill(-pgid, 0) == -1 && errno == ESRCH;
+    if (!gone)
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  BOOST_TEST(gone);
+}

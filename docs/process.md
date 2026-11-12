@@ -79,6 +79,13 @@ The default HBA trusts loopback and requires `scram-sha-256` everywhere else.
 - `stop(mode, timeout)` sends `SIGTERM` (Smart), `SIGINT` (Fast), or `SIGQUIT` (Immediate),
   polls for the process to exit, and sends `SIGKILL` after `timeout`.
 - `reload()` sends `SIGHUP`.
+- `kill()` kills PostgreSQL at once: SIGSTOP the postmaster, SIGKILL each child (`child_pids()`:
+  libproc on macOS, `/proc` on Linux) and its process group, then the postmaster. Every
+  PostgreSQL child calls `setsid()`, so signalling the postmaster's process group doesn't reach
+  them. It takes no lock and doesn't wait (the node calls it from a raft hook); `stop()` reaps the
+  postmaster afterwards.
+- `Process` starts every child in a process group of its own (`setpgid`); `kill_group()` SIGKILLs
+  that group.
 - `promote()` creates the `promote` file in PGDATA, sends `SIGUSR1` and sets `role_ = kPrimary`,
   as `pg_ctl promote` does (PostgreSQL ≥ 12 promotes on SIGUSR1 only with the file). The
   promotion is asynchronous: wait for `pg_is_in_recovery()` to be false.
@@ -88,7 +95,7 @@ The default HBA trusts loopback and requires `scram-sha-256` everywhere else.
 ```
 SemaphoreLock lk = backup(dest);          // owns the semaphore on success
 lk = verify_backup(dest, std::move(lk));  // still owning means verified
-restore(dest) / restore_and_start(dest);  // rsync -a dest/ → data_dir
+restore(dest) / restore_and_start(dest);  // empty data_dir (keep it), rsync -a dest/ into it
 ```
 
 - **Concurrency**: `backup()` tries to acquire `backup_sem_`. If another backup is already
@@ -138,3 +145,8 @@ not installed.
 7. `write_hba`'s defaults put the `0.0.0.0/0 scram-sha-256` rule before the loopback `trust` rule,
    so loopback matches `scram-sha-256` first, and there is no `replication` rule for loopback.
    `initdb`'s own loopback rules at the top of `pg_hba.conf` hide this today.
+8. **System V IPC after a kill.** PostgreSQL's main shared memory is an anonymous mmap that the OS
+   frees, but a 56-byte System V segment and (on macOS) 7 System V semaphore sets outlive a
+   SIGKILL. A postmaster started in the same data directory removes them (their keys come from
+   the directory's inode); one started in a new directory doesn't, so they leak until reboot.
+   `restore()` therefore keeps the data directory and replaces its contents.

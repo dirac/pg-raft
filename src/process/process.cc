@@ -1,5 +1,9 @@
 #include "src/process/process.h"
 
+#ifdef __APPLE__
+#include <libproc.h>
+#endif
+
 #include "src/base/logger.h"
 
 Process::Process(asio::io_context&        io_context,
@@ -43,8 +47,9 @@ bool Process::start() {
   }
 
   if (pid_ == 0) {
-    // Child: wire up stdout/stderr, then exec. _exit on failure to avoid
+    // Child: a process group of its own (see kill_group), then stdout/stderr, then exec. _exit on failure to avoid
     // flushing parent stdio buffers.
+    setpgid(0, 0);
     close(out_fds[0]);
     close(err_fds[0]);
     dup2(out_fds[1], STDOUT_FILENO);
@@ -61,7 +66,11 @@ bool Process::start() {
     _exit(127);
   }
 
-  // Parent: close write ends and start reader threads.
+  // Parent: also set the child's group here, so that kill_group() works even before the child has
+  // run setpgid itself.
+  setpgid(pid_, pid_);
+
+  // Close write ends and start reader threads.
   close(out_fds[1]);
   close(err_fds[1]);
 
@@ -74,6 +83,11 @@ bool Process::start() {
   readline<false>(boost::system::error_code{}, 0);
 
   return true;
+}
+
+void Process::kill_group() {
+  if (pid_t p = pid_.load(); p > 0)
+    ::kill(-p, SIGKILL);
 }
 
 void Process::kill() {
@@ -146,4 +160,18 @@ int Process::decode_status(int status) {
   if (WIFSIGNALED(status))
     return -WTERMSIG(status);
   return -1;
+}
+
+std::vector<pid_t> child_pids(pid_t parent) {
+  std::vector<pid_t> pids;
+#ifdef __APPLE__
+  pids.resize(4096);
+  int n = proc_listchildpids(parent, pids.data(), static_cast<int>(pids.size() * sizeof(pid_t)));
+  pids.resize(n > 0 ? static_cast<size_t>(n) : 0U);
+#else
+  std::ifstream in(std::format("/proc/{0}/task/{0}/children", parent));
+  for (pid_t p = 0; in >> p;)
+    pids.push_back(p);
+#endif
+  return pids;
 }
