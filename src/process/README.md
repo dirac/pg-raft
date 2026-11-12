@@ -41,8 +41,9 @@ A wrapper around `Process` for one PostgreSQL data directory:
 - `stop(StopMode, timeout_ms)` — Smart (`SIGTERM`), Fast (`SIGINT`, the default) or Immediate
   (`SIGQUIT`), then `SIGKILL` once the timeout passes.
 - `reload()` — `SIGHUP`.
-- `promote()` — `SIGUSR1`, and `role()` becomes `kPrimary`. PostgreSQL ≥ 12 also needs a
-  `promote` file in the data directory, which this doesn't create yet.
+- `promote()` — creates the `promote` file and sends `SIGUSR1` (what `pg_ctl promote` does), and
+  `role()` becomes `kPrimary`. The promotion is asynchronous: wait for `pg_is_in_recovery()` to be
+  false.
 
 **Backup and restore:**
 - `backup(dest_dir)` → `SemaphoreLock`, which evaluates to true on success. On a primary it runs

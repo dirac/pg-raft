@@ -1,0 +1,28 @@
+alias deps
+  : ../base//libs
+    ../backup//libs
+    ../process//process
+    ../..//external
+  ;
+
+lib node
+  : init.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    node
+  ;
+
+exe pg_raft_initdb
+  : pg_raft_initdb.cc
+    libs
+  ;
+
+unit-test init_test
+  : init_test.cc
+    libs
+    ../status//status
+    ../base//testing
+  ;

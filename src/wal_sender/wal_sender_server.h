@@ -4,6 +4,7 @@
 
 // Async Unix-domain-socket accept loop.  Creates one WalSender per connection
 // and calls on_sender with it immediately after start() is called on the sender.
+// Every sender reports the standby's StandbyStatusUpdates to status_cb, if set.
 //
 // start() tries socket_dir/.s.PGSQL.<port>; if that path already exists it
 // increments port until a free slot is found.  The port actually bound is
@@ -22,6 +23,7 @@ class WalSenderServer
       uint32_t              timeline,
       uint64_t              flush_lsn,
       SenderCb              on_sender,
+      WalSender::StatusCb   status_cb        = {},
       uint32_t              wal_segment_size = 16u * 1024u * 1024u);
 
   // Bind, listen, and start accepting.  Returns false on error.
@@ -39,7 +41,7 @@ class WalSenderServer
   WalSenderServer(std::filesystem::path socket_dir, uint16_t port,
                   std::filesystem::path wal_dir, uint64_t system_id,
                   uint32_t timeline, uint64_t flush_lsn, SenderCb on_sender,
-                  uint32_t wal_segment_size);
+                  WalSender::StatusCb status_cb, uint32_t wal_segment_size);
 
   shared_ptr<WalSenderServer> self() { return shared_from_this(); }
   void do_accept();
@@ -53,6 +55,7 @@ class WalSenderServer
   uint32_t              timeline_;
   uint64_t              flush_lsn_;
   SenderCb              on_sender_;
+  WalSender::StatusCb   status_cb_;
   uint32_t              wal_segment_size_;
 
   unix_proto::acceptor acceptor_;

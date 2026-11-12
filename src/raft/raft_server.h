@@ -18,17 +18,20 @@
 //
 //  - The leader's own WAL interception generates the entries: exec(WalCommand, handler), whose
 //    handler is called when the entry is committed.
-//  - The state machine is RaftState (see raft_state.h); a RaftApplier is told of each applied entry
-//    (e.g. to advance the WalSender to the committed flushed_lsn).
+//  - The state machine is RaftState (see raft_state.h); a RaftObserver is told of each applied
+//    entry (e.g. to advance the WalSender to the committed flushed_lsn) and of the role changes
+//    (to promote or demote PostgreSQL).
+//  - A node without a usable PostgreSQL (RaftState::needs_backup) doesn't start elections.
 //  - The WAL bytes travel with the entries and are written to the segments in wal_dir as they are
 //    accepted.
 //  - A leader compacts its own log (stepping down to compact would be a PostgreSQL failover).
 //  - InstallSnapshot sends the latest entries and their segments; the node then needs a PostgreSQL
 //    backup (RaftState::needs_backup), which it fetches over the client channel (backup()).
 
-/// Told of the state machine changes, with the server lock held: it must not call the server.
-struct RaftApplier {
-  virtual ~RaftApplier() = default;
+/// Told of the state machine and role changes, with the server lock held: it must not call the
+/// server, and must not block.
+struct RaftObserver {
+  virtual ~RaftObserver() = default;
 
   /// The entry at idx was applied; state is the state after it.
   virtual void applied(RaftIndex idx, Entry const& entry, RaftState const& state) {
@@ -39,6 +42,14 @@ struct RaftApplier {
 
   /// The log was replaced by an InstallSnapshot.
   virtual void installed(RaftState const& state) { (void)state; }
+
+  /// Full leadership in |term|: the node has committed (and applied) every entry it inherited, so
+  /// its WAL holds every byte a previous primary acknowledged. Fires once per term.
+  virtual void became_leader(RaftTerm term) { (void)term; }
+
+  /// The leader of |term| became a follower (it lost leadership, stepped down or is closing). Its
+  /// pending exec() handlers have already been failed with kNotLeader.
+  virtual void stepped_down(RaftTerm term) { (void)term; }
 };
 
 /// Called when an entry is committed (with its index), or with ErrorCode::kNotLeader.
@@ -56,7 +67,7 @@ class RaftServer : public ClientConnectionApi,
              std::filesystem::path          dir,
              std::filesystem::path          wal_dir,
              Options                        options,
-             shared_ptr<RaftApplier>        applier = nullptr);
+             shared_ptr<RaftObserver>       observer = nullptr);
 
   ~RaftServer() override;
 
@@ -87,6 +98,11 @@ class RaftServer : public ClientConnectionApi,
   //    the last tick entry.
   // 3. If so then the first node to respond is sent an election request.
   void stepdown();
+
+  /// Set or clear RaftState::needs_backup, and persist it. While it is set the node doesn't start
+  /// elections (nor take one from a RequestElection): it has no PostgreSQL to promote. It still
+  /// votes and replicates.
+  void set_needs_backup(bool needs_backup);
 
   /// Connection from client and other peers.
   void new_connection(string peer, socket_type socket) override;
@@ -372,11 +388,11 @@ class RaftServer : public ClientConnectionApi,
   RaftState state_;
 
   /// A copy of state_ for applied_state(), under published_mtx_ (a leaf lock).
-  mutable std::mutex      published_mtx_;
-  RaftState               published_;
-  void                    publish_state();
-  std::atomic<RaftIndex>  applied_idx_{RaftIndex{0}};
-  shared_ptr<RaftApplier> applier_;
+  mutable std::mutex       published_mtx_;
+  RaftState                published_;
+  void                     publish_state();
+  std::atomic<RaftIndex>   applied_idx_{RaftIndex{0}};
+  shared_ptr<RaftObserver> observer_;
 
   std::atomic<RaftIndex> compaction_idx_{RaftIndex{0}};
 

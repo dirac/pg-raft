@@ -71,9 +71,15 @@ position:
 | `needs_backup` | set when the log was replaced by an InstallSnapshot; the WAL before the snapshot's segments is missing until a PostgreSQL backup restores it |
 | `wal_end` | highest end (segment + offset + size) of the `WriteOp`s applied: the end of the WAL in `wal_dir`. A new leader's standby replays up to it before promotion (see [node.md](node.md#32-promotion-became_leader)). A maximum, because a rewritten page is published again over earlier offsets. It can end inside an incomplete record |
 
-A `RaftApplier` (set by the node) receives `applied(idx, entry, state)` for each applied entry and
-`installed(state)` after a snapshot. On a follower, `applied` advances the WalSender to
-`state.flushed_lsn`.
+A `RaftObserver` (set by the node) receives `applied(idx, entry, state)` for each applied entry,
+`installed(state)` after a snapshot, `became_leader(term)` at full leadership (once every
+inherited entry is committed and applied) and `stepped_down(term)` when a leader becomes a
+follower (after its pending `exec()` handlers have failed). It runs with the server lock held and
+must not block. On a follower, `applied` advances the WalSender to `state.flushed_lsn`.
+
+`set_needs_backup(bool)` sets and persists `RaftState::needs_backup`. While it is set the node
+doesn't start elections and doesn't take one from a `RequestElection`; it still votes and
+replicates (`raft_ensemble_needs_backup_test`).
 
 ### 2.4 Persistent state (`RaftLog`, LMDB)
 
@@ -211,7 +217,7 @@ entries inherited from earlier leaders have no handler.
 |---|---|
 | Leader `WalTracker::async_publish(seg, off, size)` | `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{off,size}}, …)` |
 | Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{off,size}}, h)`. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
-| Follower `RaftApplier::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
+| Follower `RaftObserver::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
 | Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, and `set_needs_backup(...)` (planned) when it has no usable data directory |
 
 `RaftServer::segment(lsn)` opens segments in the server's `wal_dir` through one
@@ -266,7 +272,7 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 
 ## 8. Open items
 
-1. **Node**: wire `WalTracker`, `RaftApplier`, `PgInstance`, `PgClient` and `WalSender` into a
+1. **Node**: wire `WalTracker`, `RaftObserver`, `PgInstance`, `PgClient` and `WalSender` into a
    pg-raft node process (§4), including `set_serving` once promotion is done.
 2. **Phase 2 of a snapshot**: when `needs_backup` is set, restore the latest backup from the
    backup store, then clear `needs_backup` (`set_needs_backup`, to be added; while it is set the

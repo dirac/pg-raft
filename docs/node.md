@@ -9,7 +9,7 @@ Source: `src/node/` (to be written). The node process ties together the existing
 One process per server:
 
 ```
-pg_raft_node init --config config.toml        # once per cluster: the first backup (§4.1)
+pg_raft_initdb --config config.toml [--port N]  # once per cluster: the first backup (§4.1)
 pg_raft_node --config config.toml --id N      # every server
 ```
 
@@ -121,8 +121,7 @@ hooks, and the node reacts.
 ### 3.1 Hooks and the node strand
 
 `RaftApplier` is renamed `RaftObserver`, since it is no longer only about applied entries, and
-gains two hooks. (The rename is part of this work; the code and the other docs still say
-`RaftApplier`.)
+gains two hooks (implemented):
 
 ```cpp
 struct RaftObserver {
@@ -171,11 +170,11 @@ is committed WAL.
    a bounded wait within the transition, with a timeout, not a loop. On timeout the node steps
    down, so that another node can take over.
 3. Switch the tracker to leader mode, before PostgreSQL writes any new WAL.
-4. Promote with `SELECT pg_promote()` over `PgClient`. On promotion PostgreSQL replays everything
-   it received, up to the last complete record, then ends recovery and starts a new timeline
-   (§7). An incomplete record at the very end is discarded, and the new timeline starts after the
-   last complete one. `PgInstance::promote()` only sends SIGUSR1, which doesn't promote on
-   PostgreSQL ≥ 12; it is fixed as part of this work.
+4. Promote with `PgInstance::promote()` (the `promote` file, then SIGUSR1, as `pg_ctl promote`
+   does), and wait for `pg_is_in_recovery()` to be false. On promotion PostgreSQL replays
+   everything it received, up to the last complete record, then ends recovery and starts a new
+   timeline (§7). An incomplete record at the very end is discarded, and the new timeline starts
+   after the last complete one.
 5. **The new timeline is published by the FUSE layer**, not by this step: on promotion
    PostgreSQL installs `<timeline>.history` in `pg_wal` with a rename, `WalFuseOps::op_rename`
    passes it to `WalTracker::async_timeline`, and `NodeWalTracker` (now in leader mode) appends
@@ -234,9 +233,10 @@ cluster's **backup store** ([backup.md](backup.md)): a `BackupStore` whose first
 `DirBackupStore`, keeps one directory per backup; an S3 implementation comes later. Backups are
 named after their end LSN, so the latest one is always easy to find.
 
-### 4.1 Creating a cluster: `pg_raft_node init`
+### 4.1 Creating a cluster: `pg_raft_initdb` (implemented)
 
-`init` is a separate command, run once, like `initdb`. It does not start a raft server:
+`pg_raft_initdb` is a separate command (`src/node/pg_raft_initdb.cc`, `init_cluster()` in
+`src/node/init.h`), run once, like `initdb`. It does not start a raft server:
 
 1. `initdb` into a scratch directory (with data checksums), then `write_config` and `write_hba`.
 2. Start PostgreSQL on it, on its own, without FUSE: this instance is not part of the cluster, its
@@ -244,10 +244,11 @@ named after their end LSN, so the latest one is always easy to find.
 3. `pg_basebackup -X stream`, which includes the WAL the backup needs to be consistent. Verify it
    (`verify_backup`).
 4. `store.begin(node, now)`, then `store.put(pending, backup, end_lsn)` (the name,
-   [backup.md](backup.md#2-naming)). `init` runs before any node, so it uses node id 0.
+   [backup.md](backup.md#2-naming)). `pg_raft_initdb` runs before any node, so it uses node id 0. PostgreSQL runs on
+   `--port` (default `servers[0].pg_port`) while the backup is taken.
 5. Stop PostgreSQL and delete the scratch directory.
 
-`init` refuses to run if the store already holds a backup, so that a second cluster can't be
+`pg_raft_initdb` refuses to run if the store already holds a backup, so that a second cluster can't be
 created in the same store by mistake.
 
 ### 4.2 Starting a node
@@ -268,7 +269,7 @@ Without a usable data directory:
 Then, in every case: mount FUSE, start PostgreSQL as a standby (`standby.signal`, and
 `primary_conninfo` pointing at the local `WalSenderServer`), and start raft.
 
-**At bootstrap** every node restores the backup `init` made, and every raft log is empty. The
+**At bootstrap** every node restores the backup `pg_raft_initdb` made, and every raft log is empty. The
 first leader reaches full leadership at once, with `wal_end = {}`, so it promotes its standby
 straight away (§3.2) and publishes timeline 2. The other standbys follow it through their WAL
 senders.
@@ -289,7 +290,7 @@ after restoring it the node receives all the WAL it is missing through ordinary 
 the node sees an older backup than the leader compacted to (an S3 listing can lag), it keeps
 `needs_backup` set, logs it, and retries.
 
-### 4.4 Raft change: `set_needs_backup`
+### 4.4 Raft change: `set_needs_backup` (implemented)
 
 A node without a usable PostgreSQL must not become leader: it would have nothing to promote.
 `needs_backup` already says that, so there is no separate "can lead" flag:
@@ -367,7 +368,7 @@ On SIGTERM or SIGINT:
    - No acknowledged transaction is lost (a row count of acknowledged inserts).
    - The old leader rejoins as a standby.
 3. **Bootstrap and join:**
-   - `pg_raft_node init`, then 3 nodes start from the backup, elect a leader and promote it.
+   - `pg_raft_initdb`, then 3 nodes start from the backup, elect a leader and promote it.
    - Add an empty node: it restores the latest backup, catches up, and can take over as leader.
    - A node that receives an InstallSnapshot restores a backup and catches up.
 
@@ -375,7 +376,7 @@ The tests need PostgreSQL and FUSE, and skip if either is absent.
 
 ## 9. Phases
 
-1. **Steady state:** `BackupStore` and `DirBackupStore`, `pg_raft_node init`, restoring at
+1. **Steady state:** `BackupStore` and `DirBackupStore`, `pg_raft_initdb`, restoring at
    startup (§4.2), `set_needs_backup`, `Node`, `NodeWalTracker`, the applier, the poller, a leader
    that promotes on start, and test 1.
 2. **Failover:** the hooks and transitions (§3), timelines (§7), and test 2.
@@ -386,7 +387,7 @@ Later: the proxy.
 
 ## 10. Open decisions
 
-1. **Bootstrap — resolved: `pg_raft_node init`.** It creates the first backup in the backup
+1. **Bootstrap — resolved: `pg_raft_initdb`.** It creates the first backup in the backup
    store; every node starts by restoring the latest backup (§4).
 2. **Demoting an old primary — resolved: no `pg_rewind`.** The old primary is restarted as a
    standby after its `pg/pg_wal` is cut back (§3.3).

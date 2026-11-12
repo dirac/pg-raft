@@ -43,8 +43,12 @@ entry, replacing the rest), `entries_from`, `latest_entries`, `get_term`,
 - **`exec(WalCommand, handler)`** — leader only. The handler gets the index when the entry
   commits, or `ErrorCode::kNotLeader`. It runs with the server lock held, so it must not call back
   into the server.
-- **`RaftApplier`** — `applied(idx, entry, state)` for each applied entry (for example to advance
-  the WalSender to `state.flushed_lsn`), and `installed(state)` after a snapshot.
+- **`RaftObserver`** — `applied(idx, entry, state)` for each applied entry (for example to
+  advance the WalSender to `state.flushed_lsn`), `installed(state)` after a snapshot, and the role
+  changes `became_leader(term)` (full leadership) and `stepped_down(term)`. Called with the server
+  lock held.
+- **`set_needs_backup(bool)`** — sets and persists `RaftState::needs_backup`; while it is set the
+  node doesn't start (or take) an election.
 - **`segment(lsn)`** — a segment in `wal_dir`, opened through one `WalSegmentCache`. A missing
   segment is created, zero filled.
 - **`stepdown()`** — hands the leadership over through `RequestElection`. It is also used on

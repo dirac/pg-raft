@@ -79,8 +79,9 @@ The default HBA trusts loopback and requires `scram-sha-256` everywhere else.
 - `stop(mode, timeout)` sends `SIGTERM` (Smart), `SIGINT` (Fast), or `SIGQUIT` (Immediate),
   polls for the process to exit, and sends `SIGKILL` after `timeout`.
 - `reload()` sends `SIGHUP`.
-- `promote()` sends `SIGUSR1` and sets `role_ = kPrimary`. SIGUSR1 alone does **not** promote
-  PostgreSQL ≥ 12: the postmaster also needs a `promote` file in PGDATA. See open item 1.
+- `promote()` creates the `promote` file in PGDATA, sends `SIGUSR1` and sets `role_ = kPrimary`,
+  as `pg_ctl promote` does (PostgreSQL ≥ 12 promotes on SIGUSR1 only with the file). The
+  promotion is asynchronous: wait for `pg_is_in_recovery()` to be false.
 
 ### Backup, verify, and restore
 
@@ -122,9 +123,9 @@ not installed.
 
 ## 5. Known issues and open items
 
-1. **Promotion**: `SIGUSR1` alone does not promote in PostgreSQL ≥ 12. The postmaster also needs
-   a `promote` signal file in PGDATA, or the caller has to run `pg_ctl promote` /
-   `pg_promote()`. `promote()` should create `data_dir/promote` before it signals.
+1. **Promotion** — fixed: `promote()` creates the `promote` file before it signals
+   (`timeline_switch_test` promotes through it). `role_` is still set before the promotion has
+   finished.
 2. `Process` derives the process name with `strrchr(executable, '/') + 1`. That crashes for a bare
    executable name with no `/`.
 3. `wait_ready()` holds `mu_` for up to 30 s, which blocks `stop()` on the same instance.

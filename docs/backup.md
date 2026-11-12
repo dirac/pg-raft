@@ -115,7 +115,7 @@ refresh time.
 
 ## 4. Taking backups
 
-Every backup is taken with **`pg_basebackup -X stream`**, both by `init` and afterwards. There is
+Every backup is taken with **`pg_basebackup -X stream`**, both by `pg_raft_initdb` and afterwards. There is
 no other backup method:
 
 - It is a hot backup: the PostgreSQL being backed up keeps running.

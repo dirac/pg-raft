@@ -23,6 +23,13 @@ class TestRaftServer : public RaftServer {
 };
 
 struct RaftTestService {
+  /// A role change, recorded by each server's observer.
+  struct RoleEvent {
+    unsigned node;
+    RaftTerm term;
+    bool     became_leader;  // or stepped down
+  };
+
   RaftTestService(boost::asio::io_context& io_context,
                   std::filesystem::path    dir,
                   Config&                  config,
@@ -54,6 +61,17 @@ struct RaftTestService {
 
   /// Step down as a leader.
   bool stepdown();
+
+  /// The role changes so far, in order.
+  vector<RoleEvent> role_events() const {
+    auto lk = std::unique_lock{events_mtx_};
+    return events_;
+  }
+
+  void record(RoleEvent event) {
+    auto lk = std::unique_lock{events_mtx_};
+    events_.push_back(event);
+  }
 
   /// The highest commit index of the running servers.
   RaftIndex commit_idx() const;
@@ -102,6 +120,9 @@ struct RaftTestService {
     auto lk = std::unique_lock{servers_mtx_};
     return servers_;
   }
+
+  mutable std::mutex events_mtx_;
+  vector<RoleEvent>  events_;
 
   mutable std::mutex                                         servers_mtx_;
   std::vector<shared_ptr<TestRaftServer>>                    servers_;

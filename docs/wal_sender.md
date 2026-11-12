@@ -122,8 +122,8 @@ On the leader, the same server can feed any standby that is attached directly.
 
 ## 5. Known issues and open items
 
-1. **`StatusCb` is never wired by the server.** `WalSenderServer::do_accept` passes `{}`. The
-   constructor and `create()` need to accept a callback, or the `SenderCb` needs to set it.
+1. **`StatusCb`** — fixed: `WalSenderServer::create(..., on_sender, status_cb)` passes it to every
+   sender.
 2. **Unlinked segments.** `WalFuseOps::op_unlink` renames `X` to `.X`, but `do_advance` opens only
    `X`. A standby that falls behind PostgreSQL's checkpoint-driven removal stalls silently. It
    should fall back to `.X`, as `WalSegment::open` does, or read through the shared

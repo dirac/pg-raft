@@ -161,6 +161,10 @@ void PgInstance::reload() {
 void PgInstance::promote() {
   std::lock_guard lk(mu_);
   if (postgres_.is_running()) {
+    // What pg_ctl promote does: the postmaster promotes on SIGUSR1 only if the promote file
+    // exists (PostgreSQL 12+). The promotion itself is asynchronous: wait for
+    // pg_is_in_recovery() to be false.
+    std::ofstream(data_dir_ / "promote").close();
     ::kill(postgres_.pid(), SIGUSR1);
     role_ = Role::kPrimary;
   }

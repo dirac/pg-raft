@@ -120,6 +120,25 @@ RaftIndex RaftTestService::commit_idx() const {
   return idx;
 }
 
+namespace {
+
+/// Records the role changes of one server in the service.
+struct TestObserver : public RaftObserver {
+  TestObserver(RaftTestService& service, unsigned node) : service_(service), node_(node) {}
+
+  void became_leader(RaftTerm term) override {
+    service_.record({.node = node_, .term = term, .became_leader = true});
+  }
+  void stepped_down(RaftTerm term) override {
+    service_.record({.node = node_, .term = term, .became_leader = false});
+  }
+
+  RaftTestService& service_;
+  unsigned         node_;
+};
+
+}  // namespace
+
 void RaftTestService::start(unsigned idx) {
   auto id = RaftNodeId{u2(idx)};
 
@@ -128,8 +147,13 @@ void RaftTestService::start(unsigned idx) {
   if (!a)
     a.emplace(io_context(), endpoints_.at(idx));
 
-  auto server = Server::create<TestRaftServer>(
-      id, std::move(a.value()), config_, raft_dir(idx), wal_dir(idx), options_);
+  auto server = Server::create<TestRaftServer>(id,
+                                               std::move(a.value()),
+                                               config_,
+                                               raft_dir(idx),
+                                               wal_dir(idx),
+                                               options_,
+                                               make_shared<TestObserver>(*this, idx));
 
   auto lk          = std::unique_lock{servers_mtx_};
   servers_.at(idx) = std::move(server);
@@ -330,6 +354,21 @@ RaftTestService::Consistency RaftTestService::check_consistency(
       if (chk != w.checksum)
         result.violations.emplace_back(std::format(
             "Node {0} has other bytes for the write {1} at {2}", v.node, w.idx, w.op.offset));
+    }
+  }
+
+  // At most one leader per term, and only a leader steps down, in the term it led.
+  {
+    map<RaftTerm, unsigned> leaders;
+    for (auto const& e : role_events()) {
+      if (e.became_leader) {
+        if (auto [pos, added] = leaders.emplace(e.term, e.node); !added && pos->second != e.node)
+          result.violations.emplace_back(std::format(
+              "Two leaders in term {0}: nodes {1} and {2}", e.term, pos->second, e.node));
+      } else if (auto pos = leaders.find(e.term); pos == leaders.end() || pos->second != e.node) {
+        result.violations.emplace_back(
+            std::format("Node {0} stepped down in term {1} without leading it", e.node, e.term));
+      }
     }
   }
 

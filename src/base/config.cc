@@ -13,6 +13,20 @@ void parse_dir(T& data, Config& config) {
 }
 
 template <typename T>
+void parse_node(T& data, Config& config) {
+  if (data.contains("backup_store"))
+    config.backup_store = toml::find<string>(data, "backup_store");
+  if (data.contains("backup_interval_secs"))
+    config.backup_interval_secs = toml::find<unsigned>(data, "backup_interval_secs");
+  if (data.contains("backup_wal_size"))
+    config.backup_wal_size = toml::find<uint64_t>(data, "backup_wal_size");
+  if (data.contains("backup_pending_timeout_secs"))
+    config.backup_pending_timeout_secs = toml::find<unsigned>(data, "backup_pending_timeout_secs");
+  if (data.contains("socket_dir"))
+    config.socket_dir = toml::find<string>(data, "socket_dir");
+}
+
+template <typename T>
 void parse_server(T& data, vector<Config::Server>& servers) {
   Config::Server e;
 
@@ -75,6 +89,7 @@ Config::Config(string const& filename) {
   auto data = toml::parse(filename);
 
   parse_dir(data, *this);
+  parse_node(data, *this);
   parse_server_vec(data, *this);
   parse_pg_config(data, *this);
 }

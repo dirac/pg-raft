@@ -27,6 +27,12 @@ BOOST_AUTO_TEST_CASE(stepdown, *boost::unit_test::timeout(timeout)) {
 
   validate(service, writer);
 
+  // The observers saw each hand-over: the first leader and 4 more, and 4 step-downs.
+  auto events = service.role_events();
+  auto led    = std::ranges::count_if(events, [](auto const& e) { return e.became_leader; });
+  BOOST_TEST(led >= 5);
+  BOOST_TEST(std::ssize(events) - led >= 4);
+
   service.shutdown();
   io.stop();
 }

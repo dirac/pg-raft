@@ -10,7 +10,7 @@ RaftServer::RaftServer(RaftNodeId                     id,
                        std::filesystem::path          dir,
                        std::filesystem::path          wal_dir,
                        Options                        options,
-                       shared_ptr<RaftApplier>        applier)
+                       shared_ptr<RaftObserver>       observer)
     : Server(std::move(acceptor)),
       config_(config),
       self_id_(id),
@@ -19,7 +19,7 @@ RaftServer::RaftServer(RaftNodeId                     id,
       wal_dir_(std::move(wal_dir)),
       cache_(make_shared<WalSegmentCache>()),
       log_(dir_ / "log", options.sync_commits, options.no_sync),
-      applier_(applier ? std::move(applier) : make_shared<RaftApplier>()),
+      observer_(observer ? std::move(observer) : make_shared<RaftObserver>()),
       timer_(io_context()),
       match_indexes_(self_id_, config.servers.size()),
       votes_(config.servers.size()),
@@ -246,6 +246,18 @@ void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
   send_append_entries(/*check_sync_flag=*/true);
 }
 
+void RaftServer::set_needs_backup(bool needs_backup) {
+  auto lk = unique_lock();
+  if (state_.needs_backup == needs_backup)
+    return;
+
+  log(INFO, "{}needs_backup = {}", log_prefix_, needs_backup);
+  state_.needs_backup = needs_backup;
+  // Saving the state with a log size this large deletes no entry.
+  value(log_.save_snapshot(state_, std::numeric_limits<unsigned>::max()));
+  publish_state();
+}
+
 void RaftServer::publish_state() {
   auto lk    = std::unique_lock{published_mtx_};
   published_ = state_;
@@ -375,7 +387,9 @@ void RaftServer::make_follower(RaftServer::UniqueLock lk, std::source_location l
       loc.line());
   update_last_ping(false);
 
-  if (is_leader()) {
+  bool const was_leader = is_leader();
+  auto const term       = leadership_term();
+  if (was_leader) {
     leadership_term_.store(RaftTerm{0}, std::memory_order_relaxed);
     log(INFO, "{}Sending invalid leader to {} requests", log_prefix_, handlers_.size());
     for (auto& [_, handler, time] : handlers_) {
@@ -385,6 +399,8 @@ void RaftServer::make_follower(RaftServer::UniqueLock lk, std::source_location l
     handlers_.clear();
   }
   type_.store(NodeType::kFollower);
+  if (was_leader)
+    observer_->stepped_down(term);
 
   stepdown_.clear();
 }
@@ -411,6 +427,13 @@ void RaftServer::make_candidate(unsigned inc) {
 void RaftServer::make_candidate(unsigned inc, RaftServer::UniqueLock lk) {
   if (!is_follower())
     return;
+
+  if (state_.needs_backup) {
+    // Nothing to promote: wait for a leader instead (update_last_ping restarts the timeout).
+    log(INFO, "{}Not starting an election: the node needs a backup", log_prefix_);
+    update_last_ping(false);
+    return;
+  }
 
   RaftTerm new_term = current_term() + inc;
 
@@ -644,7 +667,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
   applied_idx_.store(state_.log_idx);
   commit_idx_.store(state_.log_idx);
   compaction_idx_.store(state_.log_idx);
-  applier_->installed(state_);
+  observer_->installed(state_);
 
   update_last_ping(true);
 
@@ -785,6 +808,7 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
             std::get<RaftIndex>(last_entry));
 
         type_.store(NodeType::kLeader);
+        observer_->became_leader(req_term);
       } else {
         log(INFO,
             "{}Waiting to become a leader .. {} vs {}",
@@ -847,7 +871,8 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
                                              RequestElection request) {
   RaftTerm const curr_term = update_current_term(term);
 
-  if (curr_term == term && value(raft_log().last_entry()) == request.last_entry) {
+  if (curr_term == term && value(raft_log().last_entry()) == request.last_entry &&
+      !applied_state().needs_backup) {
     make_candidate();
 
     return RaftResponse{
@@ -901,7 +926,7 @@ RaftIndex RaftServer::apply_entries(bool check_delay) {
       value(write_history_file(wal_dir_, u4(t->timeline), t->content));
 
     applied_idx_.store(idx, std::memory_order_relaxed);
-    applier_->applied(idx, e, state_);
+    observer_->applied(idx, e, state_);
 
     // The leader has a handler for every entry that exec() adds, added with the entry under the
     // lock that this function has; ticks and the entries of earlier leaders have none.

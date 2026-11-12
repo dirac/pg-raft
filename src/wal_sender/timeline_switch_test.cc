@@ -251,7 +251,7 @@ BOOST_AUTO_TEST_CASE(standby_follows_promotion, *boost::unit_test::timeout(180))
   fixed_lsn = tl1_end;
   stage     = 1;
 
-  BOOST_REQUIRE(exec_one(kS2Port, "SELECT pg_promote()::text") == "true");
+  s2.promote();  // the promote file, then SIGUSR1
   BOOST_REQUIRE(wait_for(
       60, [&] { return exec_one(kS2Port, "SELECT pg_is_in_recovery()::text") == "false"; }));
   BOOST_REQUIRE(fs::exists(s2_dir / "pg_wal" / "00000002.history"));

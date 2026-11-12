@@ -65,3 +65,10 @@ unit-test raft_ensemble_snapshot_test
     libs
     ../base//testing
   ;
+
+unit-test raft_ensemble_needs_backup_test
+  : raft_ensemble_needs_backup_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;
