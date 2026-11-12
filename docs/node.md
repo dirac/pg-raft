@@ -18,7 +18,7 @@ pg_raft_node --config config.toml --id N [--init]
 | `PgInstance` | The local PostgreSQL: data directory `wdir/node<N>/data`, port `servers[N].pg_port`. |
 | `Fuse` + `WalFuseOps` | Mounted over `data/pg_wal`, backed by `wdir/node<N>/pg/pg_wal`: the WAL PostgreSQL itself writes. |
 | `NodeWalTracker` | The `WalTracker`. On the leader it turns intercepted WAL writes and fsyncs into raft entries (fsync waits for a quorum). On a follower it does nothing with raft: fsync is local. |
-| `WalSenderServer` | A TCP port on loopback (§2.3). The local standby replicates from it, reading `raft/wal`. |
+| `WalSenderServer` | A Unix-domain socket (§2.3). The local standby replicates from it, reading `raft/wal`. |
 | `PgClient` poller | Every 500 ms, reads the recovery state and LSNs and calls `RaftServer::set_pg_status()`. |
 
 ### Directory layout
@@ -99,17 +99,15 @@ into `raft/wal` (§2.1).
 The cost of two directories: a `memcpy` of every published range on the leader, and a second copy
 of the WAL on disk on every node.
 
-### 2.3 WalSenderServer on a TCP port
+### 2.3 WalSenderServer on a Unix-domain socket
 
-The `WalSenderServer` listens on a TCP port, not on a Unix-domain socket. A Unix socket has to be
-named `.s.PGSQL.<port>` in a socket directory, and that file naming caused problems.
+The `WalSenderServer` listens on a Unix-domain socket, as it does today. Only the local standby
+connects, so there is no network exposure and no authentication to set up.
 
-- It binds `127.0.0.1` (only the local standby connects).
-- The standby's `primary_conninfo` is `host=127.0.0.1 port=<port>`.
-- The current `WalSenderServer` binds a Unix socket (`socket_dir/.s.PGSQL.<port>`); it is changed
-  back to a TCP acceptor as part of phase 1. `create()` loses `socket_dir`, and `socket_path()`
-  goes away; `bound_port()` stays.
-- Which port: see decision 4 in §10.
+- It binds `socket_dir/.s.PGSQL.<port>`. If that file already exists it tries the next port number
+  until one is free.
+- The standby's `primary_conninfo` is `host=<socket_dir> port=<bound_port()>`. The node writes it
+  each time it starts the standby, because `bound_port()` can differ from the port it asked for.
 
 ## 3. Role transitions
 
@@ -326,8 +324,8 @@ The tests need PostgreSQL and FUSE, and skip if either is absent.
 
 ## 9. Phases
 
-1. **Steady state:** `WalSenderServer` on a TCP port (§2.3), `Node`, `NodeWalTracker`, the
-   applier, the poller, `pg_raft_node`, `--init`, a leader that promotes on start, and test 1.
+1. **Steady state:** `Node`, `NodeWalTracker`, the applier, the poller,
+   `pg_raft_node`, `--init`, a leader that promotes on start, and test 1.
 2. **Failover:** the hooks and transitions (§3), `set_can_lead`, timelines (§7), and test 2.
 3. **Join and backup:** §4, and test 3.
 
@@ -342,6 +340,5 @@ segments every node has applied past) and the proxy.
    standby after its `pg/pg_wal` is cut back (§3.3).
 3. **Scope:** implement phase 1 first and review it before failover (proposed)? Timelines need a
    `wal_sender` change that deserves its own review.
-4. **WalSenderServer port:** an ephemeral port (bind port 0, read `bound_port()`, and write it into
-   `primary_conninfo` each time the standby starts; proposed, no configuration needed), or a fixed
-   port per server in `config.toml` (for example `servers[i].wal_port`)?
+4. **WalSenderServer transport — resolved: Unix-domain socket.** No switch to TCP; the standby
+   connects through `socket_dir/.s.PGSQL.<bound_port()>` (§2.3).
