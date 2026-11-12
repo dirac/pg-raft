@@ -13,6 +13,7 @@ way, and the known gaps.
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
 | `raft` | [raft.md](raft.md) | Implemented, tested; not yet wired into a node |
 | `node` | [node.md](node.md) | Designed; not started |
+| `backup` | [backup.md](backup.md) | Designed; not started |
 | `proxy` | [proxy.md](proxy.md) | Designed; not started (empty directory) |
 
 `base` is shared infrastructure (logger, `Result<T>`, `Int<T,L>`, `Config`, `IoThreads`,

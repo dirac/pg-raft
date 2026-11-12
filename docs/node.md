@@ -9,7 +9,8 @@ Source: `src/node/` (to be written). The node process ties together the existing
 One process per server:
 
 ```
-pg_raft_node --config config.toml --id N [--init]
+pg_raft_node init --config config.toml        # once per cluster: the first backup (§4.1)
+pg_raft_node --config config.toml --id N      # every server
 ```
 
 | Component | Role in the node |
@@ -20,6 +21,7 @@ pg_raft_node --config config.toml --id N [--init]
 | `NodeWalTracker` | The `WalTracker`. On the leader it turns intercepted WAL writes and fsyncs into raft entries (fsync waits for a quorum). On a follower it does nothing with raft: fsync is local. |
 | `WalSenderServer` | A Unix-domain socket (§2.3). The local standby replicates from it, reading `raft/wal`. |
 | `PgClient` poller | Every 500 ms, reads the recovery state and LSNs and calls `RaftServer::set_pg_status()`. |
+| `BackupStore` | Where the cluster's PostgreSQL backups are kept (`backup_store` in `config.toml`). A node without a usable data directory restores the latest one (§4). |
 
 ### Directory layout
 
@@ -160,9 +162,9 @@ is committed WAL.
 
 1. Advance the WAL sender to the **end of the WAL in `raft/wal`**: `state.wal_end`, the highest
    end (segment + offset + size) of the applied `WriteOp`s. It is a maximum, not the end of the
-   last `WriteOp`, because a rewritten page is published again over earlier offsets. A `WriteOp` can end inside an incomplete record
-   (§2.2), so `wal_end` can be past the last valid record; that is fine here, because PostgreSQL
-   stops replaying at the last complete record.
+   last `WriteOp`, because a rewritten page is published again over earlier offsets. A `WriteOp`
+   can end inside an incomplete record (§2.2), so `wal_end` can be past the last valid record;
+   that is fine here, because PostgreSQL stops replaying at the last complete record.
 2. Wait until the standby has received all of it: its `StandbyStatusUpdate` (the WAL sender's
    `StatusCb`, which `WalSenderServer` must now pass on) reports
    `StandbyStatus::flushed_lsn >= wal_end` (what the standby has written to its disk). This is
@@ -217,56 +219,89 @@ Why this is safe without `pg_rewind`:
 
 Two cases are not raft events, so no hook fires for them:
 
-- **Startup.** The node starts PostgreSQL as a standby by itself. If raft later reaches full
-  leadership, `became_leader` promotes it.
+- **Startup.** The node restores a backup if it has no usable data directory (§4.2), then starts
+  PostgreSQL as a standby by itself. If raft later reaches full leadership, `became_leader`
+  promotes it.
 - **PostgreSQL exits on its own**, without a role change: after the PANIC in §3.3, an OOM kill, a
   crash. A watcher on the `Process` (`wait()`) posts a restart to the node strand, which restarts
   PostgreSQL in the node's current role: as a standby on a follower; on the leader, as a standby
   that is then promoted again (§3.2).
 
-## 4. Bootstrap and joining (phase 2 of an InstallSnapshot)
+## 4. Bootstrap, joining and backups
 
-### 4.1 Creating a cluster
+A node never copies a data directory from a peer. Every PostgreSQL data directory comes from the
+cluster's **backup store** ([backup.md](backup.md)): a `BackupStore` whose first implementation,
+`DirBackupStore`, keeps one directory per backup; an S3 implementation comes later. Backups are
+named after their end LSN, so the latest one is always easy to find.
 
-`pg_raft_node --init` on one node:
+### 4.1 Creating a cluster: `pg_raft_node init`
 
-1. `initdb` (with data checksums).
-2. `write_config` and `write_hba`.
-3. `create_raft_wal(wdir/node<N>/pg)`, which moves the initial segments into `pg/pg_wal` (the
-   FUSE backing directory). `raft/wal` starts empty; the other nodes get the initial WAL with
-   their backup.
+`init` is a separate command, run once, like `initdb`. It does not start a raft server:
 
-The other nodes join as described next.
+1. `initdb` into a scratch directory (with data checksums), then `write_config` and `write_hba`.
+2. Start PostgreSQL on it, on its own, without FUSE: this instance is not part of the cluster, its
+   WAL only has to end up in the backup.
+3. `pg_basebackup -X stream`, which includes the WAL the backup needs to be consistent. Verify it
+   (`verify_backup`).
+4. `store.begin(node, now)`, then `store.put(pending, backup, end_lsn)` (the name,
+   [backup.md](backup.md#2-naming)). `init` runs before any node, so it uses node id 0.
+5. Stop PostgreSQL and delete the scratch directory.
 
-### 4.2 Joining, or recovering from `needs_backup`
+`init` refuses to run if the store already holds a backup, so that a second cluster can't be
+created in the same store by mistake.
 
-A node with no data directory, or with `RaftState::needs_backup` set:
+### 4.2 Starting a node
 
-1. Sends `StatusRequest` to its peers. It picks a standby whose `applied_idx` is at least its own,
-   and falls back to the leader.
-2. Calls `RaftServerConnection::backup(dir, applied_idx)`.
-3. Restores the backup (`PgInstance::restore`), and moves the backup's WAL into `pg/pg_wal`.
-4. Reconciles WAL: the standby replays the backup's WAL from `pg/pg_wal`, then streams the rest
-   from `raft/wal`. There must be no gap: the backup has to reach at least the first segment that
-   `raft/wal` holds after the InstallSnapshot. A source whose `applied_idx` is behind that is
-   skipped.
-5. Clears `needs_backup` (new `RaftServer` API) and starts as a standby.
+On start, before raft starts, the node checks whether it has a usable PostgreSQL: a data
+directory, and `RaftState::needs_backup` not set. It downloads a backup **only if it doesn't**. A
+node that restarts keeps its own data directory; replaying from there is faster than fetching
+the latest backup, especially from S3.
 
-### 4.3 Backup provider
+Without a usable data directory:
 
-`set_backup_provider` serves `SnapshotRequest`s, for joining nodes and for the proxy:
+1. `store.latest()`, then `store.get()` into a scratch directory, then `verify_backup`, and check
+   the system identifier ([backup.md](backup.md#4-checks)).
+2. Move it into place as `data/`, and move its `pg_wal` contents into `pg/pg_wal` (the FUSE
+   backing directory), as `create_raft_wal` does. `data/pg_wal` stays empty for the FUSE mount.
+3. Clear `needs_backup` (`set_needs_backup(false)`, §4.4).
 
-- **On a standby:** `PgInstance::backup` (stop the instance and copy the data directory), then
-  `verify_backup`, then restart the standby.
-- **On the primary:** `pg_basebackup` (`-X stream` includes the WAL needed).
-- **Response:** the list of files, relative to the data directory, plus the symbolic links. The
-  backup directory is kept until the next backup or until the connection closes.
+Then, in every case: mount FUSE, start PostgreSQL as a standby (`standby.signal`, and
+`primary_conninfo` pointing at the local `WalSenderServer`), and start raft.
 
-### 4.4 Raft change: `set_can_lead`
+**At bootstrap** every node restores the backup `init` made, and every raft log is empty. The
+first leader reaches full leadership at once, with `wal_end = {}`, so it promotes its standby
+straight away (§3.2) and publishes timeline 2. The other standbys follow it through their WAL
+senders.
 
-A node with no usable PostgreSQL (empty, or `needs_backup`) must not become leader, because it
-would have nothing to promote. A node that can't lead doesn't start elections, but it still votes
-and replicates.
+### 4.3 Recovering from `needs_backup`
+
+A node whose log was replaced by an InstallSnapshot has `needs_backup` set: `raft/wal` holds only
+the snapshot's segments, and the WAL before them is missing. The node:
+
+1. Stops PostgreSQL (Immediate) if it is running, and moves the old data directory aside.
+2. Restores the latest backup as in §4.2.
+3. Starts PostgreSQL as a standby. It replays the backup's WAL from `pg/pg_wal`, then streams the
+   rest from `raft/wal`.
+
+**There must be no gap:** the cluster keeps every raft entry and WAL segment from the segment of
+the latest backup's end LSN on ([backup.md](backup.md#5-wal-retention-and-raft-compaction)), so
+after restoring it the node receives all the WAL it is missing through ordinary AppendEntries. If
+the node sees an older backup than the leader compacted to (an S3 listing can lag), it keeps
+`needs_backup` set, logs it, and retries.
+
+### 4.4 Raft change: `set_needs_backup`
+
+A node without a usable PostgreSQL must not become leader: it would have nothing to promote.
+`needs_backup` already says that, so there is no separate "can lead" flag:
+
+- `RaftServer` doesn't start an election while `state.needs_backup` is set. It still votes and
+  replicates.
+- `set_needs_backup(bool)` sets or clears the flag and persists the state. The node sets it when
+  it starts without a data directory, and clears it once a backup is restored (§4.2).
+- InstallSnapshot sets it, as it does today.
+
+A PostgreSQL that crashed and is being restarted (§3.4) doesn't set it: the data directory is
+still there.
 
 ## 5. Status poller
 
@@ -318,29 +353,50 @@ On SIGTERM or SIGINT:
    - A new leader is promoted.
    - No acknowledged transaction is lost (a row count of acknowledged inserts).
    - The old leader rejoins as a standby.
-3. **Join:**
-   - Add an empty node.
-   - It fetches a backup, catches up, and can take over as leader.
+3. **Bootstrap and join:**
+   - `pg_raft_node init`, then 3 nodes start from the backup, elect a leader and promote it.
+   - Add an empty node: it restores the latest backup, catches up, and can take over as leader.
+   - A node that receives an InstallSnapshot restores a backup and catches up.
 
 The tests need PostgreSQL and FUSE, and skip if either is absent.
 
 ## 9. Phases
 
-1. **Steady state:** `Node`, `NodeWalTracker`, the applier, the poller,
-   `pg_raft_node`, `--init`, a leader that promotes on start, and test 1.
-2. **Failover:** the hooks and transitions (§3), `set_can_lead`, timelines (§7), and test 2.
-3. **Join and backup:** §4, and test 3.
+1. **Steady state:** `BackupStore` and `DirBackupStore`, `pg_raft_node init`, restoring at
+   startup (§4.2), `set_needs_backup`, `Node`, `NodeWalTracker`, the applier, the poller, a leader
+   that promotes on start, and test 1.
+2. **Failover:** the hooks and transitions (§3), timelines (§7), and test 2.
+3. **Join and recovery:** §4.3, taking backups after bootstrap, `keep_from` in compaction and WAL
+   retention (decision 5), InstallSnapshot from the oldest entries (decision 7), and test 3.
 
-Later: WAL retention for both directories (`pg/pg_wal`: the renamed `.X` segments; `raft/wal`:
-segments every node has applied past) and the proxy.
+Later: the proxy.
 
 ## 10. Open decisions
 
-1. **Bootstrap:** explicit `--init` on one node (proposed), or automatically on node 0 when the
-   whole cluster is empty?
+1. **Bootstrap — resolved: `pg_raft_node init`.** It creates the first backup in the backup
+   store; every node starts by restoring the latest backup (§4).
 2. **Demoting an old primary — resolved: no `pg_rewind`.** The old primary is restarted as a
    standby after its `pg/pg_wal` is cut back (§3.3).
 3. **Scope:** implement phase 1 first and review it before failover (proposed)? Timelines need a
    `wal_sender` change that deserves its own review.
 4. **WalSenderServer transport — resolved: Unix-domain socket.** No switch to TCP; the standby
    connects through `socket_dir/.s.PGSQL.<bound_port()>` (§2.3).
+5. **Backups after bootstrap — resolved.** A standby runs `pg_basebackup` against itself (a hot
+   backup; every backup is a `pg_basebackup`) when `backup_interval` or `backup_wal_size` since the
+   latest backup is exceeded. The backup's name carries its end LSN
+   and time, so every node computes from a listing when the next one is due and how much WAL and
+   how many raft entries to keep (`keep_from`), and compaction respects it
+   ([backup.md](backup.md#4-taking-backups)).
+6. **Which standby backs up — resolved: staggered deadlines.** Node `i` of `N` backs up once
+   `backup_interval * (1 + i/N)` has passed, or `backup_wal_size * (1 + i/N)` of WAL has
+   accumulated, since the latest backup, unless another node holds a live pending lease (refreshed
+   within `pending_timeout`, so a node that died with a marker doesn't block the others). The
+   primary skips its turn; a node that is down misses it and the next one covers it
+   ([backup.md](backup.md#41-which-node-backs-up-staggered-deadlines)).
+7. **InstallSnapshot — resolved: the oldest entries.** A node with no recent entries needs a
+   starting point. The leader sends its oldest entries, trimmed to 2 WAL segments, with those
+   segments' full contents, instead of today's latest `snapshot_entries` entries. It still has
+   those segments: WAL files are only deleted before the oldest entry's segment (an entry only
+   refers to a WAL file). The follower restores the latest backup (its end LSN is in the
+   first of those segments) and AppendEntries continues from there
+   ([backup.md](backup.md#5-wal-retention-and-raft-compaction)).

@@ -129,7 +129,11 @@ not installed.
    executable name with no `/`.
 3. `wait_ready()` holds `mu_` for up to 30 s, which blocks `stop()` on the same instance.
 4. Standby backups leave the instance stopped. The caller must restart it, and the API should
-   say so.
+   say so. Planned: back up a standby with `pg_basebackup` too, keeping it running; every backup
+   in the backup store is a `pg_basebackup` ([backup.md](backup.md#4-taking-backups)).
 5. `restore()` uses `/usr/bin/rsync` with a hardcoded path.
 6. `write_config` / `write_hba` append on every call. Calling either twice duplicates entries.
    PostgreSQL uses the last value, but the files keep growing.
+7. `write_hba`'s defaults put the `0.0.0.0/0 scram-sha-256` rule before the loopback `trust` rule,
+   so loopback matches `scram-sha-256` first, and there is no `replication` rule for loopback.
+   `initdb`'s own loopback rules at the top of `pg_hba.conf` hide this today.

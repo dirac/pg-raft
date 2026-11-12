@@ -178,19 +178,25 @@ entries inherited from earlier leaders have no handler.
 ### 3.5 Compaction and snapshots
 
 - **Compaction**: after `compaction_lag` entries have been applied since the last compaction, a
-  node saves its `RaftState` and deletes entries older than `log_idx - keep_old_logs`. **The leader
-  compacts too.** Stepping down to compact would mean a PostgreSQL failover. Entries are small (the WAL is in the segments), so compacting on the leader
-  is cheap.
+  node saves its `RaftState` and deletes entries older than `log_idx - keep_old_logs`. Planned:
+  the boundary becomes `keep_from`, the segment of the latest backup's end LSN
+  (`set_wal_keep_from`, see [backup.md](backup.md#5-wal-retention-and-raft-compaction)), and
+  `keep_old_logs` goes away. Every entry must have its WAL in `raft/wal` (an entry only names a
+  segment, offset and size), so segments are deleted in a separate step, on another thread, only
+  before the oldest entry's segment, which compaction records in `RaftState` (`first_idx`,
+  `first_segment`) in the same transaction as it deletes the entries.
+  **The leader compacts too.** Stepping down to compact would mean a PostgreSQL failover. Entries
+  are small (the WAL is in the segments), so compacting on the leader is cheap.
 - **InstallSnapshot, phase 1 (raft)**: the leader sends its latest `snapshot_entries` entries,
   trimmed to those that touch at most 2 segments, together with the **full contents** of those
   segments. The follower writes the segments and calls `install_snapshot(log_idx, entries,
   {…, needs_backup = true})`. It sets `commit_idx = log_idx` and can follow the leader from there
   at once.
-- **Phase 2 (PostgreSQL backup)**: a node with `needs_backup` fetches a backup over the client
-  channel (`RaftServerConnection::backup`), preferably from a standby (stop the instance, copy the
-  data directory), otherwise from the primary (`pg_basebackup`). It then reconciles the WAL records
-  in the backup with the WAL it received in phase 1. The channel and the hooks are implemented; the
-  node logic that triggers the backup and reconciles is not yet written (§8).
+- **Phase 2 (PostgreSQL backup)**: a node with `needs_backup` restores the latest backup from the
+  cluster's backup store ([backup.md](backup.md)), then replays the backup's WAL and streams the
+  rest from `raft/wal` (see [node.md](node.md#43-recovering-from-needs_backup)). The node logic is
+  not yet written (§8). Backups no longer come from peers, so the client channel's
+  `SnapshotRequest` and `set_backup_provider` are unused by the node design (§6).
 
 ## 4. Integration with `wal_fuse` and `wal_sender` (node, to be written)
 
@@ -199,7 +205,7 @@ entries inherited from earlier leaders have no handler.
 | Leader `WalTracker::async_publish(seg, off, size)` | `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{off,size}}, …)` |
 | Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{off,size}}, h)`. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
 | Follower `RaftApplier::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
-| Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, and `set_backup_provider(...)` backed by `PgInstance::backup`/`verify_backup` |
+| Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, and `set_needs_backup(...)` (planned) when it has no usable data directory |
 
 `RaftServer::segment(lsn)` opens segments in the server's `wal_dir` through one
 `WalSegmentCache`, and creates a missing segment, zero-filled. In the node design `wal_dir` is
@@ -218,8 +224,7 @@ The model:
 
 ## 6. Client channel (`client_types.h`)
 
-`RaftClientConnection` serves non-Raft identities: the proxy, and raft servers that need a
-backup.
+`RaftClientConnection` serves non-Raft identities, such as the proxy.
 
 - **Leadership by heartbeat**: `status()` is `0x3` when the node is the leader and serving, `0x1`
   when it is the leader but not serving, and `0` otherwise. `RaftServerConnection` exposes
@@ -229,7 +234,9 @@ backup.
 - `SnapshotRequest{applied_idx}` → `SnapshotResponse{success, files, links}`, followed by each file
   (`write_file`, xxhash32 per chunk). A server behind `applied_idx` refuses. The backup itself
   comes from the server's backup provider. `RaftServerConnection::backup(dir, applied_idx)`
-  receives the files into `dir` and recreates the links.
+  receives the files into `dir` and recreates the links. **Unused by the node design:** nodes
+  restore from the backup store instead ([backup.md](backup.md)), so this request and
+  `set_backup_provider` are candidates for removal.
 
 ## 7. Testing
 
@@ -254,9 +261,15 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 
 1. **Node**: wire `WalTracker`, `RaftApplier`, `PgInstance`, `PgClient` and `WalSender` into a
    pg-raft node process (§4), including `set_serving` once promotion is done.
-2. **Phase 2 of a snapshot**: trigger the backup fetch when `needs_backup` is set, restore it,
-   reconcile it with the received WAL, then clear `needs_backup`.
+2. **Phase 2 of a snapshot**: when `needs_backup` is set, restore the latest backup from the
+   backup store, then clear `needs_backup` (`set_needs_backup`, to be added; while it is set the
+   node must not start elections).
 3. `OpenOp`, `CloseOp` and `TimelineOp` need FUSE hooks; today only writes and fsyncs are
    generated.
-4. WAL retention: the renamed `.X` segments are never removed. They are needed until every node
-   has applied past them.
+4. WAL retention: segments are never removed from `raft/wal`, and the renamed `.X` segments are
+   never removed from `pg/pg_wal`. Planned: a WAL deletion thread removes the segments before
+   `RaftState::first_segment`, the segment of the oldest entry compaction left
+   ([backup.md](backup.md#5-wal-retention-and-raft-compaction)).
+5. `set_wal_keep_from(LogSeqNumber)` for compaction (replacing `keep_old_logs`), and
+   InstallSnapshot from the **oldest** entries (2 segments) instead of the latest
+   `snapshot_entries` (decision 7 in [node.md](node.md#10-open-decisions)).

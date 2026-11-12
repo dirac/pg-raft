@@ -76,8 +76,9 @@ request, tick seconds, snapshot entries, keep old logs, compaction lag, `log_req
   - `StatusRequest` returns the leader flag, the applied index and the PostgreSQL LSNs.
   - `SnapshotRequest` returns a `SnapshotResponse` followed by the backup files;
     `RaftServerConnection::backup(dir, applied_idx)` receives them into `dir`.
-  - The proxy uses the channel to find the leader and take backups. A node with `needs_backup`
-    uses it to fetch a backup.
+  - The proxy uses the channel to find the leader. Nodes restore backups from the backup store
+    (`docs/backup.md`), not over this channel, so `SnapshotRequest` and `set_backup_provider` are
+    unused by the node design.
 
 ## Tests
 
