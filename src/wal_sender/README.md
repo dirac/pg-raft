@@ -1,47 +1,55 @@
 # wal_sender
 
-Asio-based server that speaks the PostgreSQL physical streaming replication protocol. A standby connects to `WalSenderServer` exactly as it would connect to a primary's built-in `walsender` process.
-
-## WalSender
-
-Handles one replication connection. Reads WAL directly from a `wal_dir` on disk and streams it to the connected standby.
-
-**Protocol phases:**
-1. **Startup** — handles the PostgreSQL startup packet, SSL decline, auth-ok, parameter status messages
-2. **Command** — responds to `IDENTIFY_SYSTEM`, `START_REPLICATION`, `TIMELINE_HISTORY`, `SHOW`, `SET`, and simple `SELECT` queries
-3. **Streaming** — after `START_REPLICATION`, enters `CopyBoth` mode and streams `XLogData` messages; sends periodic keepalives every 5 seconds; handles `StandbyStatusUpdate` replies from the standby
-
-**WAL delivery:** Call `advance(flush_lsn)` from any thread to notify the sender that WAL is available up to `flush_lsn`. The call is posted onto the sender's strand, which then reads from `wal_dir` using `pread` and enqueues `XLogData` messages. WAL segment filenames are derived from the LSN: `%08X%08X%08X` (timeline, segment-high-word, segment-low-word).
-
-An optional `StatusCb` is called each time a `StandbyStatusUpdate` arrives from the standby, delivering `StandbyStatus { written_lsn, flushed_lsn, applied_lsn }`.
-
-All I/O runs on an `asio::io_context::strand` — no dedicated thread per connection.
+An Asio server that speaks PostgreSQL's physical streaming replication protocol. A standby connects
+to `WalSenderServer` exactly as it would connect to a primary's built-in walsender. The stream
+never goes past the LSN that pg-raft allows; the raft node advances it to the committed
+`flushed_lsn`.
 
 ## WalSenderServer
 
-TCP accept loop. On each accepted connection, creates a `WalSender` and calls the user-supplied `SenderCb` with it.
+A **Unix-domain-socket** accept loop:
 
 ```cpp
 auto server = WalSenderServer::create(
-    port, wal_dir, system_id, timeline, initial_flush_lsn,
-    [](shared_ptr<WalSender> s) { /* store s, call s->advance() later */ });
-server->start();
-// ...
-server->shutdown();  // cancels acceptor; existing senders keep running
+    socket_dir, port, wal_dir, system_id, timeline, initial_flush_lsn,
+    [](shared_ptr<WalSender> s) { /* keep s, call s->advance() later */ });
+if (!server->start()) { ... }
+// standby: primary_conninfo = 'host=<socket_dir> port=<server->bound_port()>'
+server->shutdown();
 ```
 
-Pass `port = 0` to let the OS pick an ephemeral port; read it back with `bound_port()`.
+- `start()` binds `socket_dir/.s.PGSQL.<port>`. If that file exists it tries the next port, and so
+  on. It returns `false` on error. `bound_port()` and `socket_path()` report what was bound.
+- Each accepted connection gets a `WalSender`, which is started and passed to the callback.
+- `shutdown()` closes the acceptor and removes the socket file. Running senders are not affected.
 
-## Typical usage pattern
+## WalSender
 
-```
-WalSenderServer (accepts connection)
-       │
-       └─▶ WalSender (one per standby)
-                 │
-       caller calls advance(lsn) ──▶ WalSender reads wal_dir, sends XLogData
-                 │
-       standby sends StandbyStatusUpdate ──▶ StatusCb fires
-```
+Handles one replication connection. Everything runs on a strand; `start()`, `advance()` and
+`shutdown()` can be called from any thread.
 
-The caller is responsible for polling or being notified of new WAL (e.g. via a FUSE `fsync` hook or a `pg_current_wal_flush_lsn()` query) and calling `advance()` accordingly.
+**Protocol phases:**
+1. **Startup** — declines `SSLRequest` (`'N'`), closes on `CancelRequest`, and answers the startup
+   message with AuthenticationOk (no authentication: the socket is local),
+   `server_version = 17.0`, `integer_datetimes`, `server_encoding`, BackendKeyData and
+   ReadyForQuery.
+2. **Command** (simple query) — `IDENTIFY_SYSTEM`, `TIMELINE_HISTORY` (empty), `SHOW` (only
+   `wal_segment_size` has a value), `SET`, `SELECT` (one empty column), and
+   `START_REPLICATION … X/Y`, which starts streaming from `X/Y`.
+3. **Streaming** (CopyBoth) — `XLogData` messages up to the flush LSN, a keepalive every 5 s, and
+   `StandbyStatusUpdate` handling (a keepalive in reply when one is requested).
+
+**WAL delivery.** `advance(flush_lsn)` raises the flush LSN, then reads the segments from
+`wal_dir` with `open`/`pread` and sends them up to it. Segment file names are
+`%08X%08X%08X` (timeline, segment high word, segment low word). A missing segment stops the
+reading until the next `advance()`.
+
+`StatusCb` receives `StandbyStatus { written_lsn, flushed_lsn, applied_lsn }`. Note that
+`WalSenderServer` currently creates its senders without one.
+
+## Tests
+
+All three need PostgreSQL and skip if it is absent:
+- `wal_sender_test` — a primary and a standby through `WalSenderServer`, with pgbench.
+- `pg_wal_switch_test` — concurrent `pg_switch_wal()` calls during pgbench.
+- `standby_wal_reset_test` — the standby's WAL is wiped while it is down, and is streamed again.

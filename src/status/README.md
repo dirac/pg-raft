@@ -1,29 +1,28 @@
 # status
 
-PostgreSQL client for querying a running instance using the extended query protocol over a raw TCP socket — no libpq dependency.
+A PostgreSQL client for querying a running instance. It speaks the extended query protocol over a
+raw TCP socket, without libpq.
 
 ## PgClient
 
-`PgClient` speaks just enough of the PostgreSQL frontend/backend wire protocol to prepare and execute queries asynchronously.
-
-**Connecting and preparing:**
 ```cpp
-auto client = PgClient::connect(port).value();   // synchronous TCP connect + auth
-auto stmt   = client->prepare("SELECT ...").value();  // Parse/Describe/Sync round-trip
+auto client = PgClient::connect(port).value();        // sync: TCP + startup + ReadyForQuery
+auto stmt   = client->prepare("SELECT ...").value();  // sync: Parse/Describe/Sync
+client->async_exec(stmt, [](Result<Rows> rows) { ... });
+client->close();
 ```
 
-`prepare` is synchronous and returns a `PgStmt` handle (just a named statement string). Reuse the handle for repeated executions — no re-parsing overhead.
+- `connect(port)` connects to `127.0.0.1:port` as `$USER` (or `postgres`) to the `postgres`
+  database. Only `trust` authentication works, which matches the loopback rule that
+  `PgInstance::write_hba` adds.
+- `prepare(sql)` returns a `PgStmt` (the name of a server-side prepared statement), so later
+  executions skip the parsing.
+- `async_exec(stmt, cb)` runs Bind/Execute/Sync and delivers `Result<Rows>`, with every column as
+  text. Calls queue up and run one at a time in submission order. An error response fails the
+  call, but the client still reads up to ReadyForQuery, so the connection stays usable.
+- `close()` sends Terminate and closes the socket.
 
-**Executing:**
-```cpp
-client->async_exec(stmt, [](Result<Rows> rows) {
-    // rows is vector<vector<optional<string>>>
-});
-```
-
-Multiple `async_exec` calls queue up and execute one at a time in submission order. The callback fires on the Asio io_context thread. `close()` tears down the socket.
-
-**Result types** (defined in this header, used across modules):
+**Result types** (also used elsewhere):
 ```cpp
 using Row  = vector<std::optional<string>>;  // nulls are std::nullopt
 using Rows = vector<Row>;
@@ -32,4 +31,15 @@ struct PgStmt { string name; };
 
 ## Design notes
 
-The connection uses a single `asio::io_context::strand` for all async I/O, with a `std::mutex`-protected queue for incoming `async_exec` requests posted from other threads. The send path (startup, prepare) is synchronous to simplify setup; only `async_exec` is fully async. This client is used in tests to query LSNs and row counts without needing an external `psql` binary.
+The async exec chain runs on a strand. The queue of requests is protected by a mutex, so
+`async_exec` can be called from any thread, and the callbacks run on the strand. `connect`,
+`prepare` and `close` are synchronous and share the socket and read buffers with the exec chain,
+so don't call `prepare()` while an `async_exec` is in flight. Prepare the statements first.
+
+Uses: the tests query LSNs and row counts with it. The raft node is meant to poll
+`pg_is_in_recovery()`, `pg_current_wal_flush_lsn()` and `pg_last_wal_replay_lsn()` with it, for
+`RaftServer::set_pg_status()`.
+
+## Tests
+
+`pg_client_test` (needs PostgreSQL; skips if it is absent).
