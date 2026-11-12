@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **WAL interception** (`wal_fuse`) — a FUSE filesystem that mounts over `pg_wal` so that all WAL writes are transparently redirected to a separate `raft_dir/pg_wal` directory under pg-raft's control.
 2. **WAL streaming** (`wal_sender`) — a C++ server that speaks the PostgreSQL physical streaming replication protocol, streaming WAL from disk to a real PostgreSQL standby.
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
-4. **Raft** (`raft`) — partially implemented and **not built** (see below). `src/proxy/` is empty.
+4. **Raft** (`raft`) — consensus over the WAL stream (ported from sparrowdb's zqlite raft). `src/proxy/` is empty.
 
 Per-component design documents are in `docs/design/` (one per module, plus `README.md`).
 
@@ -32,6 +32,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/wal_fuse
 /opt/sparrow/bin/b2 src/net
 /opt/sparrow/bin/b2 src/status
+/opt/sparrow/bin/b2 src/raft
 
 # Build + run a specific unit-test target (auto-runs after build)
 /opt/sparrow/bin/b2 src/base//semaphore_lock_test
@@ -49,6 +50,8 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/sparrow/bin/b2 src/net//data_test
 /opt/sparrow/bin/b2 src/net//connection_test
 /opt/sparrow/bin/b2 src/status//pg_client_test
+/opt/sparrow/bin/b2 src/raft//raft_log_test
+/opt/sparrow/bin/b2 src/raft//raft_ensemble_sanity_test   # also _leader_stopped_, _stepdown_, _snapshot_
 
 # Run a single Boost.Test case within a unit-test binary (pass args after --):
 /opt/sparrow/bin/b2 src/process//process_test -- --run_test=TestCaseName
@@ -151,7 +154,15 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/sparrow/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
-**`src/raft/`** — Raft over the WAL stream. **Not built**: `raft` is missing from `src/Jamfile`, and `raft_server.{h,cc}` is a partial port from an older ZooKeeper-style Raft that still references types and headers that do not exist here (`ZkRequest`, `ZkState`, `snapshot.h`, `zk_state.h`, `net/ssl_context.h`, `banyandb::`, `LOG_*`). Written for pg-raft: `raft_types.h` (`RaftRequest`/`RaftResponse` envelopes, `AppendEntries`, `RequestVote`, `InstallSnapshot`, `RequestElection`, `MemBlock`, `Status`), `wal_types.h` (`Entry` payload `WalCommand`: open/write/flush/close/timeline ops on a segment plus the leader's `flushed_lsn`), `client_types.h`, `options.h`, `RaftLog` (LMDB `term.lmdb` + `logs.lmdb`, keys `(idx, term)` big-endian), `RaftPeerConnection` / `RaftFollowerConnection` / `PeerConnectionMgr` (WAL bytes are sent as attached buffers straight from the leader's `WalSegment` mmap and written + msync'd by the follower before it handles the request), `RaftClientConnection` / `RaftServerConnection` (leadership via the heartbeat status byte), `MatchIndexes`, `VoteTally`. `raft_log_test` exists but is not wired into the build. See `docs/design/raft.md`.
+**`src/raft/`** — Raft over the WAL stream, **ported from sparrowdb `lib/servers/zqlite`, which is the reference implementation**; follow it when changing this module. Built and tested. See `docs/design/raft.md`.
+
+- **Entries** (`raft_types.h`, `wal_types.h`): `Entry{time, term, WalCommand}`. The primary generates the `WalCommand`s itself (`WriteOp`/`FlushOp`/... on a segment, plus its `flushed_lsn`); a tick entry has a `monostate` command. A `RaftRequest` carries up to two `MemBlock`s, whose WAL bytes follow the request as an attached buffer. `send_request` copies them out of the mmap, because PostgreSQL keeps writing to the segment and the frame checksum must match.
+- **`RaftState`** (`raft_state.h`, replaces `ZqState`): `log_idx`, `timestamp`, committed `flushed_lsn`, `needs_backup`. `RaftApplier::applied()` / `installed()` notify the node (for example to advance the WalSender).
+- **`RaftLog`**: sparrowdb's LMDB log (xxhash32 page checksums, 16 KiB pages, background sync unless `sync_commits`, `no_sync` for tests) with a `meta_` table holding `RaftState`. Provides `save_snapshot(state, keep)` and `install_snapshot(log_idx, entries, state)`.
+- **`RaftServer`**: elections, two-phase leadership, step-down and compaction, as in sparrowdb, except that the leader also compacts. `exec(WalCommand, handler)` is leader-only; the handler gets the index on commit or `ErrorCode::kNotLeader`, and runs with the server lock held. `segment(lsn)` returns `wal_dir` segments through one `WalSegmentCache`. A follower writes WAL blocks only after it has accepted the request. `raft_log()` is the log accessor (not `log()`, which would hide the global logger). The node sets `set_serving()`, `set_pg_status()` and `set_backup_provider()`.
+- **InstallSnapshot**: the latest `snapshot_entries` entries plus the full contents of their at most 2 segments. The follower then has `needs_backup` set and must fetch a PostgreSQL backup (phase 2, not yet wired).
+- **Connections**: `RaftPeerConnection` (outbound, identity `Raft:<id>`), `RaftFollowerConnection` (inbound), `PeerConnectionMgr`, and `RaftClientConnection` / `RaftServerConnection` for the client channel (`client_types.h`: `StatusRequest`; `SnapshotRequest` → `SnapshotResponse` followed by the backup files; used by the proxy and by nodes that need a backup).
+- **Tests**: `raft_log_test`; `raft_ensemble_{sanity,leader_stopped,stepdown,snapshot}_test` run in-process ensembles (`RaftTestService`) with a `Writer` that plays the primary, checked by `check_consistency` (log matching, states, WAL bytes of every acknowledged write).
 
 **`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/design/proxy.md`.
 
