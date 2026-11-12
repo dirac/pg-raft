@@ -1,0 +1,67 @@
+
+alias deps
+  : ../base//libs
+    ../net//libs
+  ;
+
+lib raft_server
+  : raft_log.cc
+    match_indexes.cc
+    vote_tally.cc
+    raft_peer_connection.cc
+    raft_follower_connection.cc
+    raft_client_connection.cc
+    peer_connection_mgr.cc
+    raft_server.cc
+    deps
+  ;
+
+lib raft_client
+  : raft_server_connection.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    raft_server
+    raft_client
+  ;
+
+lib raft_test
+  : raft_test_service.cc
+    libs
+  ;
+
+unit-test raft_log_test
+  : raft_log_test.cc
+    libs
+    ../base//testing
+  ;
+
+unit-test raft_ensemble_sanity_test
+  : raft_ensemble_sanity_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;
+
+unit-test raft_ensemble_leader_stopped_test
+  : raft_ensemble_leader_stopped_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;
+
+unit-test raft_ensemble_stepdown_test
+  : raft_ensemble_stepdown_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;
+
+unit-test raft_ensemble_snapshot_test
+  : raft_ensemble_snapshot_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;

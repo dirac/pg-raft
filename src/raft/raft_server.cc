@@ -1,70 +1,63 @@
 #include "src/raft/raft_server.h"
 
+#include "src/base/error_code.h"
+#include "src/base/logger.h"
 #include "src/net/async_connect.h"
 
-namespace {
-
-std::optional<string> service(RaftNodeId id, Config const& cfg) {
-  auto n = INT(id);
-
-  for (auto const& zk : cfg.zk_servers) {
-    if (n == 0)
-      return zk.hostname;
-    --n;
-  }
-  ABORT(fn::format(
-      "Invalid node id {0}, only {1} servers are configured", INT(id), cfg.zk_servers.size()));
-  return std::nullopt;
-}
-}  // namespace
+// Ported from sparrowdb lib/servers/zqlite/raft_server.cpp (see raft_server.h for the
+// differences).
 
 RaftServer::RaftServer(RaftNodeId                     id,
                        boost::asio::ip::tcp::acceptor acceptor,
-                       Certificates const&            certs,
                        Config const&                  config,
-                       bool                           enable_ssl,
-                       Options                        options)
-    : banyandb::net::Server(std::move(acceptor),
-                            certs,
-                            wdir(config, Role::kZookeeper, id) / "tmp",
-                            enable_ssl,
-                            service(id, config)),
+                       std::filesystem::path          dir,
+                       std::filesystem::path          wal_dir,
+                       Options                        options,
+                       shared_ptr<RaftApplier>        applier)
+    : Server(std::move(acceptor)),
       config_(config),
       self_id_(id),
-      log_prefix_(fn::format("({0}) ", INT(self_id_))),
-      dir_(wdir(config, Role::kZookeeper, self_id_)),
-      log_(dir_ / "log"),
+      log_prefix_(std::format("({0}) ", INT(self_id_))),
+      dir_(std::move(dir)),
+      wal_dir_(std::move(wal_dir)),
+      cache_(make_shared<WalSegmentCache>()),
+      log_(dir_ / "log", options.sync_commits, options.no_sync),
+      applier_(applier ? std::move(applier) : make_shared<RaftApplier>()),
       timer_(io_context()),
-      match_indexes_(self_id_, config.zk_servers.size()),
-      votes_(config.zk_servers.size()),
+      match_indexes_(self_id_, config.servers.size()),
+      votes_(config.servers.size()),
       random_election_timeout_(
-          static_cast<int>(options.election_timeout + 20U * INT(self_id_)),
-          static_cast<int>(2U * (options.election_timeout + 20U * INT(self_id_)))),
+          static_cast<int>(options.election_timeout_msecs + (20U * INT(self_id_))),
+          static_cast<int>(2U * (options.election_timeout_msecs + (20U * INT(self_id_))))),
       options_(options) {
+  assert(INT(self_id_) < config.servers.size());
+
+  std::filesystem::create_directories(wal_dir_);
+
   /// Can only vote after getting the term numbers from majority
   can_vote_.clear();
   stepdown_.clear();
 
-  connections_ = fn::make_shared<PeerConnectionMgr>(
-      io_context(), self_id_, config, Certificates{config}, dir_, options_);
+  connections_ = make_shared<PeerConnectionMgr>(io_context(), self_id_, config, options_);
 }
 
 RaftServer::~RaftServer() {
-  LOG_INFO << log_prefix_ << "destroyed";
+  log(INFO, "{}destroyed", log_prefix_);
 }
 
 void RaftServer::start() {
-  if (auto r = log_.open_term_db(); !r)
-    system_error(r.error());
-  else
-    current_term_ = r.value();
+  auto term = log_.open_term_db();
+  if (!term)
+    system_error(term.error());
+  current_term_ = term.value();
 
-  if (auto r = log_.open_logs_db(); !r)
+  if (auto r = log_.open_logs_db(1U); !r)
     system_error(r.error());
 
   state_          = load_snapshot();
-  commit_idx_     = state_.log_idx();
-  compaction_idx_ = commit_idx_;
+  applied_idx_    = state_.log_idx;
+  commit_idx_     = state_.log_idx;
+  compaction_idx_ = commit_idx_.load();
 
   if (current_term_.load() > RaftTerm{0})
     can_vote_.test_and_set();
@@ -83,7 +76,7 @@ void RaftServer::gather_terms() {
 
     connections_->reconnect(
         self<RaftServer>(), config(), [this, s = self()](shared_ptr<RaftPeerConnection> conn) {
-          on_connect(std::move(conn));
+          on_connect(conn);
         });
 
     if (auto lk = timer_lock(); lk) {
@@ -95,50 +88,61 @@ void RaftServer::gather_terms() {
 
 void RaftServer::periodic() {
   if (auto lk = usage_lock(); lk) {
-    auto t = std::chrono::milliseconds(options_.election_timeout >> 4);
+    auto t = std::chrono::milliseconds(options_.election_timeout_msecs >> 4U);
+
+    check_stepdown_timeout();
 
     if ((is_leader() && !resigning()) || (is_candidate() && has_votes())) {
-      if (!tick())
-        send_append_entries(/*check_sync_flag*/ false);
-    } else if (is_follower()) {
-      apply_entries();
-      if (compaction_idx() + options_.compaction_lag < idx) {
-        auto lk = try_unique_lock();
-        if (lk && (compaction_idx() + options_.compaction_lag < idx) && is_follower()) {
-          auto last_entry = value(log().last_entry());
-          LOG_INFO << log_prefix_ << "Compacting ... commit_idx = " << idx
-                   << " last_entry = " << std::get<RaftIndex>(last_entry);
-
-          if (auto r = log_.save_snapshot(state_.copy(), options_.keep_old_logs); !r)
-            system_error(r.error());
-
-          assert(last_entry <= value(log().last_entry()));
-        }
-        compaction_idx_.store(idx);
+      bool ticked;
+      {
+        // tick() mutates the raft log; every other mutating path (stepdown(), exec()) holds
+        // mtx_ while doing so.
+        auto lk = unique_lock();
+        ticked  = tick();
       }
+      if (!ticked)
+        send_append_entries(/*check_sync_flag*/ false);
+
+      // A leader compacts its own log too: entries are small (the WAL is in the segments), and
+      // stepping down to compact would be a PostgreSQL failover.
+      if (is_leader() && compaction_idx() + options_.compaction_lag < applied_idx())
+        compact(applied_idx(), try_unique_lock());
+
+    } else if (is_follower()) {
+      auto idx = apply_entries(false);
+      if (compaction_idx() + options_.compaction_lag < idx)
+        compact(idx, try_unique_lock());
 
       auto c = epoch_msec();
       auto p = last_ping_epoch();
-      auto r = options_.election_timeout - 10U;
+
+      // Draw the timeout once per ping; drawing on every check would make every node time out
+      // shortly after the minimum, causing split votes.
+      if (p != election_timeout_epoch_) {
+        election_timeout_epoch_ = p;
+        election_timeout_       = random_election_timeout();
+      }
+      auto r = election_timeout_;
 
       if (c > p + r) {
-        r = random_election_timeout();
-        if (c > p + r) {
-          t = std::chrono::milliseconds(options_.election_timeout >> 4);
+        log(INFO,
+            "{}@ {} ms the last ping was @ {} ms election timeout = {} ms",
+            log_prefix_,
+            c,
+            p,
+            r);
+        log_untriggered_election(c);
 
-          LOG_INFO << log_prefix_ << "@ " << c << " the last ping was @ " << p
-                   << " election timeout = " << r;
-
-          make_candidate();
-        }
+        make_candidate();
+      } else {
+        // Wake up at the election deadline.
+        t = std::min(t, std::chrono::milliseconds(std::max(p + r - c, 1U)));
       }
-      t = std::min(t,
-                   std::chrono::milliseconds(std::max(c - (p + options_.election_timeout), 10U)));
     }
 
     connections_->reconnect(
         self<RaftServer>(), config(), [this, s = self()](shared_ptr<RaftPeerConnection> conn) {
-          on_connect(std::move(conn));
+          on_connect(conn);
         });
 
     if (auto lk = timer_lock(); lk) {
@@ -151,78 +155,131 @@ void RaftServer::periodic() {
   }
 }
 
-void RaftServer::new_connection(char const*           role,
-                                string                peer,
-                                std::filesystem::path tmpdir,
-                                socket_type           socket) {
-  if (strcmp(role, to_string(Role::kZookeeper)) == 0) {
-    connections_->reset_last_connect_attempts();
-    Connection<>::create<RaftFollowerConnection>(
-        self_id_, std::move(peer), std::move(socket), self<RaftServer>(), tmpdir);
-  } else
-    Connection<>::create<RaftClientConnection>(
-        self<RaftServer>(), role, std::move(peer), std::move(socket));
+void RaftServer::new_connection(string peer, socket_type socket) {
+  create_connection(std::move(peer), std::move(socket));
 }
 
-void RaftServer::on_connect(shared_ptr<RaftPeerConnection> conn) {
+shared_ptr<Connection> RaftServer::create_connection(string peer, socket_type socket) {
+  if (peer.starts_with("Raft:")) {
+    connections_->reset_last_connect_attempts();
+    return Connection::create<RaftFollowerConnection>(
+        self_id_, std::move(peer), std::move(socket), self<RaftServer>());
+  }
+  return Connection::create<RaftClientConnection>(
+      self<RaftServer>(), std::move(peer), std::move(socket));
+}
+
+void RaftServer::on_connect(shared_ptr<RaftPeerConnection> const& conn) {
   if (is_leader()) {
-    LOG_INFO << log_prefix_ << "Connected to node=" << conn->peer_id() << ", send_append_entries";
-    conn->send_append_entries(log(), leadership_term(), commit_idx(), snapshot());
+    log(INFO, "{}Connected to node={}, send_append_entries", log_prefix_, conn->peer_id());
+    conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
   } else if (is_candidate()) {
     if (has_votes()) {
-      LOG_INFO << log_prefix_ << "Connected to node=" << conn->peer_id()
-               << ", send_append_entries (have enough votes as a candidate)";
-      conn->send_append_entries(log(), leadership_term(), commit_idx(), snapshot());
+      log(INFO,
+          "{}Connected to node={}, send_append_entries (have enough votes as a candidate)",
+          log_prefix_,
+          conn->peer_id());
+      conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
     } else {
       auto term = votes_.term();
-      LOG_INFO << log_prefix_ << "Connected to node=" << conn->peer_id()
-               << ", send_request_vote for term=" << term;
-      conn->send_request_vote(log(), term);
+      log(INFO,
+          "{}Connected to node={}, send_request_vote for term={}",
+          log_prefix_,
+          conn->peer_id(),
+          term);
+      conn->send_request_vote(raft_log(), term);
     }
   } else if (!can_vote()) {
-    LOG_INFO << log_prefix_ << "Connected to node=" << conn->peer_id() << ", send_ping";
-    conn->send_ping(log());
+    log(INFO, "{}Connected to node={}, send_ping", log_prefix_, conn->peer_id());
+    conn->send_ping(raft_log());
   }
 }
 
-void RaftServer::exec(ZkRequest request, std::function<void(ZkResponse)> handler) {
+void RaftServer::backup(SnapshotRequest request, BackupHandler handler) {
+  std::function<void(SnapshotRequest, BackupHandler)> provider;
+  {
+    auto lk  = std::unique_lock{backup_mtx_};
+    provider = backup_provider_;
+  }
+  if (!provider)
+    return handler(SnapshotResponse{.success = false, .files = {}, .links = {}}, {});
+  provider(std::move(request), std::move(handler));
+}
+
+void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
+  assert(handler);
+
+  auto not_leader = [&handler] { handler(make_error_code(ErrorCode::kNotLeader)); };
+
   auto usage_lk = usage_lock();
+  if (!usage_lk)
+    return not_leader();
 
-  if (!is_leader() || !usage_lk || shutdown_signal() || resigning())
-    return handler(ZkResponse{
-        .status = ResultStatus::kInvalidLeader,
-    });
-
-  if (!ZkState::needs_quorum(request)) {
-    return handler(state_.exec(std::move(request)));
+  if (!is_leader() || shutdown_signal() || resigning()) {
+    usage_lk.unlock();
+    return not_leader();
   }
 
   if (auto lk = unique_lock(); lk) {
     if (!is_leader() || shutdown_signal() || resigning()) [[unlikely]] {
-      return handler(ZkResponse{
-          .status = ResultStatus::kInvalidLeader,
-      });
+      lk.unlock();
+      return not_leader();
     }
 
     last_entry_time_ = std::time(nullptr);
 
+    auto entries = vector{
+        Entry{
+            .time = last_entry_time_,
+            .term = current_term(),
+            .cmd  = std::move(cmd),
+        },
+    };
+
     // Get the last entry.
-    auto [prev_log_term, prev_log_idx] = value(log().last_entry());
+    auto [prev_log_term, prev_log_idx] = value(raft_log().last_entry());
 
-    auto entries = vector{Entry{
-        .time = last_entry_time_,
-        .term = current_term(),
-        .cmd  = std::move(request),
-    }};
+    while (!append_entries(prev_log_idx, prev_log_term, entries, false))
+      std::tie(prev_log_term, prev_log_idx) = value(raft_log().last_entry());
 
-    if (append_entries(prev_log_idx, prev_log_term, entries, false) == false)
-      system_error(system_error_code(EINVAL));
-
-    handlers_.emplace_back(prev_log_idx + 1, std::move(handler), epoch_msec());
-    queue_size_.store(i8(handlers_.size()), std::memory_order_relaxed);
+    handlers_.emplace_back(prev_log_idx + 1U, std::move(handler), epoch_msec());
   }
 
   send_append_entries(/*check_sync_flag=*/true);
+}
+
+Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) const {
+  auto name = filename(lsn);
+  auto file = wal_dir_ / name;
+
+  if (!std::filesystem::exists(file) && !std::filesystem::exists(wal_dir_ / ("." + name))) {
+    // A segment that the leader has started: create it zero filled.
+    int fd = ::open(file.c_str(), O_RDWR | O_CREAT | O_EXCL, file_mode());
+    if (fd == -1 && errno != EEXIST)
+      return elog(system_error_code(errno), "{}Unable to create {}", log_prefix_, file);
+    if (fd != -1) {
+      int rc = ::ftruncate(fd, kWalSegmentSize);
+      auto e = errno;
+      ::close(fd);
+      if (rc != 0)
+        return elog(system_error_code(e), "{}Unable to size {}", log_prefix_, file);
+    }
+  }
+
+  auto seg = make_shared<WalSegment>(cache_, wal_dir_, lsn);
+  if (auto r = seg->open(); !r)
+    return r.error();
+  return seg;
+}
+
+void RaftServer::write_blocks(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes) {
+  uint8_t const* data = bytes.data();
+  for (auto const& b : blocks) {
+    auto seg = value(segment(b.lsn));
+    seg->write(data, b.offset, b.size);
+    value(seg->fsync(b.offset, b.size));
+    data += b.size;
+  }
 }
 
 bool RaftServer::tick(bool force) {
@@ -230,29 +287,30 @@ bool RaftServer::tick(bool force) {
     return false;
 
   if (!force && std::time(nullptr) <
-                    (last_entry_time_.load(std::memory_order_relaxed) + options_.tick_seconds))
+                    (last_entry_time_.load(std::memory_order_relaxed) +
+                     static_cast<std::time_t>(options_.tick_seconds)))
     return false;
-
-  LOG_INFO << "Counter " << RaftClientConnection::counter.load();
 
   last_entry_time_.store(std::time(nullptr), std::memory_order_relaxed);
 
   // Get the last entry.
-  auto [prev_log_term, prev_log_idx] = value(log().last_entry());
+  auto [prev_log_term, prev_log_idx] = value(raft_log().last_entry());
 
   // Create a tick entry.
-  auto entries = vector{Entry{
-      .time = last_entry_time_,
-      .term = current_term(),
-  }};
+  auto entries = vector{
+      Entry{
+          .time = last_entry_time_,
+          .term = current_term(),
+          .cmd  = {},
+      },
+  };
 
-  if (force) {
-    LOG_INFO << log_prefix_ << "Adding an entry after " << prev_log_idx;
-  }
+  if (force)
+    log(INFO, "{}Adding an entry after {}", log_prefix_, prev_log_idx);
 
   // Add to the local log. If it fails, the reason being another entry got added.
   if (append_entries(prev_log_idx, prev_log_term, entries, false)) {
-    LOG_INFO << log_prefix_ << "Added a tick entry idx= " << (prev_log_idx + 1U);
+    log(DEBUG, "{}Added a tick entry idx= {}", log_prefix_, (prev_log_idx + 1U));
     send_append_entries(/*check_sync_flag=*/false);
     return true;
   }
@@ -260,17 +318,17 @@ bool RaftServer::tick(bool force) {
 }
 
 unsigned RaftServer::send_append_entries(bool check_sync_flag) {
-  auto s = snapshot();
-  return connections_->post([this, s, check_sync_flag](shared_ptr<RaftPeerConnection> conn) {
-    if (check_sync_flag && !conn->in_sync())
-      return;
-    conn->send_append_entries(log(), leadership_term(), commit_idx(), s);
-  });
+  return connections_->post(
+      [this, self = self(), check_sync_flag](shared_ptr<RaftPeerConnection> conn) {
+        if (check_sync_flag && !conn->in_sync())
+          return;
+        conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
+      });
 }
 
 unsigned RaftServer::send_request_votes(RaftTerm term) {
   return connections_->post([this, s = self(), term](shared_ptr<RaftPeerConnection> conn) {
-    conn->send_request_vote(log(), term);
+    conn->send_request_vote(raft_log(), term);
   });
 }
 
@@ -278,7 +336,7 @@ void RaftServer::make_follower(std::source_location loc) {
   if (is_follower())
     return;
 
-  make_follower(unique_lock(), std::move(loc));
+  make_follower(unique_lock(), loc);
 }
 
 void RaftServer::make_follower(RaftServer::UniqueLock lk, std::source_location loc) {
@@ -287,26 +345,38 @@ void RaftServer::make_follower(RaftServer::UniqueLock lk, std::source_location l
   if (is_follower())
     return;
 
-  LOG_INFO << log_prefix_ << "Becoming a follower @ " << loc.function_name() << "("
-           << loc.file_name() << ':' << loc.line() << ")";
+  log(INFO,
+      "{}Becoming a follower @ {}({}:{})",
+      log_prefix_,
+      loc.function_name(),
+      loc.file_name(),
+      loc.line());
   update_last_ping(false);
 
   if (is_leader()) {
     leadership_term_.store(RaftTerm{0}, std::memory_order_relaxed);
-    LOG_INFO << log_prefix_ << "Sending invalid leader to " << handlers_.size() << " requests";
+    log(INFO, "{}Sending invalid leader to {} requests", log_prefix_, handlers_.size());
     for (auto& [_, handler, time] : handlers_) {
-      handler(ZkResponse{
-          .status = ResultStatus::kInvalidLeader,
-      });
-      LOG_INFO << log_prefix_ << "Waiting in the queue for " << (epoch_msec() - time)
-               << " milliseconds";
+      handler(make_error_code(ErrorCode::kNotLeader));
+      log(INFO, "{}Waiting in the queue for {} milliseconds", log_prefix_, epoch_msec() - time);
     }
     handlers_.clear();
-    queue_size_.store(i8(handlers_.size()), std::memory_order_relaxed);
   }
   type_.store(NodeType::kFollower);
 
   stepdown_.clear();
+}
+
+void RaftServer::log_untriggered_election(unsigned now) const {
+  // Having heard from the leader of the current term, this node decides on its own that the leader
+  // is gone (a stepdown starts an election through RequestElection instead).
+  if (auto term = leader_msg_term_.load(std::memory_order_relaxed);
+      term != RaftTerm{0} && term == current_term())
+    log(ERROR,
+        "{}Untriggered election: no message from the leader of term={} for {} ms",
+        log_prefix_,
+        current_term(),
+        now - leader_msg_epoch_.load(std::memory_order_relaxed));
 }
 
 void RaftServer::make_candidate(unsigned inc) {
@@ -322,7 +392,7 @@ void RaftServer::make_candidate(unsigned inc, RaftServer::UniqueLock lk) {
 
   RaftTerm new_term = current_term() + inc;
 
-  LOG_INFO << log_prefix_ << "New candidate with term=" << new_term;
+  log(INFO, "{}New candidate with term={}", log_prefix_, new_term);
 
   if (new_term == std::get<RaftTerm>(set_current_term(new_term)) && vote(new_term, self_id_)) {
     type_.store(NodeType::kCandidate);
@@ -332,18 +402,19 @@ void RaftServer::make_candidate(unsigned inc, RaftServer::UniqueLock lk) {
     if (send_request_votes(new_term) != (nodes() - 1U)) {
       connections_->reconnect(
           self<RaftServer>(), config(), [this, s = self()](shared_ptr<RaftPeerConnection> conn) {
-            on_connect(std::move(conn));
+            on_connect(conn);
           });
     }
-  } else
+  } else {
     make_follower(std::move(lk));
+  }
 }
 
 void RaftServer::make_leader(RaftServer::UniqueLock lk) {
   (void)lk;
 
-  if (!is_candidate())
-    return;
+  // The caller has found that it is a candidate, with the lock that it holds.
+  assert(is_candidate());
 
   if (leadership_term() != RaftTerm{0})
     return;
@@ -351,9 +422,13 @@ void RaftServer::make_leader(RaftServer::UniqueLock lk) {
   stepdown_.clear();
   election_request_.clear();
 
-  auto last_entry = value(log().last_entry());
-  LOG_INFO << log_prefix_ << "Becoming a leader term=" << current_term() << " with last_entry = ("
-           << std::get<RaftTerm>(last_entry) << ", " << std::get<RaftIndex>(last_entry) << ")";
+  auto last_entry = value(raft_log().last_entry());
+  log(INFO,
+      "{}Becoming a leader term={} with last_entry = ({}, {})",
+      log_prefix_,
+      current_term(),
+      std::get<RaftTerm>(last_entry),
+      std::get<RaftIndex>(last_entry));
 
   match_indexes_.reset();
   leadership_term_.store(votes_.term());
@@ -375,7 +450,7 @@ std::tuple<RaftTerm, bool> RaftServer::set_current_term(RaftTerm term) {
 
   // Update the stable state.
   RaftTerm new_term = value(log_.set_current_term(term));
-  ASSERT(new_term >= curr_term);
+  assert(new_term >= curr_term);
 
   while (new_term > curr_term && !current_term_.compare_exchange_strong(/* &expected = */ curr_term,
                                                                         /*desired=*/new_term))
@@ -390,7 +465,16 @@ RaftTerm RaftServer::update_current_term(RaftTerm term) {
   if (unchanged) [[likely]]
     return curr_term;
 
-  LOG_INFO << log_prefix_ << "Term = " << curr_term;
+  log(INFO, "{}Term = {}", log_prefix_, curr_term);
+
+  // A leader that has not been asked to step down learns of a higher term only when another node
+  // started an election on its own (it missed our pings).
+  if (is_leader() && !stepdown_.test())
+    log(ERROR,
+        "{}Untriggered election: leader of term={} got a message with term={}",
+        log_prefix_,
+        leadership_term(),
+        curr_term);
 
   if (is_leader() || is_candidate())
     make_follower();
@@ -419,11 +503,9 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
   auto lk = unique_lock();
 
   votes_.set_vote(conn->peer_id(), true);
-  if (has_votes()) {
-    if (!can_vote_.test_and_set()) {
-      LOG_INFO << log_prefix_ << "Now can vote for term greater than " << current_term;
-      vote(current_term, self_id_);
-    }
+  if (has_votes() && (!can_vote_.test_and_set())) {
+    log(INFO, "{}Now can vote for term greater than {}", log_prefix_, current_term);
+    vote(current_term, self_id_);
   }
 }
 
@@ -432,21 +514,28 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId  candidate,
                                              RequestVote request) {
   RaftTerm const current_term = update_current_term(term);
   if (term != current_term || !can_vote()) {
-    LOG_INFO << log_prefix_ << "Rejected terms: " << term << " vs " << current_term
-             << " from node=" << candidate;
+    log(INFO,
+        "{}Rejected terms: {} vs {} from node={}",
+        log_prefix_,
+        term,
+        current_term,
+        candidate);
     return RaftResponse{
         .term     = current_term,
         .response = RequestVoteResponse{.vote_granted = false},
     };
   }
 
-  auto last_entry = value(log().last_entry());
+  auto last_entry = value(raft_log().last_entry());
   if (last_entry > request.last_entry) {
-    LOG_INFO << log_prefix_ << "Rejected because log is not upto date ("
-             << std::get<RaftTerm>(last_entry) << "," << std::get<RaftIndex>(last_entry) << ") vs "
-             << "(" << std::get<RaftTerm>(request.last_entry) << ","
-             << std::get<RaftIndex>(request.last_entry) << ")"
-             << " from node=" << candidate;
+    log(INFO,
+        "{}Rejected because log is not upto date ({},{}) vs ({},{}) from node={}",
+        log_prefix_,
+        std::get<RaftTerm>(last_entry),
+        std::get<RaftIndex>(last_entry),
+        std::get<RaftTerm>(request.last_entry),
+        std::get<RaftIndex>(request.last_entry),
+        candidate);
 
     return RaftResponse{
         .term     = current_term,
@@ -457,10 +546,13 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId  candidate,
   bool v = vote(current_term, candidate);
   if (v) {
     update_last_ping(true);
-    LOG_INFO << log_prefix_ << "Voted for term=" << current_term << " from node=" << candidate;
+    log(INFO, "{}Voted for term={} from node={}", log_prefix_, current_term, candidate);
   } else {
-    LOG_INFO << log_prefix_ << "Rejected because already voted for term=" << current_term
-             << " from node=" << candidate;
+    log(INFO,
+        "{}Rejected because already voted for term={} from node={}",
+        log_prefix_,
+        current_term,
+        candidate);
   }
 
   return RaftResponse{.term = current_term, .response = RequestVoteResponse{.vote_granted = v}};
@@ -484,42 +576,59 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
   votes_.set_vote(conn->peer_id(), response.vote_granted);
   if (has_votes())
     return make_leader(std::move(lk));
-  else if (has_lost_election())
+  if (has_lost_election())
     return make_follower(std::move(lk));
 }
 
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
-                                             RaftTerm term,
-                                             InstallSnapshot /*request*/,
-                                             std::filesystem::path snapshot_file) {
+                                             RaftTerm                           term,
+                                             InstallSnapshot                    request,
+                                             inplace_vector<MemBlock, 2> const& blocks,
+                                             Bytes const&                       bytes) {
   auto current_term = update_current_term(term);
 
   auto lk = unique_lock();
 
-  if (is_candidate() || is_leader())
+  if (current_term > term || is_candidate() || is_leader() || request.entries.empty())
     return RaftResponse{
         .term = current_term,
         .response =
             InstallSnapshotResponse{
+                .idx     = RaftIndex{0},
                 .success = false,
             },
     };
 
   update_last_ping(true);
 
-  apply_db_snapshot(std::move(snapshot_file));
-  state_          = load_snapshot();
-  commit_idx_     = state_.log_idx();
-  compaction_idx_ = commit_idx_;
+  // The segments of the latest entries, then the entries: the log starts after request.log_idx
+  // and the WAL before the segments is missing until a PostgreSQL backup restores it.
+  write_blocks(blocks, bytes);
+
+  auto state = RaftState{
+      .log_idx      = request.log_idx,
+      .timestamp    = state_.timestamp,
+      .flushed_lsn  = state_.flushed_lsn,
+      .needs_backup = true,
+  };
+  value(log_.install_snapshot(request.log_idx, request.entries, state));
+
+  state_ = state;
+  applied_idx_.store(state_.log_idx);
+  commit_idx_.store(state_.log_idx);
+  compaction_idx_.store(state_.log_idx);
+  applier_->installed(state_);
 
   update_last_ping(true);
+
+  log(INFO, "{}Installed snapshot {}", log_prefix_, state_);
 
   return RaftResponse{
       .term = current_term,
       .response =
           InstallSnapshotResponse{
+              .idx     = std::get<RaftIndex>(value(raft_log().last_entry())),
               .success = true,
-              .idx     = std::get<RaftIndex>(value(log().last_entry())),
           },
   };
 }
@@ -536,14 +645,16 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
     update_match_index(conn->peer_id(), response.idx);
     if (auto lk = conn->should_send_append_entries(); lk) {
       conn->set_next_idx(response.idx + 1U, lk);
-      conn->send_append_entries(std::move(lk), log(), leadership_term(), commit_idx(), snapshot());
+      conn->send_append_entries(std::move(lk), raft_log(), leadership_term(), commit_idx());
     }
   }
 }
 
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
-                                             RaftTerm      term,
-                                             AppendEntries request) {
+                                             RaftTerm                           term,
+                                             AppendEntries                      request,
+                                             inplace_vector<MemBlock, 2> const& blocks,
+                                             Bytes const&                       bytes) {
   auto current_term = update_current_term(term);
 
   // The peer is no longer a leader.
@@ -559,6 +670,9 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
   // convert to a follower if not already one.
   make_follower();
 
+  leader_msg_epoch_.store(epoch_msec(), std::memory_order_relaxed);
+  leader_msg_term_.store(current_term, std::memory_order_relaxed);
+
   auto lk = unique_lock();
 
   bool success = request.prev_log_idx >= commit_idx() && append_entries(request.prev_log_idx,
@@ -566,6 +680,10 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
                                                                         request.entries,
                                                                         /*delete_entries=*/true);
   if (success) [[likely]] {
+    // The WAL bytes of the entries, once they are accepted: a request of a leader that has been
+    // deposed does not get here.
+    write_blocks(blocks, bytes);
+
     update_last_ping(false);
     set_commit_idx(std::min(request.commit_idx, request.prev_log_idx + request.entries.size()));
 
@@ -581,21 +699,34 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
   update_last_ping(true);
 
   // Logs don't match.
-  auto [_, last_idx] = value(log().last_entry());
+  auto [_, last_idx] = value(raft_log().last_entry());
 
-  auto log_idx = (last_idx < request.prev_log_idx) ? last_idx : request.prev_log_idx;
+  auto log_idx = std::min(last_idx, request.prev_log_idx);
   auto log_term =
-      log_idx >= commit_idx() ? value(log().get_term(log_idx)) : std::optional<RaftTerm>{};
+      log_idx > commit_idx() ? value(raft_log().get_term(log_idx)) : std::optional<RaftTerm>{};
 
   auto n = count(log_idx, log_term.value_or(RaftTerm{0}));
+  assert(log_term.has_value() == (n > 0));
 
-  return RaftResponse{.term     = current_term,
-                      .response = AppendEntriesResponse{
-                          .success = false,
-                          .idx     = log_idx,
-                          .term    = log_term,  // Can be std::nullopt.
-                          .n       = n,
-                      }};
+  log(INFO,
+      "{}prev_log_idx = {} prev_log_term = {} log_idx = {} log_term = {} n = {}",
+      log_prefix_,
+      request.prev_log_idx,
+      request.prev_log_term,
+      log_idx,
+      log_term,
+      n);
+
+  return RaftResponse{
+      .term = current_term,
+      .response =
+          AppendEntriesResponse{
+              .success = false,
+              .idx     = log_idx,
+              .term    = log_term,  // Can be std::nullopt.
+              .n       = n,
+          },
+  };
 }
 
 void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
@@ -611,52 +742,77 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
     update_match_index(conn->peer_id(), response.idx);
 
     if (is_candidate()) {
-      auto last_entry = value(log().last_entry());
+      // The type changes under the lock: a vote that comes now finds a candidate and makes it a
+      // leader with the lock held, and the state machine is changed only with it.
+      auto lk         = unique_lock();
+      auto last_entry = value(raft_log().last_entry());
 
-      if (commit_idx() == std::get<RaftIndex>(last_entry)) {
-        LOG_INFO << log_prefix_ << "Full leadership term=" << req_term << " with last_entry = ("
-                 << std::get<RaftTerm>(last_entry) << ", " << std::get<RaftIndex>(last_entry)
-                 << ")";
+      if (!is_candidate() || leadership_term() != req_term) {
+        // A follower now, or a candidate of a newer term.
+      } else if (commit_idx() == std::get<RaftIndex>(last_entry)) {
+        log(INFO,
+            "{}Full leadership term={} with last_entry = ({}, {})",
+            log_prefix_,
+            req_term,
+            std::get<RaftTerm>(last_entry),
+            std::get<RaftIndex>(last_entry));
 
         type_.store(NodeType::kLeader);
-      } else
-        LOG_INFO << log_prefix_ << "Waiting to become a leader .." << commit_idx() << " vs "
-                 << std::get<RaftIndex>(last_entry);
+      } else {
+        log(INFO,
+            "{}Waiting to become a leader .. {} vs {}",
+            log_prefix_,
+            commit_idx(),
+            std::get<RaftIndex>(last_entry));
+      }
     }
 
     if (stepping_down(/*acquire_lock=*/true) &&
-        response.idx == std::get<RaftIndex>(value(log().last_entry()))) {
+        response.idx == std::get<RaftIndex>(value(raft_log().last_entry()))) {
       // The node is a leader and the logs are synced, so send the election request to the first
       // candidate.
-      if (is_leader() && should_send_election_request()) {
-        conn->send_request_election(log(), leadership_term());
-      }
+      if (is_leader() && should_send_election_request())
+        conn->send_request_election(raft_log(), leadership_term());
     }
+
   } else if (auto lk = conn->should_send_append_entries(); lk) {
     conn->set_not_in_sync();
     if (!response.term)
       /// The node did not have an entry at the prev_log_idx, send a snapshot
-      conn->send_install_snapshot(std::move(lk), log(), leadership_term(), snapshot());
-    else {
-      uint64_t  nth = std::min<uint64_t>(response.n.value(), 64);
-      RaftIndex idx = response.idx;
+      return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
 
-      while (true) {
-        std::optional<RaftTerm> log_term = value(log().get_term(idx));
+    if (!response.n)
+      return;
 
-        if (!log_term || response.term.value() == log_term.value() || nth == 0) {
-          conn->set_next_idx(idx + 1, lk);
-          conn->send_append_entries(
-              std::move(lk), log(), leadership_term(), commit_idx(), snapshot());
+    uint64_t  nth = std::min<uint64_t>(response.n.value(), 64);
+    RaftIndex idx = response.idx;
 
-          return;
-        }
-        --idx;
-        --nth;
+    while (true) {
+      std::optional<RaftTerm> log_term = value(raft_log().get_term(idx));
+
+      // We got a log match.
+      if (log_term && response.term.value() == log_term.value()) {
+        conn->set_next_idx(idx + 1U, lk);
+        return conn->send_append_entries(
+            std::move(lk), raft_log(), leadership_term(), commit_idx());
       }
+
+      // Entry doesn't exist in the raft_log, so send a snapshot.
+      if (!log_term)
+        return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
+
+      if (nth == 0) {
+        conn->set_next_idx(idx, lk);
+        return conn->send_append_entries(
+            std::move(lk), raft_log(), leadership_term(), commit_idx());
+      }
+
+      --idx;
+      --nth;
     }
-  } else
+  } else {
     conn->set_not_in_sync();
+  }
 }
 
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
@@ -664,7 +820,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
                                              RequestElection request) {
   RaftTerm const curr_term = update_current_term(term);
 
-  if (curr_term == term && value(log().last_entry()) == request.last_entry) {
+  if (curr_term == term && value(raft_log().last_entry()) == request.last_entry) {
     make_candidate();
 
     return RaftResponse{
@@ -697,46 +853,39 @@ void RaftServer::update_match_index(RaftNodeId node_id, RaftIndex idx) {
   match_indexes_.match_index(node_id, idx);
   if (auto n_commit_idx = match_indexes_.commit_index(commit_idx()); n_commit_idx > commit_idx()) {
     set_commit_idx(n_commit_idx);
-    apply_entries();
+    apply_entries(true);
   }
 }
 
-RaftIndex RaftServer::apply_entries() {
-  auto lk  = unique_lock();
-  auto idx = state_.log_idx();
-  while (commit_idx() > idx) {
+RaftIndex RaftServer::apply_entries(bool check_delay) {
+  auto lk   = unique_lock();
+  auto idx  = state_.log_idx;
+  auto cidx = commit_idx();
+  while (cidx > idx) {
     ++idx;
 
-    Entry       e = entry(idx);
-    std::time_t t = e.time;
+    Entry e = entry(idx);
+    state_.apply(idx, e);
+    applied_idx_.store(idx, std::memory_order_relaxed);
+    applier_->applied(idx, e, state_);
 
-    if (std::holds_alternative<std::monostate>(e.cmd))
-      state_.set_timestamp(t, idx);
-    else {
-      auto response = state_.exec(t, idx, std::get<ZkRequest>(e.cmd));
-      try {
-        to_encoded_bytes(response);
-      } catch (...) {
-        std::cerr << "commands " << std::get<ZkRequest>(e.cmd).commands.size() << std::endl;
-        for (auto const& cmds : response.results) {
-          std::cerr << "index " << cmds.result.index() << std::endl;
-        }
-        throw;
-      }
+    // The leader has a handler for every entry that exec() adds, added with the entry under the
+    // lock that this function has; ticks and the entries of earlier leaders have none.
+    while (!handlers_.empty() && std::get<RaftIndex>(handlers_.front()) <= idx) {
+      auto& [h_idx, handler, time] = handlers_.front();
+      assert(h_idx == idx);
 
-      while (!handlers_.empty() && std::get<RaftIndex>(handlers_.front()) < idx) {
-        std::get<1>(handlers_.front())(ZkResponse{.status = ResultStatus::kInvalidLeader});
-        handlers_.pop_front();
-      }
-      if (!handlers_.empty() && std::get<RaftIndex>(handlers_.front()) == idx) {
-        auto d = (epoch_msec() - std::get<unsigned>(handlers_.front()));
-        if (d > 20)
-          LOG_INFO << log_prefix_ << "Time in the queue " << d << " milliseconds";
-        std::get<1>(std::move(handlers_.front()))(std::move(response));
-        handlers_.pop_front();
-      }
-      queue_size_.store(i8(handlers_.size()), std::memory_order_relaxed);
+      if (check_delay && epoch_msec() - time > 50U)
+        log(INFO,
+            "{}Time in the queue {} milliseconds, commit_idx={}",
+            log_prefix_,
+            epoch_msec() - time,
+            cidx);
+
+      handler(h_idx);
+      handlers_.pop_front();
     }
+    cidx = commit_idx();
   }
   return idx;
 }
@@ -763,27 +912,73 @@ void RaftServer::stepdown() {
   if (!is_leader())
     return;
 
-  LOG_INFO << log_prefix_ << "Stepping down";
+  log(INFO, "{}Stepping down", log_prefix_);
 
   // Starting a step down.
-  stepdown_.test_and_set();
+  if (!stepdown_.test_and_set())
+    stepdown_epoch_.store(epoch_msec(), std::memory_order_relaxed);
   election_request_.clear();
 
   /// Send a last tick.
   tick(/*force=*/true);
 }
 
+void RaftServer::compact(RaftIndex idx, UniqueLock lk) {
+  // Another thread may hold the lock, or compact, before it is held. A compaction that is not made
+  // is not recorded: the next periodic() makes it.
+  if (!lk || compaction_idx() + options_.compaction_lag >= idx || state_.log_idx < idx)
+    return;
+
+  auto last_entry = value(raft_log().last_entry());
+  log(INFO,
+      "{}Compacting ... applied = {} last_entry = {}",
+      log_prefix_,
+      idx,
+      std::get<RaftIndex>(last_entry));
+
+  value(log_.save_snapshot(state_, options_.keep_old_logs));
+
+  assert(last_entry <= value(raft_log().last_entry()));
+  compaction_idx_.store(idx);
+}
+
+void RaftServer::check_stepdown_timeout() {
+  // On shutdown the server is closed after the leadership is handed over or a wait.
+  if (!stepping_down(/*acquire_lock=*/false) || !is_leader() || shutdown_signal())
+    return;
+
+  auto start = stepdown_epoch_.load(std::memory_order_relaxed);
+  if (epoch_msec() <= start + (kStepdownTimeouts * options_.election_timeout_msecs))
+    return;
+
+  auto lk = unique_lock();
+  if (!is_leader() || !stepdown_.test())
+    return;
+
+  // No peer took over: rather than refusing the clients, the server remains the leader.
+  log(ERROR,
+      "{}Stepdown started @ {} did not hand over the leadership, calling it off",
+      log_prefix_,
+      start);
+  stepdown_.clear();
+  election_request_.clear();
+}
+
 void RaftServer::on_shutdown() {
-  LOG_ERROR << log_prefix_ << "on_shutdown";
+  log(ERROR, "{}on_shutdown", log_prefix_);
   if (auto lk = timer_lock(); lk)
     timer_.cancel();
 
+  if (closed_.test())
+    return;
+
+  // A server that has been closed has no log to hand over.
   if (is_leader()) {
     stepdown();
 
     auto idx = 0;
-    while (is_leader() && ++idx < 5 && (connections_->connected_peers() > (nodes() >> 2))) {
-      LOG_INFO << log_prefix_ << "Waiting to complete leadership transfer ...";
+    while (is_leader() && ++idx < 5 && (connections_->connected_peers() > (nodes() >> 2U))) {
+      log(INFO, "{}Waiting to complete leadership transfer ...", log_prefix_);
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
@@ -793,26 +988,26 @@ void RaftServer::on_shutdown() {
 unsigned RaftServer::count(RaftIndex idx, RaftTerm term) const {
   unsigned result = 0;
   while (idx > commit_idx()) {
-    if (auto t = value(log().get_term(idx)); t && *t == term) {
+    if (auto t = value(raft_log().get_term(idx)); t && *t == term) {
       ++result;
       --idx;
-    } else
+    } else {
       break;
+    }
   }
   return result;
 }
 
 void RaftServer::system_error(std::error_code ec) const {
-  LOG_ERROR << log_prefix_ << "Exiting ... " << ec.message();
-  LOG_ERROR << boost::stacktrace::stacktrace{1, 5};
-  exit(-1);
+  log(ERROR, "{}Exiting ... {}", log_prefix_, ec.message());
+  std::abort();
 }
 
 void RaftServer::close() {
   if (closed_.test_and_set())
     return;
 
-  LOG_ERROR << log_prefix_ << "close";
+  log(ERROR, "{}close", log_prefix_);
 
   acceptor_cancel();
 
@@ -823,11 +1018,11 @@ void RaftServer::close() {
     connections_->close();
 
   if (auto lk = unique_lock(); lk) {
+    for (auto& [_, handler, time] : handlers_)
+      handler(make_error_code(ErrorCode::kNotLeader));
     handlers_.clear();
-    queue_size_.store(i8(handlers_.size()), std::memory_order_relaxed);
   }
 
   auto lk = std::unique_lock<std::shared_mutex>{usage_lock_};
-  snapshot_.reset();
   log_.close();
 }

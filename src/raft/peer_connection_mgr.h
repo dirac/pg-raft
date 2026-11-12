@@ -3,6 +3,13 @@
 #include "src/base/config.h"
 #include "src/raft/raft_peer_connection.h"
 
+// Ported from sparrowdb lib/servers/zqlite/peer_connection_mgr.hpp (without TLS contexts).
+
+/// The identity a raft server sends in the connection handshake: "Raft:<node id>".
+inline string raft_identity(RaftNodeId id) {
+  return std::format("Raft:{0}", INT(id));
+}
+
 struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr> {
  public:
   PeerConnectionMgr(boost::asio::io_context& io_context,
@@ -12,9 +19,8 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   void close();
 
   unsigned post(std::function<void(shared_ptr<RaftPeerConnection>)> func);
-  unsigned for_each(std::function<void(shared_ptr<RaftPeerConnection>&)> func);
 
-  void reconnect(shared_ptr<PeerConnectionApi>                       server,
+  void reconnect(weak_ptr<PeerConnectionApi> const&                  server,
                  Config const&                                       config,
                  std::function<void(shared_ptr<RaftPeerConnection>)> on_connect);
 
@@ -32,9 +38,10 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   Options const& options() const { return options_; }
 
   void reset_last_connect_attempts() {
-    std::for_each(std::begin(last_connect_attempt_), std::end(last_connect_attempt_), [](auto& t) {
-      t.store(0ULL, std::memory_order_relaxed);
-    });
+    std::ranges::for_each(last_connect_attempt_,
+                          [](auto& t) { t.store(0, std::memory_order_relaxed); });
+    // Never connect to self.
+    last_connect_attempt_.at(INT(self_id_)).store(kConnecting);
   }
 
  private:
@@ -44,12 +51,10 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   /// Update connections_.
   shared_ptr<RaftPeerConnection> set_connection(uint16_t idx, shared_ptr<RaftPeerConnection> conn);
 
-  void set_connection(uint16_t                                            idx,
-                      shared_ptr<PeerConnectionApi>                       server,
-                      std::function<void(shared_ptr<RaftPeerConnection>)> on_connect,
-                      Result<socket_type>                                 socket);
-
-  auto const& log_prefix() const { return log_prefix_; }
+  void set_connection(uint16_t                                                   idx,
+                      weak_ptr<PeerConnectionApi> const&                         server,
+                      std::function<void(shared_ptr<RaftPeerConnection>)> const& on_connect,
+                      Result<socket_type>                                        socket);
 
   boost::asio::io_context& io_context() { return io_context_; }
 
@@ -65,11 +70,15 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
   // The connections.
   vector<shared_ptr<RaftPeerConnection>> connections_;
 
-  // The last reconnect attempt, so that we don;t do it often.
-  std::array<std::atomic<uint64_t>, 15U> last_connect_attempt_;
+  /// A connect attempt in progress, or the node itself (never connected to).
+  constexpr static unsigned kConnecting = std::numeric_limits<unsigned>::max();
+
+  // The last reconnect attempt (epoch_msec()), so that we don't do it often; 0 for none.
+  std::array<std::atomic<unsigned>, 15U> last_connect_attempt_;
 
   mutable std::mutex mtx_;
 
+  /// The options of the raft servers.
   Options const options_;
 
   std::atomic_flag closed_ = ATOMIC_FLAG_INIT;

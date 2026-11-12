@@ -1,3 +1,4 @@
+// Ported from sparrowdb lib/servers/zqlite.
 #pragma once
 
 #include "src/base/base.h"
@@ -6,16 +7,14 @@ struct MatchIndexes {
  public:
   MatchIndexes(RaftNodeId self_id, size_t n)
       : self_id_(self_id),
-        quorum_((static_cast<unsigned>(n) >> 1) + 1U),
+        quorum_(static_cast<unsigned>(n) >> 1U),
         match_indexes_(n, RaftIndex{0}) {
     tmp_.reserve(n);
   }
 
   // Reset on leader election.
   void reset() {
-    std::for_each(std::begin(match_indexes_), std::end(match_indexes_), [](auto& v) {
-      v.store(RaftIndex{0});
-    });
+    std::ranges::for_each(match_indexes_, [](auto& v) { v.store(RaftIndex{0}); });
   }
 
   void match_index(RaftNodeId const id, RaftIndex const idx) {
@@ -26,7 +25,7 @@ struct MatchIndexes {
       ;
   }
 
-  RaftIndex commit_index(RaftIndex const current_commit_idx);
+  RaftIndex commit_index(RaftIndex current_commit_idx);
 
  private:
   RaftNodeId const self_id_;
@@ -43,3 +42,4 @@ struct MatchIndexes {
 
   std::mutex mtx_;
 };
+

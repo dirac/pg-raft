@@ -4,6 +4,7 @@
 
 enum class ErrorCode : uint8_t {
   kProgramBug = 1,
+  kNotLeader  = 2,  ///< The raft server is not the leader (or is stepping down, or closed).
 };
 
 char const* to_string(ErrorCode ec);

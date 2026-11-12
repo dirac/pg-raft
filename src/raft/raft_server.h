@@ -1,7 +1,8 @@
 #pragma once
 
+#include "src/base/config.h"
+#include "src/base/wal_segment.h"
 #include "src/net/server.h"
-#include "src/net/ssl_context.h"
 #include "src/raft/match_indexes.h"
 #include "src/raft/options.h"
 #include "src/raft/peer_connection_mgr.h"
@@ -9,29 +10,62 @@
 #include "src/raft/raft_follower_connection.h"
 #include "src/raft/raft_log.h"
 #include "src/raft/raft_peer_connection.h"
+#include "src/raft/raft_state.h"
 #include "src/raft/raft_types.h"
-#include "src/raft/snapshot.h"
 #include "src/raft/vote_tally.h"
-#include "src/raft/zk_state.h"
 
-class RaftPeerConnection;
+// Ported from sparrowdb lib/servers/zqlite/raft_server.hpp. Differences:
+//
+//  - The leader's own WAL interception generates the entries: exec(WalCommand, handler), whose
+//    handler is called when the entry is committed (where sparrowdb executes clients' ZqRequests).
+//  - The state machine is RaftState (see raft_state.h); a RaftApplier is told of each applied entry
+//    (e.g. to advance the WalSender to the committed flushed_lsn).
+//  - The WAL bytes travel with the entries and are written to the segments in wal_dir as they are
+//    accepted.
+//  - A leader compacts its own log (a sparrowdb leader steps down to compact, which here would be a
+//    PostgreSQL failover).
+//  - InstallSnapshot sends the latest entries and their segments; the node then needs a PostgreSQL
+//    backup (RaftState::needs_backup), which it fetches over the client channel (backup()).
+
+/// Told of the state machine changes, with the server lock held: it must not call the server.
+struct RaftApplier {
+  virtual ~RaftApplier() = default;
+
+  /// The entry at idx was applied; state is the state after it.
+  virtual void applied(RaftIndex idx, Entry const& entry, RaftState const& state) {
+    (void)idx;
+    (void)entry;
+    (void)state;
+  }
+
+  /// The log was replaced by an InstallSnapshot.
+  virtual void installed(RaftState const& state) { (void)state; }
+};
+
+/// Called when an entry is committed (with its index), or with ErrorCode::kNotLeader.
+using ExecHandler = std::function<void(Result<RaftIndex>)>;
+
 class RaftServer : public ClientConnectionApi,
                    public FollowerConnectionApi,
                    public PeerConnectionApi,
                    public Server {
  public:
+  /// |dir| holds the raft log, |wal_dir| the WAL segments (raft_dir/pg_wal).
   RaftServer(RaftNodeId                     id,
              boost::asio::ip::tcp::acceptor acceptor,
-             Certificates const&            certs,
              Config const&                  config,
-             bool                           enable_ssl,
-             Options                        options = Options{});
+             std::filesystem::path          dir,
+             std::filesystem::path          wal_dir,
+             Options                        options,
+             shared_ptr<RaftApplier>        applier = nullptr);
 
-  virtual ~RaftServer();
+  ~RaftServer() override;
 
   /// Start the server.
   void start() override;
   void close();
+
+  RaftNodeId node_id() const { return self_id_; }
 
   void on_shutdown() override;
 
@@ -40,7 +74,7 @@ class RaftServer : public ClientConnectionApi,
     if (!closed_.test())
       return lk;
 
-    LOG_INFO << log_prefix_ << "returning null lock";
+    log(INFO, "{}returning null lock", log_prefix_);
     return std::shared_lock<std::shared_mutex>{};
   }
 
@@ -61,43 +95,74 @@ class RaftServer : public ClientConnectionApi,
   Config const& config() const { return config_; }
 
   /// Number of nodes
-  size_t nodes() const { return config().zk_servers.size(); }
+  size_t nodes() const { return config().servers.size(); }
 
   /// Does the server think it is the leader?
   bool is_leader() const override { return type_.load() == NodeType::kLeader; }
   bool resigning() const override { return stepping_down(false); }
 
-  /// Client request.
-  void exec(ZkRequest request, std::function<void(ZkResponse)> handler) override;
+  /// The leader's PostgreSQL is the primary and accepts connections (set by the node).
+  bool serving() const override { return is_leader() && serving_.test(); }
+  void set_serving(bool serving) {
+    if (serving)
+      serving_.test_and_set();
+    else
+      serving_.clear();
+  }
 
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             node_id,
-                                                  RaftTerm               term,
-                                                  std::monostate) override;
+  RaftIndex applied_idx() const override { return applied_idx_.load(std::memory_order_relaxed); }
 
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             candidate,
-                                                  RaftTerm               term,
-                                                  RequestVote            request) override;
+  /// The PostgreSQL status, polled by the node (see status/PgClient).
+  void set_pg_status(std::optional<uint64_t> primary_flushed_lsn,
+                     std::optional<uint64_t> standby_applied_lsn) {
+    auto lk              = std::unique_lock{pg_status_mtx_};
+    primary_flushed_lsn_ = primary_flushed_lsn;
+    standby_applied_lsn_ = standby_applied_lsn;
+  }
+  std::optional<uint64_t> primary_flushed_lsn() const override {
+    auto lk = std::unique_lock{pg_status_mtx_};
+    return primary_flushed_lsn_;
+  }
+  std::optional<uint64_t> standby_applied_lsn() const override {
+    auto lk = std::unique_lock{pg_status_mtx_};
+    return standby_applied_lsn_;
+  }
 
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             leader,
-                                                  RaftTerm               term,
-                                                  AppendEntries          request) override;
+  /// The backups of the PostgreSQL instance (set by the node); without one, every backup fails.
+  void set_backup_provider(std::function<void(SnapshotRequest, BackupHandler)> provider) {
+    auto lk          = std::unique_lock{backup_mtx_};
+    backup_provider_ = std::move(provider);
+  }
+  void backup(SnapshotRequest request, BackupHandler handler) override;
 
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             candidate,
-                                                  RaftTerm               term,
-                                                  RequestElection        request) override;
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             leader,
-                                                  RaftTerm               term,
-                                                  InstallSnapshot        request) override;
+  /// Append the command to the log (leader only); the handler is called when it is committed, with
+  /// the server lock held, or with ErrorCode::kNotLeader.
+  void exec(WalCommand cmd, ExecHandler handler);
 
-  std::optional<RaftResponse> handle_peer_request(shared_ptr<Connection> conn,
-                                                  RaftNodeId             leader,
-                                                  RaftTerm               term,
-                                                  SnapshotRequest        request) override;
+  /// The WAL segment in wal_dir, created (zero filled) if it doesn't exist.
+  Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const override;
+
+  RaftResponse handle_peer_request(RaftNodeId node_id, RaftTerm term, std::monostate) override;
+
+  RaftResponse handle_peer_request(RaftNodeId  candidate,
+                                   RaftTerm    term,
+                                   RequestVote request) override;
+
+  RaftResponse handle_peer_request(RaftNodeId                         leader,
+                                   RaftTerm                           term,
+                                   InstallSnapshot                    request,
+                                   inplace_vector<MemBlock, 2> const& blocks,
+                                   Bytes const&                       bytes) override;
+
+  RaftResponse handle_peer_request(RaftNodeId                         leader,
+                                   RaftTerm                           term,
+                                   AppendEntries                      request,
+                                   inplace_vector<MemBlock, 2> const& blocks,
+                                   Bytes const&                       bytes) override;
+
+  RaftResponse handle_peer_request(RaftNodeId      candidate,
+                                   RaftTerm        term,
+                                   RequestElection request) override;
 
   void handle_response(shared_ptr<RaftPeerConnection> conn,
                        RaftTerm                       req_term,
@@ -126,11 +191,10 @@ class RaftServer : public ClientConnectionApi,
 
   RaftIndex commit_idx() const { return commit_idx_.load(std::memory_order_relaxed); }
 
-  RaftLog const& log() const { return log_; }
+  RaftLog const& raft_log() const { return log_; }
 
   unsigned random_election_timeout() const {
-    auto v = random_election_timeout_(rd_);
-    return static_cast<unsigned>(v);
+    return static_cast<unsigned>(random_election_timeout_(rd_));
   }
 
   /// Some LMDB error or file system error. The only sane thing to do is exit.
@@ -141,14 +205,29 @@ class RaftServer : public ClientConnectionApi,
 
   bool has_votes() const {
     auto [votes, _] = votes_.votes_tally();
-    return votes > (nodes() >> 1);
+    return votes > (nodes() >> 1U);
   }
   bool has_lost_election() const {
     auto [votes, responses] = votes_.votes_tally();
-    return (responses - votes) > (nodes() >> 1);
+    return (responses - votes) > (nodes() >> 1U);
   }
 
-  RaftIndex apply_entries();
+  RaftIndex apply_entries(bool check_delay);
+
+  /// For the tests: compact the log at idx, as periodic() does.
+  void compact_for_test(RaftIndex idx) { compact(idx, unique_lock()); }
+
+  /// For the tests: fn(state, log, commit_idx) with the lock held, so that nothing is appended or
+  /// applied meanwhile.
+  template <typename Fn>
+  auto inspect_for_test(Fn&& fn) const {
+    auto lk = unique_lock();
+    return std::forward<Fn>(fn)(state_, log_, commit_idx());
+  }
+
+ protected:
+  /// Create the connection for a newly accepted peer or client socket.
+  shared_ptr<Connection> create_connection(string peer, socket_type socket);
 
  private:
   using UniqueLock = std::unique_lock<std::mutex>;
@@ -160,7 +239,7 @@ class RaftServer : public ClientConnectionApi,
     return std::unique_lock<std::mutex>{mtx_, std::try_to_lock_t{}};
   }
 
-  void on_connect(shared_ptr<RaftPeerConnection> conn);
+  void on_connect(shared_ptr<RaftPeerConnection> const& conn);
 
   // We can vote only after receiving the term from majority of the nodes.
   bool can_vote() const { return can_vote_.test(); }
@@ -168,7 +247,7 @@ class RaftServer : public ClientConnectionApi,
   bool is_candidate() const { return type_.load() == NodeType::kCandidate; }
   bool is_follower() const { return type_.load() == NodeType::kFollower; }
 
-  // Every second we add a tick entry if we have not apppend of real entry.
+  // Every tick_seconds we add a tick entry if we have not appended a real entry.
   // Returns true if an tick entry was appended.
   bool tick(bool force = false);
 
@@ -178,8 +257,8 @@ class RaftServer : public ClientConnectionApi,
 
   RaftTerm update_current_term(RaftTerm term);
 
-  void make_leader();
   void make_follower(std::source_location loc = std::source_location::current());
+  void log_untriggered_election(unsigned now) const;
   void make_candidate(unsigned inc = 1);
 
   void make_leader(UniqueLock lk);
@@ -188,8 +267,7 @@ class RaftServer : public ClientConnectionApi,
 
   void set_commit_idx(RaftIndex idx) {
     auto curr = commit_idx();
-    while (curr < idx &&
-           commit_idx_.compare_exchange_strong(curr, idx, std::memory_order_relaxed) == false)
+    while (curr < idx && !commit_idx_.compare_exchange_strong(curr, idx, std::memory_order_relaxed))
       ;
   }
 
@@ -198,16 +276,26 @@ class RaftServer : public ClientConnectionApi,
   /// Number of entries.
   unsigned count(RaftIndex idx, RaftTerm term) const;
 
-  /// Function to support stepping down a leader.
-  // 1. Add a tick entry and send an append entries to all.
-  // void stepdown();
-
   // 2. When the server processes AppendEntries response, it checks if the remote node has received
   //    the last tick entry.
   bool stepping_down(bool acquire_lock) const;
 
   // 3. If so then the first response results in sending an election request to the node.
   bool should_send_election_request();
+
+  /// A server that has applied compaction_lag entries since the last compaction saves the state
+  /// and truncates the log, if it holds the lock.
+  void compact(RaftIndex idx, UniqueLock lk);
+
+  /// A stepdown that has not handed over the leadership in kStepdownTimeouts election timeouts is
+  /// called off, so that the leader doesn't refuse the clients for ever.
+  void check_stepdown_timeout();
+
+  /// Write the WAL bytes of the blocks to the segments.
+  void write_blocks(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes);
+
+  /// A stepdown is called off after this many election timeouts.
+  constexpr static unsigned kStepdownTimeouts = 32U;
 
   /// Returns the current term and if it has not been changed.
   std::tuple<RaftTerm, bool> set_current_term(RaftTerm term);
@@ -218,8 +306,7 @@ class RaftServer : public ClientConnectionApi,
       system_error(r.error());
     return std::move(r.value());
   }
-  template <>
-  void value<void>(Result<void> r) const {
+  void value(Result<void> r) const {
     if (!r)
       system_error(r.error());
   }
@@ -228,10 +315,7 @@ class RaftServer : public ClientConnectionApi,
 
   bool vote(RaftTerm term, RaftNodeId candidate) { return value(log_.vote(term, candidate)); }
 
-  void apply_db_snapshot(std::filesystem::path file) {
-    return value(log_.apply_db_snapshot(std::move(file)));
-  }
-  ZkState load_snapshot() const { return value(log_.load_snapshot()); }
+  RaftState load_snapshot() const { return value(log_.load_snapshot()); }
 
   bool append_entries(RaftIndex            prev_log_idx,
                       RaftTerm             prev_log_term,
@@ -241,16 +325,16 @@ class RaftServer : public ClientConnectionApi,
   }
 
   Entry entry(RaftIndex idx) const {
-    std::optional<vector<Entry>> e = value(log_.entries_from(idx, 1));
-    if (!e || e.value().empty())
+    // The entry is not in the log (it is not there, or it is before the first), or it is empty.
+    auto e = value(log_.entries_from(idx, 1)).value_or(vector<Entry>{});
+    if (e.empty())
       system_error(system_error_code(EINVAL));
 
-    return std::move(e.value().at(0));
+    return std::move(e.at(0));
   }
 
   RaftIndex compaction_idx() const { return compaction_idx_.load(std::memory_order_relaxed); }
 
- private:
   enum class NodeType : uint8_t {
     kFollower  = 0,
     kLeader    = 1,
@@ -270,14 +354,19 @@ class RaftServer : public ClientConnectionApi,
   // Working directory
   std::filesystem::path const dir_;
 
-  // Tmp dir for the followers
-  std::filesystem::path const tmpdir_;
+  // The WAL segments.
+  std::filesystem::path const       wal_dir_;
+  shared_ptr<WalSegmentCache> const cache_;
 
   // Persistent state.
   RaftLog log_;
 
+  // The state machine.
+  RaftState               state_;
+  std::atomic<RaftIndex>  applied_idx_{RaftIndex{0}};
+  shared_ptr<RaftApplier> applier_;
+
   std::atomic<RaftIndex> compaction_idx_{RaftIndex{0}};
-  std::mutex             compaction_mtx_;
 
   auto timer_lock() { return std::unique_lock<std::mutex>{timer_mtx_}; }
 
@@ -285,14 +374,18 @@ class RaftServer : public ClientConnectionApi,
   boost::asio::steady_timer timer_;
   std::mutex                timer_mtx_;
 
-  /// Last ping, used for starting an election.
+  /// Last ping (epoch_msec()), used for starting an election.
   std::atomic<unsigned> last_ping_epoch_{0};
 
   unsigned last_ping_epoch() const { return last_ping_epoch_.load(); }
 
+  /// Term and time of the last AppendEntries from a leader, used to log untriggered elections.
+  std::atomic<RaftTerm> leader_msg_term_{RaftTerm{0}};
+  std::atomic<unsigned> leader_msg_epoch_{0};  ///< epoch_msec()
+
   void update_last_ping(bool delay_election) {
-    auto cur_v = last_ping_epoch();
-    auto new_v = epoch_msec() + (delay_election ? options_.election_timeout : 0);
+    auto cur_v = last_ping_epoch_.load();
+    auto new_v = epoch_msec() + (delay_election ? options_.election_timeout_msecs : 0U);
 
     while (new_v > cur_v &&
            !last_ping_epoch_.compare_exchange_strong(cur_v, new_v, std::memory_order_relaxed))
@@ -300,7 +393,7 @@ class RaftServer : public ClientConnectionApi,
   }
 
   // The last log entry time.
-  // The leader adds a tick entry at least every kTickSeconds seconds.
+  // The leader adds a tick entry at least every tick_seconds seconds.
   std::atomic<std::time_t> last_entry_time_{0};
 
   // Current term.
@@ -313,12 +406,9 @@ class RaftServer : public ClientConnectionApi,
   std::atomic<RaftIndex> commit_idx_{RaftIndex{0}};
   MatchIndexes           match_indexes_;
 
-  // The callback when the request is eventually processed after reaching quorum.
-  // The raft index of the request, callback for the response and when it was enqueued.
-  list<std::tuple<RaftIndex, std::function<void(ZkResponse)>, unsigned>> handlers_;
-
-  // The number of requests in the handlers_.
-  std::atomic_int64_t queue_size_;
+  // The handlers of the entries that the leader appended, called when they are committed.
+  // The raft index of the entry, the handler and when it was enqueued (epoch_msec()).
+  list<std::tuple<RaftIndex, ExecHandler, unsigned>> handlers_;
 
   shared_ptr<PeerConnectionMgr> connections_;
 
@@ -328,8 +418,20 @@ class RaftServer : public ClientConnectionApi,
   // On receiving a shutdown signal, we send an election request to one of the servers.
   // A tick entry is added to the log and on successful replication of the tick entry to one of the
   // node tiggers an election request to it.
-  std::atomic_flag stepdown_ = ATOMIC_FLAG_INIT;
-  std::atomic_flag election_request_;
+  std::atomic_flag stepdown_         = ATOMIC_FLAG_INIT;
+  std::atomic_flag election_request_ = ATOMIC_FLAG_INIT;
+
+  // When the last stepdown started (epoch_msec()), 0 if none.
+  std::atomic<unsigned> stepdown_epoch_{0};
+
+  std::atomic_flag serving_ = ATOMIC_FLAG_INIT;
+
+  mutable std::mutex      pg_status_mtx_;
+  std::optional<uint64_t> primary_flushed_lsn_;
+  std::optional<uint64_t> standby_applied_lsn_;
+
+  std::mutex                                          backup_mtx_;
+  std::function<void(SnapshotRequest, BackupHandler)> backup_provider_;
 
   mutable std::mutex mtx_;
 
@@ -339,6 +441,10 @@ class RaftServer : public ClientConnectionApi,
 
   mutable std::mt19937                    rd_{std::random_device{}()};
   mutable std::uniform_int_distribution<> random_election_timeout_;
+
+  // The election timeout, drawn once for each last ping (only used by periodic()).
+  unsigned election_timeout_epoch_{0};  ///< The last_ping_epoch_ election_timeout_ was drawn for.
+  unsigned election_timeout_{0};
 
   Options const options_;
 };

@@ -3,8 +3,15 @@
 
 #include "src/base/testing.h"
 
-static int err = EIO;
+// Ported from sparrowdb lib/servers/zqlite/raft_log_test.cpp, with tests of the pg-raft
+// additions (RaftState snapshot, compaction, install_snapshot).
 
+namespace {
+
+int err = EIO;
+
+/// Fails the |invocation|th LMDB call when |fail| is set, and checks that every txn and cursor is
+/// closed.
 struct TestRaftLog : public RaftLog {
   std::filesystem::path term_db() const override { return tmp / std::format("{0}-term.lmdb", idx); }
 
@@ -14,7 +21,7 @@ struct TestRaftLog : public RaftLog {
   int env_set_mapsize(MDB_env* env, size_t size) override {
     if (fail && invocation-- == 0)
       return err;
-    return RaftLog::env_set_mapsize(env, size >> 10);
+    return RaftLog::env_set_mapsize(env, size >> 10U);
   }
 
   int env_create(MDB_env** env) override {
@@ -23,17 +30,11 @@ struct TestRaftLog : public RaftLog {
 
     return RaftLog::env_create(env);
   }
-  int env_open(MDB_env* env, char const* filename) override {
+  int env_open(MDB_env* env, char const* filename, unsigned int flags) override {
     if (fail && invocation-- == 0)
       return err;
 
-    return RaftLog::env_open(env, filename);
-  }
-  int env_copy(MDB_env* env, int fd) const override {
-    if (fail && invocation-- == 0)
-      return err;
-
-    return RaftLog::env_copy(env, fd);
+    return RaftLog::env_open(env, filename, flags);
   }
   int txn_wbegin(MDB_env* env, MDB_txn** txn) override {
     if (fail && invocation-- == 0)
@@ -54,16 +55,18 @@ struct TestRaftLog : public RaftLog {
     open_txn = *txn;
     return 0;
   }
-  int txn_commit(MDB_txn* txn) const override {
+  int txn_commit_impl(MDB_txn* txn) const override {
     BOOST_TEST(open_cursor == nullptr);
     BOOST_TEST(open_txn == txn);
 
     open_txn = nullptr;
 
-    if (fail && invocation-- == 0)
+    if (fail && invocation-- == 0) {
+      RaftLog::txn_abort_impl(txn);
       return err;
+    }
 
-    return RaftLog::txn_commit(txn);
+    return RaftLog::txn_commit_impl(txn);
   }
   int dbi_open(MDB_txn* txn, char const* name, MDB_dbi* dbi) override {
     if (fail && invocation-- == 0)
@@ -110,30 +113,29 @@ struct TestRaftLog : public RaftLog {
     return RaftLog::cursor_del(cursor);
   }
 
-  void env_close(MDB_env* env) override { return RaftLog::env_close(env); }
-
-  void txn_abort(MDB_txn* txn) const override {
+  void txn_abort_impl(MDB_txn* txn) const override {
     BOOST_TEST(open_cursor == nullptr);
     BOOST_TEST(open_txn == txn);
     open_txn = nullptr;
 
-    return RaftLog::txn_abort(txn);
+    return RaftLog::txn_abort_impl(txn);
   }
-  void cursor_close(MDB_cursor* cursor) const override {
+  void cursor_close_impl(MDB_cursor* cursor) const override {
     BOOST_TEST(open_cursor == cursor);
     open_cursor = nullptr;
 
-    return RaftLog::cursor_close(cursor);
+    return RaftLog::cursor_close_impl(cursor);
   }
 
   mutable MDB_txn*      open_txn    = nullptr;
   mutable MDB_cursor*   open_cursor = nullptr;
-  mutable int           invocation;
+  mutable int           invocation{0};
   mutable bool          fail{false};
   std::filesystem::path tmp;
-  unsigned const        idx;
+  unsigned const        idx = file_idx++;
 
-  TestRaftLog(std::filesystem::path path) : RaftLog(path), tmp(path), idx(file_idx++) {}
+  explicit TestRaftLog(std::filesystem::path const& path)
+      : RaftLog(path, /*sync_commits=*/false, /*no_sync=*/true), tmp(path) {}
 
   static unsigned file_idx;
 };
@@ -141,10 +143,12 @@ struct TestRaftLog : public RaftLog {
 unsigned TestRaftLog::file_idx = 0;
 
 struct BaseTest {
-  BaseTest() : dir(), log(dir()) {}
+  BaseTest() : log(dir()) {}
 
+  /// Runs test_fn with the 1st, 2nd, ... LMDB call failing until it succeeds: every failure is the
+  /// injected error and leaves no txn or cursor open.
   template <typename T>
-  Result<T> exec(std::function<Result<T>(RaftLog&)> test_fn, int max = 50) {
+  Result<T> exec(std::function<Result<T>(RaftLog&)> const& test_fn, int max = 50) {
     for (int i = 0; i < max; ++i) {
       log.fail       = true;
       log.invocation = i;
@@ -152,12 +156,8 @@ struct BaseTest {
       BOOST_REQUIRE(log.open_txn == nullptr);
       BOOST_REQUIRE(log.open_cursor == nullptr);
 
-      log.open_txn    = nullptr;
-      log.open_cursor = nullptr;
-
-      auto cleanup = boost::scope::scope_exit([this]() noexcept { log.fail = false; });
-
       auto r = test_fn(log);
+      log.fail = false;
 
       BOOST_TEST(log.open_txn == nullptr);
       BOOST_TEST(log.open_cursor == nullptr);
@@ -182,8 +182,31 @@ struct Test : public BaseTest {
   }
 };
 
+Entry entry(std::time_t t, uint64_t term, off_t offset = 0) {
+  return Entry{
+      .time = t,
+      .term = RaftTerm{term},
+      .cmd =
+          WalCommand{
+              .flushed_lsn = LogSeqNumber{.timeline = 1, .lsn = u8(offset)},
+              .segment     = LogSeqNumber{.timeline = 1, .lsn = 0},
+              .command     = WriteOp{.offset = offset, .size = 8},
+          },
+  };
+}
+
+vector<Entry> entries(std::time_t from, size_t n, uint64_t term) {
+  vector<Entry> result;
+  for (size_t i = 0; i < n; ++i)
+    result.emplace_back(entry(from + static_cast<std::time_t>(i), term, static_cast<off_t>(i * 8)));
+  return result;
+}
+
+}  // namespace
+
 BOOST_FIXTURE_TEST_CASE(open_term_db, BaseTest) {
-  auto r = exec<RaftTerm>([](RaftLog& log) -> Result<RaftTerm> { return log.open_term_db(); });
+  auto r =
+      exec<RaftTerm>([](RaftLog& log) -> Result<RaftTerm> { return log.open_term_db(); });
   BOOST_TEST(!r.has_error());
 }
 
@@ -201,11 +224,8 @@ BOOST_FIXTURE_TEST_CASE(last_entry, Test) {
     BOOST_TEST(RaftTerm(0) == std::get<RaftTerm>(r.value()));
   }
 
-  auto r = log.append_entries(
-      RaftIndex(0),
-      RaftTerm(0),
-      vector{Entry{.term = RaftTerm{1}, .time = 1}, Entry{.term = RaftTerm{1}, .time = 2}}, true);
-  BOOST_TEST(!r.has_error());
+  auto r = log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 2, 1), true);
+  BOOST_TEST(r.value());
 
   // Non-empty
   {
@@ -215,30 +235,147 @@ BOOST_FIXTURE_TEST_CASE(last_entry, Test) {
   }
 }
 
-typedef boost::mpl::list<int16_t, int32_t, int64_t, uint16_t, uint32_t, uint64_t> test_types;
+BOOST_FIXTURE_TEST_CASE(append_entries, Test) {
+  // The leader appends after its last entry only.
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 5, 1), false).value());
+  BOOST_TEST(!log.append_entries(RaftIndex(3), RaftTerm(1), entries(6, 1, 1), false).value());
+  BOOST_TEST(log.append_entries(RaftIndex(5), RaftTerm(1), entries(6, 1, 1), false).value());
+
+  // A follower replaces the entries after a matching one.
+  BOOST_TEST(!log.append_entries(RaftIndex(3), RaftTerm(2), entries(7, 1, 2), true).value());
+  BOOST_TEST(log.append_entries(RaftIndex(3), RaftTerm(1), entries(7, 2, 2), true).value());
+
+  auto last = log.last_entry().value();
+  BOOST_TEST(std::get<RaftIndex>(last) == RaftIndex(5));
+  BOOST_TEST(std::get<RaftTerm>(last) == RaftTerm(2));
+
+  BOOST_TEST(log.get_term(RaftIndex(3)).value() == std::optional<RaftTerm>{RaftTerm(1)});
+  BOOST_TEST(log.get_term(RaftIndex(4)).value() == std::optional<RaftTerm>{RaftTerm(2)});
+  BOOST_TEST(!log.get_term(RaftIndex(6)).value().has_value());
+
+  // With failures, nothing is left open and the append succeeds in the end.
+  auto r = exec<bool>([](RaftLog& log) -> Result<bool> {
+    return log.append_entries(RaftIndex(5), RaftTerm(2), entries(9, 3, 2), true);
+  });
+  BOOST_TEST(r.value());
+  BOOST_TEST(std::get<RaftIndex>(log.last_entry().value()) == RaftIndex(8));
+}
+
+BOOST_FIXTURE_TEST_CASE(entries_from, Test) {
+  auto e = entries(1, 10, 1);
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), e, false).value());
+
+  auto r = log.entries_from(RaftIndex(3), 4).value();
+  BOOST_REQUIRE(r.has_value());
+  BOOST_TEST(r->size() == 4U);
+  BOOST_TEST((r->front() == e.at(2)));
+  BOOST_TEST((r->back() == e.at(5)));
+
+  // Past the end: empty.
+  BOOST_TEST(log.entries_from(RaftIndex(11), 4).value()->empty());
+
+  auto [idx, latest] = log.latest_entries(3).value();
+  BOOST_TEST(idx == RaftIndex(10));
+  BOOST_TEST(latest.size() == 3U);
+  BOOST_TEST((latest.front() == e.at(9)));  // The last first.
+  BOOST_TEST((latest.back() == e.at(7)));
+}
+
+BOOST_FIXTURE_TEST_CASE(snapshot_and_compaction, Test) {
+  BOOST_TEST((log.load_snapshot().value() == RaftState{}));
+
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 100, 1), false).value());
+
+  auto state = RaftState{
+      .log_idx     = RaftIndex(90),
+      .timestamp   = 90,
+      .flushed_lsn = LogSeqNumber{.timeline = 1, .lsn = 712},
+  };
+  auto r = exec<void>([&state](RaftLog& log) -> Result<void> {
+    return log.save_snapshot(state, /*log_size=*/20);
+  }, /*max=*/500);
+  BOOST_TEST(r.has_value());
+  BOOST_TEST((log.load_snapshot().value() == state));
+
+  // The entries before log_idx - log_size are gone.
+  BOOST_TEST(std::get<RaftIndex>(log.first_entry().value()) == RaftIndex(70));
+  BOOST_TEST(!log.entries_from(RaftIndex(69), 1).value().has_value());
+  BOOST_TEST(std::get<RaftIndex>(log.last_entry().value()) == RaftIndex(100));
+
+  // The state survives a reopen.
+  log.close();
+  BOOST_REQUIRE(log.open_term_db().has_value());
+  BOOST_REQUIRE(log.open_logs_db().has_value());
+  BOOST_TEST((log.load_snapshot().value() == state));
+}
+
+BOOST_FIXTURE_TEST_CASE(install_snapshot, Test) {
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 10, 1), false).value());
+
+  auto e     = entries(100, 5, 3);
+  auto state = RaftState{.log_idx = RaftIndex(500), .timestamp = 99, .needs_backup = true};
+
+  auto r = exec<void>([&e, &state](RaftLog& log) -> Result<void> {
+    return log.install_snapshot(RaftIndex(500), e, state);
+  });
+  BOOST_TEST(r.has_value());
+
+  BOOST_TEST(std::get<RaftIndex>(log.first_entry().value()) == RaftIndex(501));
+  BOOST_TEST(std::get<RaftIndex>(log.last_entry().value()) == RaftIndex(505));
+  BOOST_TEST((log.entries_from(RaftIndex(501), 10).value().value() == e));
+  BOOST_TEST((log.load_snapshot().value() == state));
+
+  // The leader can go on from the last entry.
+  BOOST_TEST(log.append_entries(RaftIndex(505), RaftTerm(3), entries(105, 1, 3), true).value());
+}
+
+BOOST_FIXTURE_TEST_CASE(term_and_vote, Test) {
+  BOOST_TEST(log.current_term().value() == RaftTerm(0));
+
+  BOOST_TEST(log.set_current_term(RaftTerm(3)).value() == RaftTerm(3));
+  // The term only goes up.
+  BOOST_TEST(log.set_current_term(RaftTerm(2)).value() == RaftTerm(3));
+
+  // A vote is for the current term, once.
+  BOOST_TEST(!log.vote(RaftTerm(2), RaftNodeId(1)).value());
+  BOOST_TEST(log.vote(RaftTerm(3), RaftNodeId(1)).value());
+  BOOST_TEST(log.vote(RaftTerm(3), RaftNodeId(1)).value());
+  BOOST_TEST(!log.vote(RaftTerm(3), RaftNodeId(2)).value());
+
+  // A new term clears the vote.
+  BOOST_TEST(log.set_current_term(RaftTerm(4)).value() == RaftTerm(4));
+  BOOST_TEST(log.vote(RaftTerm(4), RaftNodeId(2)).value());
+
+  auto r = exec<bool>(
+      [](RaftLog& log) -> Result<bool> { return log.vote(RaftTerm(4), RaftNodeId(2)); });
+  BOOST_TEST(r.value());
+}
+
+using test_types = boost::mpl::list<int16_t, int32_t, int64_t, uint16_t, uint32_t, uint64_t>;
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(mem, T, test_types) {
-  set<T> elems{std::numeric_limits<T>::min(),
-               std::numeric_limits<T>::lowest(),
-               static_cast<T>(-42),
-               0,
-               static_cast<T>(42),
-               std::numeric_limits<T>::max()};
+  set<T> elems{
+      std::numeric_limits<T>::min(),
+      std::numeric_limits<T>::lowest(),
+      static_cast<T>(-42),
+      0,
+      static_cast<T>(42),
+      std::numeric_limits<T>::max(),
+  };
 
   T t = 0;
   for (unsigned i = 1; i < sizeof(T); ++i) {
-    t = t | static_cast<T>(i << i);
+    t = static_cast<T>(static_cast<std::make_unsigned_t<T>>(t) | (i << i));
     elems.emplace(t);
-    elems.emplace(-t);
+    elems.emplace(static_cast<T>(-t));
   }
 
   auto last = to_mem<T>(*elems.begin());
   for (auto t : elems) {
     auto str = to_mem<T>(t);
-    BOOST_TEST(last <= str);
+    BOOST_TEST((last <= str));
     BOOST_TEST(t == std::get<T>(from_mem<T>(str.data())));
 
     last = str;
   }
 }
-

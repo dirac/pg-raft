@@ -1,5 +1,9 @@
 #include "src/raft/raft_peer_connection.h"
 
+#include "src/base/logger.h"
+
+// Ported from sparrowdb lib/servers/zqlite/raft_peer_connection.cpp.
+
 void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   std::unique_lock<std::mutex> lk{mtx_};
 
@@ -12,8 +16,7 @@ void RaftPeerConnection::send_ping(RaftLog const& rlog) {
   return send_request(std::move(lk),
                       RaftRequest{
                           .term = current_term,
-                      },
-                      true);
+                      });
 }
 
 void RaftPeerConnection::send_request_vote(RaftLog const& rlog, RaftTerm candidate_term) {
@@ -32,8 +35,7 @@ void RaftPeerConnection::send_request_vote(RaftLog const& rlog, RaftTerm candida
                               RequestVote{
                                   .last_entry = last_entry,
                               },
-                      },
-                      true);
+                      });
 }
 
 void RaftPeerConnection::send_request_election(RaftLog const& rlog, RaftTerm leadership_term) {
@@ -52,8 +54,7 @@ void RaftPeerConnection::send_request_election(RaftLog const& rlog, RaftTerm lea
                               RequestElection{
                                   .last_entry = last_entry,
                               },
-                      },
-                      true);
+                      });
 }
 
 void RaftPeerConnection::set_leader_term(RaftLog const&                      rlog,
@@ -68,7 +69,7 @@ void RaftPeerConnection::set_leader_term(RaftLog const&                      rlo
       return system_error(elog(r.error(), "Failed to get last entry"));
 
     leader_term_ = leadership_term;
-    last_send_   = 0U;
+    last_send_   = 0;
     set_next_idx(current_idx + 1U, lk);
   }
 }
@@ -85,47 +86,47 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
   else
     return system_error(elog(r.error(), "Failed to get last entry"));
 
-  if ((next_idx_ >= current_idx) && (epoch_msec() - last_send_) < (options_.election_timeout >> 2))
+  if ((next_idx_ > current_idx) &&
+      (epoch_msec() - last_send_) < (options_.election_timeout_msecs >> 2U))
     return;
 
   AppendEntries append_entries;
-  bool          respond = true;
 
   append_entries.commit_idx   = commit_idx;
   append_entries.prev_log_idx = next_idx_ - 1U;
 
-  if (auto r = rlog.get_term(append_entries.prev_log_idx); !r)
-    return system_error(elog(r.error(), "Failed to get_term at {}", append_entries.prev_log_idx));
+  auto term_result = rlog.get_term(append_entries.prev_log_idx);
+  if (!term_result)
+    return system_error(
+        elog(term_result.error(), "Failed to get_term at {}", append_entries.prev_log_idx));
 
-  else {
-    std::optional<RaftTerm> term = r.value();
-    if (term)
-      append_entries.prev_log_term = *term;
-    else
-      return send_install_snapshot(std::move(lk), rlog, leadership_term);
-  }
+  std::optional<RaftTerm> term = term_result.value();
+  if (term)
+    append_entries.prev_log_term = *term;
+  else
+    return send_install_snapshot(std::move(lk), rlog, leadership_term);
 
-  if (auto r = rlog.entries_from(next_idx_, options_.max_entries); !r)
-    return system_error(elog(r.error(), "Failed to entries_from at {}", next_idx_));
-  else {
-    std::optional<vector<Entry>> entries = std::move(r.value());
-    if (entries) {
-      append_entries.entries = std::move(entries.value());
-      respond                = trim(append_entries.entries);
-    } else {
-      return send_install_snapshot(std::move(lk), rlog, leadership_term);
-    }
+  auto entries_result = rlog.entries_from(next_idx_, options_.max_entries);
+  if (!entries_result)
+    return system_error(elog(entries_result.error(), "Failed to entries_from at {}", next_idx_));
+
+  std::optional<vector<Entry>> entries = std::move(entries_result.value());
+  if (entries) {
+    append_entries.entries = std::move(entries.value());
+    trim(append_entries.entries);
+  } else {
+    next_idx_ = current_idx + 1U;
+    return send_install_snapshot(std::move(lk), rlog, leadership_term);
   }
   next_idx_ = next_idx_ + append_entries.entries.size();
 
-  auto data = mem_blocks(append_entries.entries, /* full_wal_segment=*/false);
+  auto data = mem_blocks(append_entries.entries, /*full_wal_segment=*/false);
   return send_request(std::move(lk),
                       RaftRequest{
                           .term    = leadership_term,
                           .request = std::move(append_entries),
-                          .data    = data,
-                      },
-                      respond);
+                          .data    = std::move(data),
+                      });
 }
 
 void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
@@ -133,59 +134,58 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                                                RaftTerm                     leadership_term) {
   set_leader_term(rlog, leadership_term, lk);
 
-  if (auto r = rlog.latest_entries(options_.snapshot_entries_count); !r)
-    return system_error(elog(r.error(), "failed in getting latest entries"));
-  else {
-    auto [idx, entries] = std::move(r.value());
+  auto r = rlog.latest_entries(options_.snapshot_entries);
+  if (!r)
+    return system_error(elog(r.error(), "Failed in getting the latest entries"));
 
-    next_idx_ = idx + 1U;
-    trim(entries);
+  auto [idx, entries] = std::move(r.value());
 
-    std::reverse(entries.begin(), entries.end());
-    idx -= entries.size();
+  // The latest entries (the last first) that write to at most two segments.
+  trim(entries);
+  std::ranges::reverse(entries);
 
-    auto data = mem_blocks(entries, true);
-    send_request(std::move(lk),
-                 RaftRequest{
-                     .term = leadership_term,
-                     .request =
-                         InstallSnapshot{
-                             .log_idx = idx,
-                             .entries = std::move(entries),
-                         },
-                     .data = data,
-                 },
-                 true);
-  }
+  next_idx_ = idx + 1U;
+
+  auto data = mem_blocks(entries, /*full_wal_segment=*/true);
+  send_request(std::move(lk),
+               RaftRequest{
+                   .term = leadership_term,
+                   .request =
+                       InstallSnapshot{
+                           .log_idx = idx - entries.size(),
+                           .entries = std::move(entries),
+                       },
+                   .data = std::move(data),
+               });
 }
 
 inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& entries,
                                                            bool                 full_wal_segment) {
   map<LogSeqNumber, std::tuple<off_t, off_t>> regions;
   for (auto const& e : entries) {
-    if (auto const* wal_cmd = &e.cmd) {
-      if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command)) {
-        WriteOp op = std::get<WriteOp>(wal_cmd->command);
+    auto const& cmd = e.cmd;
+    if (!cmd.segment)
+      continue;
 
-        auto pos = regions.find(wal_cmd->segment.value());
-        if (pos == regions.end())
-          pos = regions
-                    .emplace(wal_cmd->segment.value(),
-                             full_wal_segment ? std::make_tuple(0, kWalSegmentSize)
-                                              : std::make_tuple(op.offset, op.offset + op.size))
-                    .first;
+    if (auto const* op = std::get_if<WriteOp>(&cmd.command); op) {
+      auto const end = op->offset + static_cast<off_t>(op->size);
 
-        auto [s, e] = pos->second;
-        s           = std::min(op.offset, s);
-        e           = std::max(op.offset + static_cast<off_t>(op.size), e);
-        pos->second = std::make_tuple(s, e);
+      auto pos = regions.find(cmd.segment.value());
+      if (pos == regions.end()) {
+        regions.emplace(cmd.segment.value(),
+                        full_wal_segment ? std::make_tuple(off_t{0}, off_t{kWalSegmentSize})
+                                         : std::make_tuple(op->offset, end));
+      } else {
+        auto& [s, f] = pos->second;
+        s            = std::min(op->offset, s);
+        f            = std::max(end, f);
       }
     }
   }
   assert(regions.size() <= 2);
 
   inplace_vector<MemBlock, 2> result;
-  for (auto [lsn, reg] : regions)
+  for (auto const& [lsn, reg] : regions)
     result.emplace_back(MemBlock{
         .lsn    = lsn,
         .offset = std::get<0>(reg),
@@ -194,59 +194,59 @@ inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& 
   return result;
 }
 
-bool RaftPeerConnection::trim(vector<Entry>& entries) {
-  bool respond = entries.size() > 10;
-
+void RaftPeerConnection::trim(vector<Entry>& entries) {
   set<LogSeqNumber> segments;
 
   for (auto iter = std::begin(entries); iter != std::end(entries); ++iter) {
-    if (auto const* wal_cmd = &(iter->cmd)) {
-      if (wal_cmd->segment && std::holds_alternative<WriteOp>(wal_cmd->command) &&
-          segments.insert(wal_cmd->segment.value()).second) {
-        if (segments.size() == 3) {
-          entries.erase(iter, entries.end());
-          return respond;
-        }
-      }
-      respond = respond || std::holds_alternative<FlushOp>(wal_cmd->command);
+    auto const& cmd = iter->cmd;
+    if (cmd.segment && std::holds_alternative<WriteOp>(cmd.command) &&
+        segments.insert(cmd.segment.value()).second && segments.size() == 3) {
+      entries.erase(iter, entries.end());
+      return;
     }
   }
-  return respond;
 }
 
-void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk,
-                                      RaftRequest                  request,
-                                      bool                         respond) {
-  set_info_and_node_id(request, respond);
+void RaftPeerConnection::send_request(std::unique_lock<std::mutex> lk, RaftRequest request) {
+  set_info_and_node_id(request);
 
   last_send_ = epoch_msec();
 
   if (request.info.log)
     log(INFO, "{}{}", log_prefix(), request);
 
-  inplace_vector<asio::const_buffer, 2>     buffers;
-  inplace_vector<shared_ptr<WalSegment>, 2> segments;
-  for (auto const& block : request.data) {
-    if (auto s = segment_; s && s->lsn() == block.lsn) {
-      segments.emplace_back(std::move(s));
-      buffers.emplace_back(s->const_buffer(block.offset, block.size));
-    } else {
-      if (auto seg = server_->segment(block.lsn); seg) {
-        segments.emplace_back(std::move(seg.value()));
-        buffers.emplace_back(s->const_buffer(block.offset, block.size));
-      } else
+  // The WAL bytes, copied from the segments' mmaps: PostgreSQL keeps writing to the segments (and
+  // rewrites the last page), and the bytes sent must be the ones the frame's checksum is of.
+  auto bytes = make_shared<Bytes>();
+  if (!request.data.empty()) {
+    auto server = server_.lock();
+    if (!server)
+      return shutdown();
+
+    bytes->reserve(std::accumulate(std::begin(request.data),
+                                   std::end(request.data),
+                                   size_t{0},
+                                   [](size_t r, MemBlock const& b) { return r + b.size; }));
+    for (auto const& block : request.data) {
+      auto seg = server->segment(block.lsn);
+      if (!seg)
         return system_error(elog(seg.error(), "Unable to fetch the wal segment for {}", block.lsn));
+
+      auto const* p = seg.value()->mapping() + block.offset;
+      bytes->insert(bytes->end(), p, p + block.size);
     }
   }
-  write_data(to_data(request),
-             buffers,
-             [this, s = self(), segments = std::move(segments)](Result<void> r) {
-               if (!r)
-                 shutdown(r.error());
-             });
 
-  if (respond)
-    read_response();
+  auto buffers = inplace_vector<asio::const_buffer, 2>{};
+  if (!bytes->empty())
+    buffers.emplace_back(bytes->data(), bytes->size());
+
+  write_data(to_data(request), buffers, [this, s = self(), bytes](Result<void> r) {
+    if (!r)
+      shutdown(r.error());
+  });
+  read_response();
+
   lk.unlock();
 }
 
@@ -254,35 +254,35 @@ void RaftPeerConnection::response_handler(Result<Data> msg) {
   if (msg.has_error())
     return shutdown(msg.error());
 
-  if (auto r = from_data<RaftResponse>(std::move(msg.value())); !r)
+  auto r = from_data<RaftResponse>(msg.value());
+  if (!r)
     return shutdown(r.error());
-  else {
-    /// The request was sent by the server with the following term.
-    update_response_seq(r.value());
 
-    RaftTerm   request_term = r.value().info.request_term;
-    RaftTerm   current_term = r.value().term;
-    RaftNodeId node_id      = r.value().node_id;
+  /// The request was sent by the server with the following term.
+  update_response_seq(r.value());
 
-    assert(node_id == peer_id());
+  RaftTerm   request_term = r.value().info.request_term;
+  RaftTerm   current_term = r.value().term;
+  RaftNodeId node_id      = r.value().node_id;
 
-    if (r.value().info.log) {
-      log(INFO, "{}{}", log_prefix(), r.value());
-    }
+  assert(node_id == peer_id());
+  (void)node_id;
 
-    // round_trip_time = epoch_msec() - r.value().info.epoch;
+  if (r.value().info.log)
+    log(INFO, "{}{}", log_prefix(), r.value());
 
-    std::visit(
-        [this, request_term, current_term](auto&& r) {
-          if (auto lk = server_->usage_lock(); lk)
-            server_->handle_response(
-                self<RaftPeerConnection>(), request_term, current_term, std::move(r));
-        },
-        r.value().response);
-  }
+  std::visit(
+      [this, request_term, current_term](auto&& v) {
+        if (auto s = server_.lock(); s)
+          if (auto lk = s->usage_lock(); lk)
+            s->handle_response(self<RaftPeerConnection>(),
+                               request_term,
+                               current_term,
+                               std::forward<decltype(v)>(v));
+      },
+      std::move(r.value().response));
 }
 
 void RaftPeerConnection::read_response() {
-  auto handler = [this, s = self()](Result<Data> msg) mutable { response_handler(std::move(msg)); };
-  read_data(std::move(handler));
+  read_data([this, s = self()](Result<Data> msg) mutable { response_handler(std::move(msg)); });
 }

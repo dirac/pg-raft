@@ -1,5 +1,9 @@
 #include "src/raft/raft_follower_connection.h"
 
+#include "src/base/logger.h"
+
+// Ported from sparrowdb lib/servers/zqlite/raft_follower_connection.cpp.
+
 void RaftFollowerConnection::start() {
   Connection::start();
   read_request();
@@ -11,70 +15,66 @@ void RaftFollowerConnection::read_request() {
       return shutdown(msg.error());
 
     auto& [data, bytes] = msg.value();
-    if (auto r = from_data<RaftRequest>(data); r)
-      received(std::move(r.value()), std::move(bytes));
-    else
+    auto r              = from_data<RaftRequest>(data);
+    if (!r)
       return shutdown(r.error());
+
+    received(std::move(r.value()), std::move(bytes));
   });
 }
 
+bool RaftFollowerConnection::valid(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes) {
+  auto size = std::accumulate(std::begin(blocks),
+                              std::end(blocks),
+                              size_t{0},
+                              [](size_t result, MemBlock const& b) { return result + b.size; });
+  return size == bytes.size() &&
+         std::ranges::all_of(blocks, [](MemBlock const& b) {
+           return b.offset >= 0 && b.offset + static_cast<off_t>(b.size) <= kWalSegmentSize;
+         });
+}
+
 void RaftFollowerConnection::received(RaftRequest&& req, Bytes&& bytes) {
+  if (req.info.log)
+    log(INFO, "{}{}", log_prefix(), req);
+
+  if (!valid(req.data, bytes)) {
+    log(ERROR, "{}The WAL blocks do not match the {} bytes received", log_prefix(), bytes.size());
+    return shutdown(system_error_code(EBADMSG));
+  }
+
   auto [lk, server] = lock();
   if (!lk)
     return shutdown();
 
-  if (req.info.log)
-    log(INFO, "{}{}", log_prefix(), req);
+  auto const info    = req.info;
+  auto const term    = req.term;
+  auto const from_id = req.node_id;
+  auto const blocks  = req.data;
 
-  if (auto r = write(server, req.data, bytes); !r)
-    return shutdown(r.error());
-
-  auto info    = req.info;
-  auto term    = req.term;
-  auto from_id = req.node_id;
-  auto request = std::move(req.request);
-
-  std::visit(
-      [this, info, term, from_id, server](auto&& v) mutable -> void {
-        this->write_response(
-            info, from_id, server->handle_peer_request(from_id, term, std::move(v)));
+  auto response = std::visit(
+      [&](auto&& v) -> RaftResponse {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, AppendEntries> || std::is_same_v<T, InstallSnapshot>)
+          return server->handle_peer_request(from_id, term, std::move(v), blocks, bytes);
+        else
+          return server->handle_peer_request(from_id, term, std::move(v));
       },
-      std::move(request));
+      std::move(req.request));
+
+  write_response(info, std::move(response));
 }
 
-void RaftFollowerConnection::write_response(RequestResponseInfo info,
-                                            RaftNodeId,
-                                            std::optional<RaftResponse> response) {
-  assert(info.respond == response.has_value());
+void RaftFollowerConnection::write_response(RequestResponseInfo info, RaftResponse response) {
+  response.info    = info;
+  response.node_id = self_id_;
 
-  if (info.respond) {
-    response->info    = info;
-    response->node_id = self_id_;
+  if (response.info.log)
+    log(INFO, "{}{}", log_prefix(), response);
 
-    if (response->info.log)
-      log(INFO, "{}{}", log_prefix(), response);
-
-    write_data(to_data(response.value()), [this, s = self()](Result<void> r) {
-      if (!r)
-        shutdown(r.error());
-    });
-  }
+  write_data(to_data(response), [this, s = self()](Result<void> r) {
+    if (!r)
+      shutdown(r.error());
+  });
   read_request();
-}
-
-Result<void> RaftFollowerConnection::write(shared_ptr<FollowerConnectionApi> const& server,
-                                           inplace_vector<MemBlock, 2> const&       blocks,
-                                           Bytes const&                             bytes) {
-  uint8_t const* data = bytes.data();
-  for (auto const& b : blocks) {
-    if (auto r = server->segment(b.lsn); !r)
-      return elog(r.error(), "Unable to find the segment {}", b.lsn);
-    else {
-      r.value()->write(data, b.offset, b.size);
-      if (auto f = r.value()->fsync(b.offset, b.size); !f)
-        return elog(f.error(), "fsync failed for lsn={} off={} sz={}", b.lsn, b.offset, b.size);
-    }
-    data += b.size;
-  }
-  return ok();
 }

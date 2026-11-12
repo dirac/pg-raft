@@ -4,13 +4,13 @@ RaftIndex MatchIndexes::commit_index(RaftIndex const commit_idx) {
   std::unique_lock<std::mutex> lk{mtx_};
 
   tmp_.clear();
-  std::for_each(std::begin(match_indexes_), std::end(match_indexes_), [this](auto const& idx) {
+  std::ranges::for_each(match_indexes_, [this](auto const& idx) {
     tmp_.emplace_back(idx.load(std::memory_order_relaxed), 1U);
   });
-  std::sort(std::begin(tmp_), std::end(tmp_));
+  std::ranges::sort(tmp_);
 
   unsigned c = 0;
-  std::for_each(std::rbegin(tmp_), std::rend(tmp_), [&c](std::tuple<RaftIndex, unsigned>& elem) {
+  std::ranges::for_each(std::ranges::reverse_view(tmp_), [&c](std::tuple<RaftIndex, unsigned>& elem) {
     c = (std::get<unsigned>(elem) += c);
   });
 

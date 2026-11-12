@@ -15,6 +15,7 @@ char const* to_string(ErrorCode c) {
 
   switch (c) {
     TO_STR(kProgramBug);
+    TO_STR(kNotLeader);
     default:
       return "unknown error";
   }

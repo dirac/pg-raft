@@ -1,6 +1,9 @@
 #include "src/raft/peer_connection_mgr.h"
 
+#include "src/base/logger.h"
 #include "src/net/async_connect.h"
+
+// Ported from sparrowdb lib/servers/zqlite/peer_connection_mgr.cpp.
 
 PeerConnectionMgr::PeerConnectionMgr(boost::asio::io_context& io_context,
                                      RaftNodeId               self_id,
@@ -11,13 +14,15 @@ PeerConnectionMgr::PeerConnectionMgr(boost::asio::io_context& io_context,
       log_prefix_(std::format("({0}) ", INT(self_id_))),
       nodes_(static_cast<unsigned>(config.servers.size())),
       options_(options) {
+  assert(nodes_ <= last_connect_attempt_.size());
+
   for (auto i = 0U; i < nodes(); ++i) {
     connections_.emplace_back(nullptr);
-    last_connect_attempt_.at(i) = 0U;
+    last_connect_attempt_.at(i) = 0;
   }
 
   // This will prevent from connecting to self.
-  last_connect_attempt_.at(INT(self_id)).store(std::numeric_limits<unsigned>::max());
+  last_connect_attempt_.at(INT(self_id)).store(kConnecting);
 }
 
 shared_ptr<RaftPeerConnection> PeerConnectionMgr::set_connection(
@@ -53,13 +58,16 @@ void PeerConnectionMgr::close() {
                                      }
                                      return result;
                                    });
+  lk.unlock();
 
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  // Give the connections a moment to go away before reporting them; never block an IO thread.
+  if (!io_context_.get_executor().running_in_this_thread())
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   log(INFO,
-      "{} Connections hanging around {}",
-      log_prefix(),
+      "{}Connections hanging around {}",
+      log_prefix_,
       std::accumulate(
-          std::begin(weak_ptrs), std::end(weak_ptrs), 0U, [](unsigned result, auto& ptr) {
+          std::begin(weak_ptrs), std::end(weak_ptrs), 0L, [](long result, auto& ptr) {
             return result + ptr.use_count();
           }));
 }
@@ -74,40 +82,43 @@ unsigned PeerConnectionMgr::connected_peers() const {
 
   return std::accumulate(
       connections_.begin(), connections_.end(), 0U, [](unsigned result, auto const& conn) {
-        return result + ((conn && !conn->closed()) ? 1 : 0);
+        return result + ((conn && !conn->closed()) ? 1U : 0U);
       });
 }
 
 void PeerConnectionMgr::set_connection(
-    uint16_t                                            idx,
-    shared_ptr<PeerConnectionApi>                       server,
-    std::function<void(shared_ptr<RaftPeerConnection>)> on_connect,
-    Result<socket_type>                                 socket) {
+    uint16_t                                                   idx,
+    weak_ptr<PeerConnectionApi> const&                         server,
+    std::function<void(shared_ptr<RaftPeerConnection>)> const& on_connect,
+    Result<socket_type>                                        socket) {
   if (!socket) {
-    log(INFO, "{} Unable to connect to node={} error: {}", log_prefix(), idx, socket.error());
+    log(INFO, "{}Unable to connect to node={}: {}", log_prefix_, idx, socket.error().message());
     set_connection(idx, nullptr);
 
   } else {
-    log(INFO, "{} Connected to node={}", log_prefix(), idx);
-    if (auto conn =
-            set_connection(idx,
-                           Connection::create<RaftPeerConnection>(self_id_,
-                                                                  /*peer_id=*/RaftNodeId{idx},
-                                                                  server,
-                                                                  std::move(socket.value()),
-                                                                  options_));
-        conn) {
+    log(INFO, "{}Connected to node={}", log_prefix_, idx);
+
+    auto created =
+        Connection::create<RaftPeerConnection>(self_id_,
+                                               /*peer_id=*/RaftNodeId{idx},
+                                               server,
+                                               std::move(socket.value()),
+                                               std::chrono::seconds(options_.connection_timeout_secs),
+                                               options_);
+
+    if (auto conn = set_connection(idx, created); conn)
       on_connect(conn);
-    }
+    else
+      created->close();
   }
 }
 
-void PeerConnectionMgr::reconnect(shared_ptr<PeerConnectionApi>                       server,
+void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi> const&                  server,
                                   Config const&                                       config,
                                   std::function<void(shared_ptr<RaftPeerConnection>)> on_connect) {
   auto connections = get_connections();
 
-  for (uint16_t idx = 0U; idx < connections.size(); ++idx) {
+  for (size_t idx = 0U; idx < connections.size(); ++idx) {
     if (INT(self_id_) == idx)
       continue;
 
@@ -115,18 +126,21 @@ void PeerConnectionMgr::reconnect(shared_ptr<PeerConnectionApi>                 
     if (conn && !conn->closed())
       continue;
 
-    auto last_connect = last_connect_attempt_.at(idx).load();
-    if ((last_connect == 0 || (last_connect + options().reconnect_interval < epoch_msec())) &&
-        last_connect_attempt_.at(idx).compare_exchange_strong(
-            last_connect, std::numeric_limits<unsigned>::max())) {
-      log(INFO, "{} Connecting to node={} last try @ {}", log_prefix(), idx, last_connect);
+    auto       last_connect = last_connect_attempt_.at(idx).load();
+    auto const due          = last_connect == 0 ||
+                     (last_connect != kConnecting &&
+                      last_connect + options().reconnect_interval_msecs < epoch_msec());
+    if (due && last_connect_attempt_.at(idx).compare_exchange_strong(last_connect, kConnecting)) {
+      log(INFO, "{}Connecting to node={} last try @ {}", log_prefix_, idx, last_connect);
 
       async_connect(io_context(),
-                    std::format("Raft:{}", self_id_),
-                    HostAddress{.address = config.servers.at(idx).hostname,
-                                .port    = config.servers.at(idx).ha_port},
+                    raft_identity(self_id_),
+                    HostAddress{
+                        .address = config.servers.at(idx).hostname,
+                        .port    = config.servers.at(idx).ha_port,
+                    },
                     [this, s = self(), idx, server, on_connect](Result<socket_type> socket) {
-                      set_connection(idx, server, std::move(on_connect), std::move(socket));
+                      set_connection(static_cast<uint16_t>(idx), server, on_connect, std::move(socket));
                     });
     }
   }
@@ -136,23 +150,9 @@ unsigned PeerConnectionMgr::post(std::function<void(shared_ptr<RaftPeerConnectio
   unsigned closed = 0;
 
   auto connections = get_connections();
-  for (uint16_t idx = 0U; idx < connections.size(); ++idx) {
-    auto& conn = connections.at(idx);
+  for (auto& conn : connections) {
     if (conn && !conn->closed())
-      ::boost::asio::post(io_context(), [conn, func]() { func(conn); });
-    else
-      ++closed;
-  }
-  return nodes() - closed;
-}
-unsigned PeerConnectionMgr::for_each(std::function<void(shared_ptr<RaftPeerConnection>&)> func) {
-  unsigned closed = 0;
-
-  auto connections = get_connections();
-  for (uint16_t idx = 0U; idx < connections.size(); ++idx) {
-    auto& conn = connections.at(idx);
-    if (conn && !conn->closed())
-      func(conn);
+      ::boost::asio::post(io_context(), [conn, func] { func(conn); });
     else
       ++closed;
   }

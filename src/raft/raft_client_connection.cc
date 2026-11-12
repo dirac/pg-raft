@@ -1,5 +1,7 @@
 #include "src/raft/raft_client_connection.h"
 
+#include "src/base/logger.h"
+
 uint8_t RaftClientConnection::status() const {
   uint8_t x = 0;
   if (auto s = server_.lock(); s) {
@@ -19,15 +21,15 @@ void RaftClientConnection::read_request() {
     if (!msg)
       return shutdown(msg.error());
 
-    Bytes bytes;
-    if (auto r = from_data<ClientRequest>(std::move(msg.value())); r)
-      std::visit([this](auto&& v) { received(server_.lock(), v); }, r.value());
-    else
+    auto r = from_data<ClientRequest>(msg.value());
+    if (!r)
       return shutdown(r.error());
+
+    std::visit([this](auto&& v) { received(server_.lock(), std::move(v)); }, std::move(r.value()));
   });
 }
 
-void RaftClientConnection::received(shared_ptr<ClientConnectionApi> s, StatusRequest) {
+void RaftClientConnection::received(shared_ptr<ClientConnectionApi> const& s, StatusRequest) {
   if (!s)
     return shutdown();
 
@@ -38,24 +40,47 @@ void RaftClientConnection::received(shared_ptr<ClientConnectionApi> s, StatusReq
                  .standby_applied_lsn = s->standby_applied_lsn(),
              }),
              [this, _ = self()](Result<void> r) {
-               if (r)
-                 read_request();
-               else
+               if (!r)
                  shutdown(r.error());
              });
+  read_request();
 }
 
-void RaftClientConnection::received(shared_ptr<ClientConnectionApi> s, SnapshotRequest req) {
+void RaftClientConnection::received(shared_ptr<ClientConnectionApi> const& s,
+                                    SnapshotRequest                        req) {
   if (!s)
     return shutdown();
 
+  // A server that has not applied what the requester has cannot give it a newer backup.
   if (req.applied_idx > s->applied_idx()) {
     write_data(to_data(SnapshotResponse{.success = false, .files = {}, .links = {}}),
                [this, _ = self()](Result<void> r) {
-                 if (r)
-                   read_request();
-                 else
+                 if (!r)
                    shutdown(r.error());
                });
+    return read_request();
   }
+
+  s->backup(std::move(req),
+            [this, _ = self()](SnapshotResponse response, vector<std::filesystem::path> files) {
+              if (!response.success)
+                files.clear();
+              assert(files.size() == response.files.size());
+
+              write_data(to_data(response), [this, _ = self()](Result<void> r) {
+                if (!r)
+                  shutdown(r.error());
+              });
+              send_files(std::move(files));
+            });
+}
+
+void RaftClientConnection::send_files(vector<std::filesystem::path> files) {
+  // The writes are queued in order; the next request is read once the files are queued.
+  for (auto& file : files)
+    write_file(std::move(file), [this, _ = self()](Result<void> r) {
+      if (!r)
+        shutdown(r.error());
+    });
+  read_request();
 }

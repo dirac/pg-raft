@@ -4,7 +4,8 @@
 #include "src/net/connection.h"
 #include "src/raft/client_types.h"
 
-/// A raft server creates a connection to the Raft Server. The other end if RaftClientConnection.
+/// A client's connection to a raft server (the proxy, or a raft server fetching a backup). The
+/// other end is a RaftClientConnection.
 class RaftServerConnection : public Connection {
  public:
   RaftServerConnection(string const&             self,
@@ -13,12 +14,14 @@ class RaftServerConnection : public Connection {
                        socket_type               socket)
       : Connection(std::format("{}:{}", self, INT(node_id)), std::move(socket), timeout),
         id_(node_id),
-        leader_(false) {}
+        leader_(0) {}
 
   void close() { shutdown(); }
 
-  void set_peer_status(uint8_t l) final { set_leader(l ? true : false); }
+  /// The status byte of the server's heartbeat responses (see RaftClientConnection::status()).
+  void set_peer_status(uint8_t l) final { set_leader(l); }
 
+  /// Request a status round-trip; the check is called with (is_leader(), is_serving()).
   void async_leadership_check(std::function<void(Result<std::tuple<bool, bool>>)> check) {
     {
       auto lk = std::unique_lock{leadership_checks_mtx_};
@@ -35,26 +38,29 @@ class RaftServerConnection : public Connection {
 
   RaftNodeId node_id() const { return id_; }
 
+  /// The status of the server (waits up to 2 seconds).
   Result<StatusResponse> node_status();
 
-  Result<bool> backup(std::filesystem::path dir);
+  /// A backup of the server's PostgreSQL instance, written into dir (which must not exist). Fails
+  /// if the server refuses (see SnapshotRequest::applied_idx).
+  Result<void> backup(std::filesystem::path const& dir, RaftIndex applied_idx);
 
- protected:
-  virtual void set_leader(Result<bool> v) {
-    bool new_v = v && v.value();
-    bool old_v = leader_.exchange(new_v, std::memory_order_relaxed);
+ private:
+  void set_leader(uint8_t v) {
+    uint8_t old_v = leader_.exchange(v, std::memory_order_relaxed);
 
-    if (old_v != new_v)
-      log(INFO, "Leadership for {}  changed from {} to {}", id_, old_v, new_v);
+    if (old_v != v)
+      log(INFO, "Leadership for {} changed from {} to {}", id_, old_v, v);
 
     std::unique_lock<std::mutex> lk{leadership_checks_mtx_};
-    std::for_each(std::begin(leadership_checks_), std::end(leadership_checks_), [this](auto& c) {
-      c(std::make_tuple(is_leader(), is_serving()));
-    });
+    std::ranges::for_each(leadership_checks_,
+                          [this](auto& c) { c(std::make_tuple(is_leader(), is_serving())); });
     leadership_checks_.clear();
   }
 
- private:
+  /// Read the next message (waits up to timeout).
+  Result<Data> read(std::chrono::seconds timeout);
+
   RaftNodeId const id_;
 
   std::atomic<uint8_t> leader_;

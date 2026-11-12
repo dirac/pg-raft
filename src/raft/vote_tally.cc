@@ -28,14 +28,14 @@ std::tuple<unsigned, unsigned> VoteTally::votes_tally() const {
                           [](unsigned cnt, bool v) -> unsigned { return cnt + (v ? 1U : 0U); })};
 }
 
-void VoteTally::clear(RaftNodeId node, RaftTerm term) {
+void VoteTally::clear(RaftNodeId self_id, RaftTerm term) {
   std::unique_lock<std::mutex> lk{mtx_};
 
   votes_granted_   = all_false_;
   responses_recvd_ = all_false_;
 
-  responses_recvd_.at(INT(node)) = true;
-  votes_granted_.at(INT(node))   = true;
+  responses_recvd_.at(INT(self_id)) = true;
+  votes_granted_.at(INT(self_id))   = true;
 
   term_ = term;
 }
