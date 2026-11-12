@@ -11,8 +11,8 @@ Raft followers, and admin clients all use it. It provides:
 
 - Delivery of **typed messages** (Boost.Serialization objects), in order, over a long-lived
   connection. Each message is checksummed.
-- **Attached buffers**: raw bytes sent right after a message without copying them first. Raft
-  uses this to send WAL straight out of an mmap'd segment.
+- **Attached buffers**: raw bytes sent right after a message without copying them into the
+  `Data`. Raft uses this to send WAL bytes alongside its requests.
 - **Bulk file transfer** that streams from disk to disk, with a checksum on every chunk. It is
   used for snapshots and backups.
 - **Liveness**: heartbeats ("status requests"), and closing a connection when nothing has been
@@ -119,7 +119,8 @@ entry, posts the user's handler, and continues with the next token.
 
 - **Data**: the header, the `Data` pages, and the attached buffers (up to two) go out in **one
   gather `async_write`**. The caller must keep the attached buffers alive until the handler runs.
-  `RaftPeerConnection` captures the `shared_ptr<WalSegment>` for this.
+  `RaftPeerConnection` copies the WAL bytes out of the segment mmap into a `shared_ptr<Bytes>`
+  and captures it in the handler (see [raft.md](raft.md#22-wal-payload-memblock)).
 - **File**: open it, `fstat` it for the size, write the header, then send checksummed 64 KiB
   chunks.
 - **Status**: a status message is inserted at position 1 of `write_queue_`. It goes out right

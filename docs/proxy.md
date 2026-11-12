@@ -125,10 +125,10 @@ when the proxy does.
 
 ## 6. Open items
 
-1. **Raft dependency.** `RaftServerConnection` and `RaftClientConnection` are in `src/raft`,
-   which is not built yet. The proxy needs at least the `raft_client` library
-   (`raft_server_connection.cc`, already a separate target in `raft/Jamfile.jam`) to build, and
-   the node side (`RaftClientConnection::status()`) to be live.
+1. **Raft dependency.** `RaftServerConnection` and `RaftClientConnection` are in `src/raft`. The
+   proxy links the `raft_client` library (`raft_server_connection.cc`, a separate target in
+   `raft/Jamfile.jam`), and needs the node process to be running for
+   `RaftClientConnection::status()` to report a serving leader.
 2. **Admin interface** on `proxy_http_port` (status, current primary). Not designed yet.
 3. **Failover window and timeouts**: the hold time when there is no primary, and the upstream
    connect timeout.

@@ -90,8 +90,8 @@ least 2-byte aligned, which is asserted. A real fd never has bit 63 set.
   at least 5 s. If more than 5 mappings remain, it also drops every mapping with `ref==0`.
 - `fsync(off, size)` rounds the range out to whole pages and calls `msync(MS_SYNC)`.
 - `write(buf, off, size)` is a plain `memcpy`. A Raft follower uses it to apply received WAL
-  bytes. `const_buffer(off, size)` gives a zero-copy view that the Raft leader uses to send WAL
-  bytes.
+  bytes. `const_buffer(off, size)` gives a zero-copy view of the mapping. The Raft leader does
+  not send from it: it copies the bytes first, because PostgreSQL may rewrite them mid-send.
 - `WalTracker` has two virtual hooks. Their default implementations are a no-op publish and a
   plain local `msync`:
   - `async_publish(segment, off, size)`

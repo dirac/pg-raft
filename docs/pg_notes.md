@@ -640,7 +640,7 @@ connection.
 > CopyData frame". The cap is 128 KiB. A chat also answered "are page headers sent?" by talking
 > about *data*-page headers. WAL page headers are always part of the physical stream.
 
-> **pg-raft:** `WalSender` streams straight from the segment mmap using the same rule. Send only
+> **pg-raft:** `WalSender` reads the segment files with `pread` and follows the same rule. Send only
 > up to the FUSE-observed **fsynced** LSN (`advance(flush_lsn)`), never up to merely written
 > bytes. Otherwise a standby could receive WAL that the primary later loses in a crash.
 

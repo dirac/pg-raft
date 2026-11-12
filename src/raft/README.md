@@ -2,7 +2,7 @@
 
 Raft over the WAL stream. The primary's WAL writes and fsyncs become log entries, and the WAL bytes
 travel with them to the followers, so that a commit is acknowledged only once its WAL is durable
-on a majority. See `docs/design/raft.md` for the full design.
+on a majority. See `docs/raft.md` for the full design.
 
 ## Entries and state
 

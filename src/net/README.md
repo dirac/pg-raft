@@ -1,7 +1,7 @@
 # net
 
 Async framed messaging on Boost.Asio, between raft servers and between clients (the proxy) and
-raft servers. See `docs/design/net.md` for the full design.
+raft servers. See `docs/net.md` for the full design.
 
 ## Sockets (`socket.h`)
 

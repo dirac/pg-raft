@@ -11,7 +11,7 @@ way, and the known gaps.
 | `status` | [status.md](status.md) | Implemented, tested |
 | `wal_fuse` | [wal_fuse.md](wal_fuse.md) | Implemented, tested |
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
-| `raft` | [raft.md](raft.md) | Partially implemented; not in the top-level build |
+| `raft` | [raft.md](raft.md) | Implemented, tested; not yet wired into a node |
 | `node` | [node.md](node.md) | Designed; not started |
 | `proxy` | [proxy.md](proxy.md) | Designed; not started (empty directory) |
 
@@ -73,8 +73,8 @@ base  ◀── net ◀── raft
   └── wal_sender
 ```
 
-`base` depends on nothing in this repo. Only `raft` pulls the layers together, and it is the only
-module that is not yet built (see [raft.md](raft.md#build-status)).
+`base` depends on nothing in this repo. Only `raft` pulls the layers together. The node process
+that wires it to the other modules is not written yet (see [node.md](node.md)).
 
 ## Cross-cutting conventions
 

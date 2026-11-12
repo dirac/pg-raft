@@ -119,7 +119,8 @@ hooks, and the node reacts.
 ### 3.1 Hooks and the node strand
 
 `RaftApplier` is renamed `RaftObserver`, since it is no longer only about applied entries, and
-gains two hooks:
+gains two hooks. (The rename is part of this work; the code and the other docs still say
+`RaftApplier`.)
 
 ```cpp
 struct RaftObserver {
@@ -279,7 +280,7 @@ SELECT CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_current_wal_flush_lsn()::
 The result goes to:
 
 - `RaftServer::set_pg_status()`, which reports it in `StatusResponse`;
-- on the leader, `NodeWalTracker`, as the `flushed_lsn` of the commands it appends (§2.1);
+- on the leader, `NodeWalTracker`, as the `flushed_lsn` of the commands it appends (§2.1).
 
 ## 6. Shutdown
 

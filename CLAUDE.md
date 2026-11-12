@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
 4. **Raft** (`raft`) — consensus over the WAL stream. `src/proxy/` is empty.
 
-Per-component design documents are in `docs/design/` (one per module, plus `README.md`).
+Per-component design documents are in `docs/` (one per module, plus `README.md`).
 
 ## Build system
 
@@ -110,7 +110,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 - **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
 - **`SemaphoreLock`** (`semaphore_lock.h`) — RAII guard for `std::binary_semaphore`, analogous to `std::unique_lock`. Constructor does a non-blocking `try_acquire`; call `acquire()` to block if needed. `owns()` / `operator bool()` test ownership. Explicit `release()` available before destruction.
 
-**`src/net/`** — Async framed messaging on Boost.Asio. No TLS setup yet (no certificates in `base`), `std::function` callbacks, `from_data` returns `Result<T>`, and up to two attached buffers per message. See `docs/design/net.md`.
+**`src/net/`** — Async framed messaging on Boost.Asio. No TLS setup yet (no certificates in `base`), `std::function` callbacks, `from_data` returns `Result<T>`, and up to two attached buffers per message. See `docs/net.md`.
 
 - **`socket.h`** — `tcp_socket` / `ssl_socket` wrappers that serialize socket calls with a mutex and count reads (`counter()`). `socket_type = std::variant<tcp_socket, ssl_socket>`; keep the `ssl_socket` alternative so TLS can be enabled later (nothing creates one yet).
 - **`Connection`** — Framed-message connection. Every frame has a 6-word little-endian header (magic `0xDEADBEEF`, frame counter, kind/sizes, xxhash32 checksums). `write_data(Data, {buf0, buf1}, handler)` / `write_data(Data, handler)` send a message plus up to two attached buffers (caller keeps them alive until the handler runs); `read_data_and_buff(handler)` receives `Result<tuple<Data, Bytes>>` (attached bytes concatenated), `read_data(handler)` receives messages without attached bytes. `read_file()` / `write_file()` stream files in 64 KiB chunks, each xxhash32-checked. Checksum mismatches close the connection with `EBADMSG`. All calls are thread-safe and callbacks are posted. With a timeout, a status request goes out every `clamp(timeout/10, 100 ms, 1 s)` and the connection closes with `ETIMEDOUT` if the socket read counter stops moving (`timeout_and_times()`). `status()` / `set_peer_status()` carry a one-byte peer status on heartbeats. `write_test_delay()` delays writes 5 s (tests). Instantiate via `Connection::create<DerivedType>(...)`, which calls `start()` (once). Override `on_shutdown()` to clean up.
@@ -154,7 +154,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 Two additional executables live in `src/wal_fuse/` but are not part of any test suite: `debug_wal_ops` (interactive WAL operation debugger) and `wal_fuse_bench` (microbenchmark for FUSE throughput). Build them with `/opt/pg_raft/bin/b2 src/wal_fuse//debug_wal_ops` or `//wal_fuse_bench`.
 
-**`src/raft/`** — Raft over the WAL stream. Built and tested. See `docs/design/raft.md`.
+**`src/raft/`** — Raft over the WAL stream. Built and tested. See `docs/raft.md`.
 
 - **Entries** (`raft_types.h`, `wal_types.h`): `Entry{time, term, WalCommand}`. The primary generates the `WalCommand`s itself (`WriteOp`/`FlushOp`/... on a segment, plus its `flushed_lsn`); a tick entry has a `monostate` command. A `RaftRequest` carries up to two `MemBlock`s, whose WAL bytes follow the request as an attached buffer. `send_request` copies them out of the mmap, because PostgreSQL keeps writing to the segment and the frame checksum must match.
 - **`RaftState`** (`raft_state.h`, the state machine): `log_idx`, `timestamp`, committed `flushed_lsn`, `needs_backup`. `RaftApplier::applied()` / `installed()` notify the node (for example to advance the WalSender).
@@ -164,7 +164,7 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 - **Connections**: `RaftPeerConnection` (outbound, identity `Raft:<id>`), `RaftFollowerConnection` (inbound), `PeerConnectionMgr`, and `RaftClientConnection` / `RaftServerConnection` for the client channel (`client_types.h`: `StatusRequest`; `SnapshotRequest` → `SnapshotResponse` followed by the backup files; used by the proxy and by nodes that need a backup).
 - **Tests**: `raft_log_test`; `raft_ensemble_{sanity,leader_stopped,stepdown,snapshot}_test` run in-process ensembles (`RaftTestService`) with a `Writer` that plays the primary, checked by `check_consistency` (log matching, states, WAL bytes of every acknowledged write).
 
-**`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/design/proxy.md`.
+**`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/proxy.md`.
 
 **`src/status/`** — PostgreSQL client for querying a running instance:
 

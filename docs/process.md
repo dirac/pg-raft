@@ -79,8 +79,8 @@ The default HBA trusts loopback and requires `scram-sha-256` everywhere else.
 - `stop(mode, timeout)` sends `SIGTERM` (Smart), `SIGINT` (Fast), or `SIGQUIT` (Immediate),
   polls for the process to exit, and sends `SIGKILL` after `timeout`.
 - `reload()` sends `SIGHUP`.
-- `promote()` sends `SIGUSR1` and sets `role_ = kPrimary`. PostgreSQL 17 promotes on SIGUSR1
-  when the promote trigger is configured. See open item 1.
+- `promote()` sends `SIGUSR1` and sets `role_ = kPrimary`. SIGUSR1 alone does **not** promote
+  PostgreSQL ≥ 12: the postmaster also needs a `promote` file in PGDATA. See open item 1.
 
 ### Backup, verify, and restore
 

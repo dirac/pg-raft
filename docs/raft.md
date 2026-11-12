@@ -200,8 +200,10 @@ entries inherited from earlier leaders have no handler.
 | Follower `RaftApplier::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
 | Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, and `set_backup_provider(...)` backed by `PgInstance::backup`/`verify_backup` |
 
-`RaftServer::segment(lsn)` opens segments in `raft_dir/pg_wal`, the same directory the FUSE mount
-backs, through one `WalSegmentCache`. On a follower it creates a missing segment, zero-filled.
+`RaftServer::segment(lsn)` opens segments in the server's `wal_dir` through one
+`WalSegmentCache`, and creates a missing segment, zero-filled. In the node design `wal_dir` is
+`raft/wal`, separate from the FUSE backing directory `pg/pg_wal` (see
+[node.md](node.md#directory-layout)).
 
 ## 5. Concurrency
 
