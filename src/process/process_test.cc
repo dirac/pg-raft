@@ -133,3 +133,21 @@ BOOST_AUTO_TEST_CASE(kill_group_kills_descendants, *boost::unit_test::timeout(60
   }
   BOOST_TEST(gone);
 }
+
+// A child inherits only stdin, stdout and stderr: not the parent's other descriptors (a node's raft
+// sockets must not live on in PostgreSQL).
+BOOST_AUTO_TEST_CASE(descriptors_are_not_inherited, *boost::unit_test::timeout(60)) {
+  IoThreads threads{1};
+  int       fds[2];
+  BOOST_REQUIRE(::pipe(fds) == 0);  // without O_CLOEXEC
+
+  LineCapture p("/bin/sh",
+                {"-c", std::format("test -e /dev/fd/{} && echo inherited || echo closed", fds[0])});
+  BOOST_REQUIRE(p.start());
+  BOOST_TEST(p.wait() == 0);
+  BOOST_REQUIRE(p.out.size() == 1U);
+  BOOST_TEST(p.out.at(0) == "closed");
+
+  ::close(fds[0]);
+  ::close(fds[1]);
+}

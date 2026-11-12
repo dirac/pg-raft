@@ -57,6 +57,15 @@ bool Process::start() {
     close(out_fds[1]);
     close(err_fds[1]);
 
+    // Nothing else is inherited: the parent's sockets (raft's listening port and connections,
+    // asio's are not close-on-exec on macOS) would otherwise live on in the child, and in a
+    // PostgreSQL that outlives the node, keep its ports bound.
+    auto max_fd = sysconf(_SC_OPEN_MAX);
+    if (max_fd < 0 || max_fd > 65536)
+      max_fd = 65536;
+    for (int fd = STDERR_FILENO + 1; fd < max_fd; ++fd)
+      close(fd);
+
     std::vector<char const*> argv;
     argv.push_back(executable_.c_str());
     for (auto const& arg : args_)

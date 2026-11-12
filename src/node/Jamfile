@@ -2,12 +2,16 @@ alias deps
   : ../base//libs
     ../backup//libs
     ../raft//libs
+    ../wal_fuse//libs
+    ../wal_sender//wal_sender
+    ../status//status
     ../process//process
     ../..//external
   ;
 
 lib node
   : init.cc
+    node.cc
     node_wal_tracker.cc
     deps
   ;
@@ -22,6 +26,11 @@ exe pg_raft_initdb
     libs
   ;
 
+exe pg_raft_node
+  : pg_raft_node.cc
+    libs
+  ;
+
 unit-test init_test
   : init_test.cc
     libs
@@ -33,5 +42,11 @@ unit-test node_wal_tracker_test
   : node_wal_tracker_test.cc
     libs
     ../raft//raft_test
+    ../base//testing
+  ;
+
+unit-test node_test
+  : node_test.cc
+    libs
     ../base//testing
   ;

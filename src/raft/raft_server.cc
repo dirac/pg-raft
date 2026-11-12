@@ -852,8 +852,10 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
       if (!log_term)
         return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
 
-      if (nth == 0) {
-        conn->set_next_idx(idx, lk);
+      if (nth == 0 || idx == RaftIndex{1}) {
+        // Probe from idx next. Not below 1: the (0, 0) sentinel at index 0 is in every log, so
+        // prev_log_idx = 0 always matches (next_idx = 0 would make prev_log_idx underflow).
+        conn->set_next_idx(std::max(idx, RaftIndex{1}), lk);
         return conn->send_append_entries(
             std::move(lk), raft_log(), leadership_term(), commit_idx());
       }

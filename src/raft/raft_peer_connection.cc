@@ -138,6 +138,16 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
 
   auto [idx, entries] = std::move(r.value());
 
+  // On a log shorter than snapshot_entries, the (0, 0) sentinel at index 0 comes last (the entries
+  // are the last first): it is in every log and is not sent, so log_idx below is at least 0.
+  if (entries.size() > INT(idx))
+    entries.resize(INT(idx));
+  if (entries.empty()) {
+    // Nothing but the sentinel: the follower matches at index 0.
+    next_idx_ = RaftIndex{1};
+    return send_append_entries(std::move(lk), rlog, leadership_term, RaftIndex{0});
+  }
+
   // The latest entries (the last first) that write to at most two segments.
   trim(entries);
   std::ranges::reverse(entries);

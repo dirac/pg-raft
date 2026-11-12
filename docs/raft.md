@@ -287,3 +287,9 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 5. `set_wal_keep_from(LogSeqNumber)` for compaction (replacing `keep_old_logs`), and
    InstallSnapshot from the **oldest** entries (2 segments) instead of the latest
    `snapshot_entries` (decision 7 in [node.md](node.md#10-open-decisions)).
+6. **Fixed (found by `node_test`):** on a short log the leader's walk-back could set
+   `next_idx = 0`, so the next AppendEntries had `prev_log_idx = 0 - 1` and became an
+   InstallSnapshot; and `send_install_snapshot` counted the `(0, 0)` sentinel as an entry, so
+   `log_idx` underflowed and the follower installed an empty log, then aborted on `MDB_NOTFOUND`.
+   The walk-back now stops at index 1 (the sentinel matches in every log), and the snapshot drops
+   the sentinel (and falls back to AppendEntries from 1 if nothing else is left).
