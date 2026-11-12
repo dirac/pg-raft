@@ -7,15 +7,17 @@ agreed design.
 
 The proxy gives clients fixed addresses for the PostgreSQL servers:
 
-- **`proxy_pg_port`** (default 5432) always reaches the current **primary**, which is the Raft
-  leader. Clients connect there for normal use and follow failovers without reconfiguration.
+- **`proxy_pg_port`** (default 5432) always reaches the **PostgreSQL running on the Raft
+  primary (leader) server**: `servers[i].hostname : servers[i].pg_port`, where `i` is the node
+  Raft reports as leader. Clients connect there for normal use and follow failovers without
+  reconfiguration.
 - **`proxy_pg_port + 1 + i`** reaches **`servers[i]`** directly, whatever its role (5433 →
   server 0, 5434 → server 1, …). This is for administration, monitoring, and reading from a
   specific standby on purpose.
 
 | Proxy port | Target |
 |---|---|
-| `proxy_pg_port` | the current primary |
+| `proxy_pg_port` | `servers[leader].hostname : servers[leader].pg_port`, the PostgreSQL on the Raft leader node |
 | `proxy_pg_port + 1` | `servers[0].hostname : servers[0].pg_port` |
 | `proxy_pg_port + 2` | `servers[1].hostname : servers[1].pg_port` |
 | … | … |
@@ -42,7 +44,7 @@ client ──▶ downstream socket ─┐                 ┌─▶ upstream soc
 
 1. **Accept** the client on the downstream socket.
 2. **Pick the target.** For a per-server port the target is fixed. For the primary port it is the
-   current primary (§4).
+   PostgreSQL on the current Raft leader node (§4).
 3. **Connect upstream** asynchronously to `hostname:pg_port`. If the connection fails, close
    the client socket.
 4. **Pump both directions**, as in Partow's design:
@@ -94,7 +96,8 @@ so heartbeats are frequent: one every `clamp(timeout/10, 100 ms, 1 s)`.
   - `0x0`: not the leader.
 - `RaftServerConnection::set_peer_status` stores the byte. `is_leader()` and `is_serving()` read
   it, and both return false once the connection is closed.
-- **The primary is the one node whose connection reports `is_serving()`.** If none does, or if
+- **The primary is the one node whose connection reports `is_serving()`.** The proxy connects to
+  the PostgreSQL on that node, at its `hostname:pg_port`. If no node reports serving, or if
   more than one does during a transition, there is no primary, and the proxy holds new
   connections as described above.
 - When accepting on the primary port, the proxy uses the cached state if it is no older than one
