@@ -1,0 +1,20 @@
+alias deps
+  : ../base//libs
+  ;
+
+lib backup
+  : backup_store.cc
+    dir_backup_store.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    backup
+  ;
+
+unit-test backup_store_test
+  : backup_store_test.cc
+    libs
+    ../base//testing
+  ;

@@ -1,8 +1,10 @@
-# `backup` — PostgreSQL backup store (design, not yet implemented)
+# `backup` — PostgreSQL backup store
 
-Source: `src/backup/` (to be written). The store holds the PostgreSQL backups of one cluster. A
-node restores from it when it has no usable data directory: at bootstrap, when it joins, or
-after an InstallSnapshot (`needs_backup`). See [node.md](node.md#4-bootstrap-joining-and-backups).
+Source: `src/backup/` — `backup_store.{h,cc}`, `dir_backup_store.{h,cc}`, `backup_store_test.cc`.
+
+The store holds the PostgreSQL backups of one cluster. A node restores from it when it has no
+usable data directory: at bootstrap, when it joins, or after an InstallSnapshot
+(`needs_backup`). See [node.md](node.md#4-bootstrap-joining-and-backups).
 
 ## 1. Interface
 
@@ -12,60 +14,47 @@ touching the node:
 ```cpp
 struct BackupInfo {
   LogSeqNumber lsn;   // the backup's end LSN: a restore is consistent from here
-  std::time_t  time;  // when the backup was started (seconds since the epoch)
+  std::time_t  time;  // when the backup was started
   RaftNodeId   node;  // the index of the node that took it
-  string       name;  // derived from lsn, time and node, see §2
+  string name() const;              // see §2; parse_backup_name() is the inverse
 };
 
-/// A backup that has been started but not stored yet: a lease the node refreshes (§4.2).
-struct PendingBackup {
-  RaftNodeId  node;       // the node taking it; at most one pending backup per node
-  std::time_t started;    // when it was started
-  std::time_t refreshed;  // when the node last refreshed it
+struct PendingBackup {              // a lease, at most one per node (§4.2)
+  RaftNodeId  node;
+  std::time_t started;              // the time of the backup's name
+  std::time_t refreshed;            // when the node last refreshed it
 };
 
 class BackupStore {
  public:
-  virtual ~BackupStore() = default;
-
-  /// Announce a backup that |node| starts at |time|, before running pg_basebackup, so that the
-  /// other nodes see it in pending() and don't start one too. Replaces any marker |node| left.
   virtual Result<PendingBackup> begin(RaftNodeId node, std::time_t time) = 0;
-
-  /// Refresh the marker while the backup runs (§4.2).
-  virtual Result<void> refresh(PendingBackup const& pending, std::time_t time) = 0;
-
-  /// Store the backup in |dir| (a data directory, including its pg_wal) under the name of
-  /// (|lsn|, |pending.started|, |pending.node|), and remove the pending marker. Atomic: latest()
-  /// and list() never return a backup that is only partly stored.
-  virtual Result<BackupInfo> put(PendingBackup const&         pending,
-                                 std::filesystem::path const& dir,
-                                 LogSeqNumber                 lsn) = 0;
-
-  /// Remove the pending marker of |node|: a backup that failed, or one a restarted node left.
-  virtual Result<void> abort(RaftNodeId node) = 0;
-
-  /// The backups that have been started and not yet stored or aborted.
-  virtual Result<vector<PendingBackup>> pending() = 0;
-
-  /// The backup with the highest LSN, or nullopt if the store is empty.
-  virtual Result<std::optional<BackupInfo>> latest() = 0;
-
-  /// Copy the backup into |dest| (an empty directory).
-  virtual Result<void> get(BackupInfo const& backup, std::filesystem::path const& dest) = 0;
-
-  /// All the complete backups, in LSN order.
-  virtual Result<vector<BackupInfo>> list() = 0;
-
+  virtual Result<void>          refresh(PendingBackup& pending, std::time_t time) = 0;
+  virtual Result<BackupInfo>    put(PendingBackup const& pending, path const& dir,
+                                    LogSeqNumber lsn) = 0;   // atomic
+  virtual Result<void>          abort(RaftNodeId node) = 0;
+  virtual Result<vector<PendingBackup>> pending() const = 0;
+  virtual Result<vector<BackupInfo>>    list() const = 0;    // complete backups, oldest first
+  Result<std::optional<BackupInfo>>     latest() const;      // list().back()
+  virtual Result<void> get(BackupInfo const& backup, path const& dest) const = 0;
   virtual Result<void> remove(BackupInfo const& backup) = 0;
 };
+
+// Scheduling (§4) and retention (§5), pure functions:
+struct BackupPolicy { seconds interval; uint64_t wal_size; seconds pending_timeout; };
+bool backup_due(BackupPolicy const&, unsigned index, unsigned nodes,
+                optional<BackupInfo> const& latest, time_t now, LogSeqNumber wal_end);
+bool pending_blocks(BackupPolicy const&, vector<PendingBackup> const&, RaftNodeId self,
+                    time_t now);
+LogSeqNumber keep_from(BackupInfo const& latest);
 ```
+
+See `src/backup/backup_store.h` for the full comments.
 
 Implementations:
 
 | Class | Storage | State |
 |---|---|---|
-| `DirBackupStore(root)` | One subdirectory of `root` per backup | Phase 1 |
+| `DirBackupStore(root)` | One subdirectory of `root` per backup | Implemented, tested |
 | `S3BackupStore` | One key prefix per backup in a bucket | Later |
 
 ## 2. Naming
@@ -112,7 +101,8 @@ root/
   marker. The rename is the commit: names starting with `.` are never listed as backups.
 - `latest` lists `root`, ignores dot entries, and returns the largest name.
 - `get` copies `<name>` into `dest` (`rsync -a`, like `PgInstance::restore`).
-- Leftover `.tmp-*` directories belong to a node that crashed; the next `begin` removes them.
+- A leftover `.tmp-*` directory belongs to a node that crashed; that node's next `begin` or
+  `abort` removes it. Other nodes leave it alone: it may be a `put` still copying.
   Stale markers are handled by the lease (§4.2).
 
 `root` comes from `config.toml` (`backup_store = "/path"`); an `s3://bucket/prefix` URL would

@@ -33,6 +33,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/pg_raft/bin/b2 src/net
 /opt/pg_raft/bin/b2 src/status
 /opt/pg_raft/bin/b2 src/raft
+/opt/pg_raft/bin/b2 src/backup
 
 # Build + run a specific unit-test target (auto-runs after build)
 /opt/pg_raft/bin/b2 src/base//semaphore_lock_test
@@ -51,6 +52,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/pg_raft/bin/b2 src/net//connection_test
 /opt/pg_raft/bin/b2 src/status//pg_client_test
 /opt/pg_raft/bin/b2 src/raft//raft_log_test
+/opt/pg_raft/bin/b2 src/backup//backup_store_test
 /opt/pg_raft/bin/b2 src/raft//raft_ensemble_sanity_test   # also _leader_stopped_, _stepdown_, _snapshot_
 
 # Run a single Boost.Test case within a unit-test binary (pass args after --):
@@ -164,6 +166,11 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 - **Connections**: `RaftPeerConnection` (outbound, identity `Raft:<id>`), `RaftFollowerConnection` (inbound), `PeerConnectionMgr`, and `RaftClientConnection` / `RaftServerConnection` for the client channel (`client_types.h`: `StatusRequest`; `SnapshotRequest` → `SnapshotResponse` followed by the backup files). The proxy uses it to find the leader; nodes restore backups from a `BackupStore` (`docs/backup.md`, planned), so `SnapshotRequest` and `set_backup_provider()` are unused by the node design.
 - **Tests**: `raft_log_test`; `raft_ensemble_{sanity,leader_stopped,stepdown,snapshot}_test` run in-process ensembles (`RaftTestService`) with a `Writer` that plays the primary, checked by `check_consistency` (log matching, states, WAL bytes of every acknowledged write).
 
+**`src/backup/`** — The cluster's PostgreSQL backups. See `docs/backup.md`.
+
+- **`BackupStore`** (`backup_store.h`) — abstract store: `begin(node, time)` → `PendingBackup` (a lease the node `refresh`es while `pg_basebackup` runs), `put(pending, dir, end_lsn)` (atomic), `abort(node)`, `pending()`, `list()` / `latest()`, `get(backup, dest)`, `remove()`. Backups are named `TTTTTTTT-XXXXXXXXXXXXXXXX-SSSSSSSSSS-N` (timeline, end LSN, start time, node index; `BackupInfo::name()` / `parse_backup_name()`), sorting by end LSN. Pure helpers: `backup_due(policy, index, nodes, latest, now, wal_end)` (staggered deadlines: `interval·(1+i/N)` or `wal_size·(1+i/N)`), `pending_blocks()` (another node's lease refreshed within `pending_timeout`), `keep_from(latest)` (segment start of the end LSN).
+- **`DirBackupStore(root)`** (`dir_backup_store.h`) — one directory per backup; `put` copies into `.tmp-<name>`, fsyncs and renames; leases are `.pending-<node>` files (start time inside, mtime = refresh time). An S3 store is planned.
+
 **`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/proxy.md`.
 
 **`src/status/`** — PostgreSQL client for querying a running instance:
@@ -243,4 +250,5 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 - **`wal_fuse_ops_test`** — unit tests for `WalFuseOps` and `WalFuseSegment` interaction. Exercises open/write/fsync/read/release ops against a `WalFuseOps` instance backed by a `TmpDir`. No real PostgreSQL needed.
 - **`wal_state_test`** — unit tests for `WalFuseSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size, complete)` tuples. No real PostgreSQL needed.
 - **`wal_shadow_test`** — integration test using `WalFuseOps` directly (via a `ShadowWalOps` subclass that mirrors writes into an in-memory buffer). Starts a real PostgreSQL instance, runs pgbench, then cross-checks the shadow buffer against the on-disk WAL bytes. Auto-skips if PostgreSQL is absent.
+- **`backup_store_test`** — backup names (round trip, rejects, sort order), `keep_from`, the staggered deadlines, leases, and `DirBackupStore` put/list/get/remove, partial copies and leases. No PostgreSQL needed.
 - **`pg_client_test`** — integration tests for `PgClient`. Starts a real PostgreSQL instance, exercises `connect`/`prepare`/`async_exec`. Requires PostgreSQL; auto-skips if absent.
