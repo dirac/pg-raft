@@ -25,6 +25,7 @@ unit-test fuse_test
 
 unit-test wal_fuse_ops_test
   : wal_fuse_ops_test.cc
+    wal_data.cc
     libs
     ../base//testing
   ;

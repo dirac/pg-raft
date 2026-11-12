@@ -10,7 +10,8 @@
 // docs/node.md test 1, the steady state: pg_raft_initdb, then 3 nodes in one process (3 raft
 // servers, 3 FUSE mounts, 3 PostgreSQL instances). One becomes the primary (timeline 2, after the
 // promotion of the restored backup), pgbench runs on it, and the two standbys converge through
-// their WAL senders, by LSN and row count.
+// their WAL senders, by LSN and row count. Then a hand-over: the primary steps down, another
+// promotes (timeline 3), the old one is demoted to a standby, and all converge again.
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -126,6 +127,42 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(300)) {
         "node " << n->id());
     BOOST_TEST(query(port, "SELECT pg_is_in_recovery()::text") == "true");
     BOOST_TEST(query(port, "SELECT received_tli::text FROM pg_stat_wal_receiver") == "2");
+    BOOST_TEST(query(port, "SELECT count(*)::text FROM pgbench_history") == rows);
+  }
+
+  // A hand-over: the primary steps down and kills its PostgreSQL, another node promotes it to
+  // timeline 3, and the old primary comes back as a standby, its pg_wal rebuilt from raft/wal.
+  auto old = primary;
+  old->raft()->stepdown();
+  primary.reset();
+  BOOST_REQUIRE(wait_for(120s, [&] {
+    for (auto const& n : nodes)
+      if (n != old && n->is_primary())
+        primary = n;
+    return primary != nullptr;
+  }));
+  BOOST_TEST(query(primary->pg_port(),
+                   "SELECT substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8)") == "00000003");
+  BOOST_TEST(wait_for(
+      120s, [&] { return query(old->pg_port(), "SELECT pg_is_in_recovery()::text") == "true"; }));
+
+  // -n: no vacuum and no truncation of pgbench_history, so that the rows of before the hand-over
+  // must still be there.
+  pgbench(cfg, primary->pg_port(), {"-n", "-t", "100", "-c", "4"});
+  flushed = lsn(query(primary->pg_port(), "SELECT pg_current_wal_flush_lsn()::text"));
+  rows    = query(primary->pg_port(), "SELECT count(*)::text FROM pgbench_history");
+  BOOST_TEST(rows == "1200");
+
+  for (auto const& n : nodes) {
+    if (n == primary)
+      continue;
+    auto port = n->pg_port();
+    BOOST_TEST(
+        wait_for(
+            120s,
+            [&] { return lsn(query(port, "SELECT pg_last_wal_replay_lsn()::text")) >= flushed; }),
+        "node " << n->id());
+    BOOST_TEST(query(port, "SELECT received_tli::text FROM pg_stat_wal_receiver") == "3");
     BOOST_TEST(query(port, "SELECT count(*)::text FROM pgbench_history") == rows);
   }
 

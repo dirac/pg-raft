@@ -107,4 +107,6 @@ queries, NULL handling, error queries, and many queued `async_exec` calls comple
 2. Only trust authentication works. SCRAM would be needed for non-loopback use.
 3. Only loopback connections are supported (the address is hardcoded to `127.0.0.1`).
 4. No query parameters can be passed (Bind always sends 0 parameters).
-5. `close()` does not wait for in-flight execs. Their callbacks fail with socket errors.
+5. `close()` — fixed: it runs on the strand (it used to close the socket from the caller's thread
+   while an exec's read was pending, a data race in asio), cancelling an exec in flight, whose
+   callback then gets an error. Terminate is only sent when nothing is in flight.

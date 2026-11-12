@@ -24,8 +24,8 @@
 //    wal_end), switches the tracker to leader mode, promotes PostgreSQL, waits for its timeline to
 //    be committed, then set_serving(true).
 //  - stepped_down: in the hook itself, the tracker is fenced and PostgreSQL is killed; the
-//    transition thread then reaps it. (Restarting it as a standby, after cutting pg/pg_wal back to
-//    the committed WAL, is phase 2.)
+//    transition thread then reaps it, rebuilds pg/pg_wal from raft/wal (rebuild_pg_wal), and
+//    restarts it as a standby. A promotion that finds PostgreSQL killed does that first.
 
 struct NodeOptions {
   Options                   raft;
@@ -61,6 +61,13 @@ class Node : public std::enable_shared_from_this<Node> {
   // Startup.
   Result<void> restore_latest_backup();
   Result<void> write_standby_config(uint16_t wal_sender_port);
+
+  // Demotion (docs/node.md §3.3): reap the killed PostgreSQL, rebuild pg/pg_wal from raft/wal
+  // (with FUSE unmounted), and start PostgreSQL again as a standby.
+  Result<void> restart_as_standby();
+
+  // The end LSN of the backup this node restored (node<N>/backup_end), {} if none.
+  LogSeqNumber backup_end() const;
 
   // From raft, with its lock held: must not block.
   void on_applied(RaftState const& state);
@@ -113,6 +120,7 @@ class Node : public std::enable_shared_from_this<Node> {
 
   std::atomic_bool primary_{false};
   std::atomic_bool started_{false};
+  std::atomic_bool needs_restart_{false};  // PostgreSQL was killed (stepped_down)
 
   std::thread transition_thread_;
   std::thread poll_thread_;

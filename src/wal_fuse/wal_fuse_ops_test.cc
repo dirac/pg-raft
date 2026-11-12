@@ -91,6 +91,56 @@ static shared_ptr<WalFuseSegment> make_fuse_segment(std::filesystem::path const&
 
 // ── WalFuseSegment ────────────────────────────────────────────────────────────
 
+std::string_view wal_data();  // wal_data.cc: real WAL captured from PostgreSQL
+
+// The write boundaries don't matter: real WAL written in odd chunks (cutting page headers and
+// xl_tot_len) is stored byte for byte and walked as far as when written at once. A standby's
+// walreceiver writes at any byte; before, a cut page header tripped an assertion in
+// WalState::update and the bytes past the walk were dropped.
+BOOST_AUTO_TEST_CASE(wal_segment_any_write_boundaries, *boost::unit_test::timeout(60)) {
+  TmpDir           tmp;
+  RecordingTracker whole_tracker, chunked_tracker;
+  std::filesystem::create_directories(tmp() / "a");
+  std::filesystem::create_directories(tmp() / "b");
+  auto whole   = make_fuse_segment(tmp() / "a", LogSeqNumber{1, 0}, whole_tracker);
+  auto chunked = make_fuse_segment(tmp() / "b", LogSeqNumber{1, 0}, chunked_tracker);
+  BOOST_REQUIRE(whole);
+  BOOST_REQUIRE(chunked);
+
+  auto const* data = reinterpret_cast<unsigned char const*>(wal_data().data());
+  auto const  size = std::min<size_t>(wal_data().size(), kWalSegmentSize);
+  whole->write(data, size, 0);
+
+  static constexpr std::array<size_t, 7> kChunks = {1, 3, 5, 17, 23, 1000, 8192};
+  size_t                                 i       = 0;
+  for (size_t off = 0; off < size; ++i) {
+    auto n = std::min(kChunks.at(i % kChunks.size()), size - off);
+    chunked->write(data + off, n, static_cast<off_t>(off));
+    off += n;
+  }
+
+  // Stored byte for byte.
+  BOOST_TEST(std::memcmp(chunked->mapping(), data, size) == 0);
+
+  // Walked as far, and contiguously.
+  auto walked = [](RecordingTracker const& t) {
+    off_t end = 0;
+    for (auto const& p : t.publishes) {
+      BOOST_TEST(p.offset == end);
+      end = p.offset + static_cast<off_t>(p.size);
+    }
+    return end;
+  };
+  auto const end = walked(whole_tracker);
+  BOOST_TEST(end > 0);
+  BOOST_TEST(walked(chunked_tracker) == end);
+
+  // fsync covers everything stored.
+  BOOST_REQUIRE_EQUAL(chunked->fsync(), 0);
+  BOOST_REQUIRE_EQUAL(chunked_tracker.fsyncs.size(), 1u);
+  BOOST_TEST(chunked_tracker.fsyncs.at(0).size == size);
+}
+
 BOOST_AUTO_TEST_CASE(wal_segment_zero_page_no_useful_data, *boost::unit_test::timeout(60)) {
   TmpDir           tmp;
   RecordingTracker tracker;
@@ -137,7 +187,8 @@ BOOST_AUTO_TEST_CASE(wal_segment_fsync_calls_tracker, *boost::unit_test::timeout
   BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
 
   BOOST_REQUIRE_EQUAL(tracker.fsyncs.size(), 1u);
-  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, 64u);
+  // Everything written is synced: the walked 64 bytes and the rest of the page.
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, kWalBlockSize);
 }
 
 BOOST_AUTO_TEST_CASE(wal_segment_fsync_without_write_is_noop, *boost::unit_test::timeout(60)) {
@@ -285,7 +336,8 @@ BOOST_FIXTURE_TEST_CASE(wal_file_fsync_calls_tracker,
 
   BOOST_REQUIRE_EQUAL(ops.op_fsync(kWalPath, 0, &fi), 0);
   BOOST_REQUIRE_EQUAL(tracker.fsyncs.size(), 1u);
-  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, 64u);
+  // Everything written is synced: the walked 64 bytes and the rest of the page.
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, kWalBlockSize);
   BOOST_CHECK_EQUAL(ops.n_fsync.load(), 1u);
 
   ops.op_release(kWalPath, &fi);

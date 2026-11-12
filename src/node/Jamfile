@@ -13,6 +13,7 @@ lib node
   : init.cc
     node.cc
     node_wal_tracker.cc
+    wal_rebuild.cc
     deps
   ;
 
@@ -47,6 +48,12 @@ unit-test node_wal_tracker_test
 
 unit-test node_test
   : node_test.cc
+    libs
+    ../base//testing
+  ;
+
+unit-test wal_rebuild_test
+  : wal_rebuild_test.cc
     libs
     ../base//testing
   ;

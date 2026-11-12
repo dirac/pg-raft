@@ -205,13 +205,35 @@ Result<PgStmt> PgClient::prepare(string const& sql) {
 }
 
 void PgClient::close() {
-  Bytes term;
-  append_msg(term, 'X', {});
-  if (auto r = sync_write(term); !r)
-    log(DEBUG, "pg close: {}", r.error().message());
+  // On the strand: an exec in flight has an async read or write pending on the socket, and closing
+  // it from another thread would race with it. Closing on the strand cancels it (its callback gets
+  // an error). Terminate is only sent when nothing is in flight.
+  auto do_close = [this] {
+    bool idle;
+    {
+      std::unique_lock lk(mu_);
+      idle = !running_;
+    }
+    if (idle) {
+      Bytes term;
+      append_msg(term, 'X', {});
+      if (auto r = sync_write(term); !r)
+        log(DEBUG, "pg close: {}", r.error().message());
+    }
+    error_code ec;
+    socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+    socket_.close(ec);
+  };
 
-  error_code ec;
-  socket_.close(ec);
+  if (strand_.running_in_this_thread())
+    return do_close();
+
+  std::promise<void> done;
+  asio::post(strand_, [&done, &do_close, s = shared_from_this()] {
+    do_close();
+    done.set_value();
+  });
+  done.get_future().wait();
 }
 
 // ---- async exec ----

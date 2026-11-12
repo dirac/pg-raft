@@ -6,6 +6,7 @@
 #include "src/base/io_threads.h"
 #include "src/base/logger.h"
 #include "src/node/init.h"
+#include "src/node/wal_rebuild.h"
 #include "src/status/pg_client.h"
 #include "src/wal_fuse/wal_fuse_ops.h"
 
@@ -262,6 +263,10 @@ Result<void> Node::restore_latest_backup() {
       return elog(ec, "Unable to move {} into {}", entry.path(), pg_wal_dir_);
   }
 
+  // Its WAL is committed by definition: the rebuild of a demotion keeps it (backup_end()).
+  std::ofstream(base_dir_ / "backup_end")
+      << (*latest)->lsn.timeline << ' ' << (*latest)->lsn.lsn << '\n';
+
   raft_->set_needs_backup(false);
   return ok();
 }
@@ -322,6 +327,7 @@ void Node::on_stepped_down(RaftTerm term) {
     tracker_->set_mode(NodeWalTracker::Mode::kFenced);
   if (pg_)
     pg_->kill();
+  needs_restart_.store(true);
   primary_.store(false);
   {
     auto lk = std::unique_lock{role_mtx_};
@@ -355,6 +361,17 @@ bool Node::still_leader(RaftTerm term) const {
 }
 
 void Node::promote(RaftTerm term) {
+  if (!still_leader(term))
+    return;
+
+  // Deposed and elected again before the demotion ran: restart PostgreSQL as a standby first.
+  if (needs_restart_.load()) {
+    if (auto r = restart_as_standby(); !r) {
+      log(ERROR, "Node {}: unable to restart PostgreSQL: stepping down", id_);
+      raft_->stepdown();
+      return;
+    }
+  }
   if (!still_leader(term) || !pg_->is_running())
     return;
 
@@ -416,11 +433,58 @@ void Node::promote(RaftTerm term) {
 void Node::demote() {
   primary_.store(false);
   raft_->set_serving(false);
+  if (needs_restart_.load())
+    if (auto r = restart_as_standby(); !r)
+      log(ERROR,
+          "Node {}: unable to restart PostgreSQL as a standby: {}",
+          id_,
+          r.error().message());
+}
+
+LogSeqNumber Node::backup_end() const {
+  std::ifstream in(base_dir_ / "backup_end");
+  uint32_t      timeline = 0;
+  uint64_t      lsn      = 0;
+  if (!(in >> timeline >> lsn))
+    return {};
+  return {.timeline = timeline, .lsn = lsn};
+}
+
+Result<void> Node::restart_as_standby() {
   // The hook killed it; reap it.
   pg_->stop(PgInstance::StopMode::Immediate, 5000);
-  // TODO(phase 2): cut pg/pg_wal back to the committed WAL (wal_end) and restart PostgreSQL as a
-  // standby (docs/node.md §3.3).
-  log(INFO, "Node {}: PostgreSQL stopped after losing leadership", id_);
+
+  // Rebuild pg/pg_wal with FUSE unmounted: WalFuseOps caches mmaps by LSN, and a cached mapping of
+  // a replaced file must not be reused.
+  fuse_->stop();
+  fuse_.reset();
+
+  // The backup's WAL counts up to the end of its last segment, not its End-LSN: pg_backup_stop
+  // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
+  // to the next segment boundary. Zeroing from the End-LSN would remove that record, and a
+  // standby promoted from this pg_wal would fork its timeline before where the others already are.
+  auto backup = backup_end();
+  if (backup.lsn % kWalSegmentSize != 0)
+    backup.lsn += kWalSegmentSize - backup.lsn % kWalSegmentSize;
+  auto end = std::max(
+      raft_->applied_state().wal_end, backup, [](auto const& a, auto const& b) { return a < b; });
+  log(INFO, "Node {}: rebuilding pg/pg_wal from raft/wal up to {}", id_, end);
+  if (auto r = rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_, end); !r)
+    return r;
+
+  fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
+  if (!fuse_->start())
+    return elog(system_error_code(EIO), "Unable to mount FUSE on {}", data_dir_ / "pg_wal");
+
+  if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
+    return r;
+  tracker_->set_mode(NodeWalTracker::Mode::kFollower);
+  needs_restart_.store(false);
+  if (!pg_->start() || !pg_->wait_ready(pg_port(), 60))
+    return elog(system_error_code(EIO), "PostgreSQL did not restart on port {}", pg_port());
+
+  log(INFO, "Node {}: PostgreSQL restarted as a standby", id_);
+  return ok();
 }
 
 // ── status poller ─────────────────────────────────────────────────────────────
@@ -498,11 +562,17 @@ void Node::shutdown() {
   if (poll_thread_.joinable())
     poll_thread_.join();
 
-  // Raft hands the leadership over (its stepped_down kills a primary).
+  // PostgreSQL first, cleanly: on the primary its shutdown checkpoint still commits through raft
+  // (the node still leads), and a clean stop releases its System V shared memory and semaphores,
+  // which a kill leaves behind (only a postmaster in the same data directory reclaims them).
+  if (pg_ && pg_->is_running())
+    pg_->stop(PgInstance::StopMode::Fast);
+
+  // Then raft hands the leadership over (stepped_down finds nothing left to kill).
   if (raft_)
     raft_->shutdown();
   if (pg_ && pg_->is_running())
-    pg_->stop(PgInstance::StopMode::Fast);
+    pg_->stop(PgInstance::StopMode::Immediate);
 
   if (wal_sender_server_)
     wal_sender_server_->shutdown();

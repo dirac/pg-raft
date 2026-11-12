@@ -61,7 +61,10 @@ std::tuple<off_t, size_t, bool> WalFuseSegment::WalState::update(unsigned char c
   off_t next  = curr_;
 
   if (page_start(curr_)) {
-    if (xlp_magic(ptr) == 0)
+    // Never read past |size|: a page header may arrive in more than one write.
+    if (size < 2 || xlp_magic(ptr) == 0)
+      return {curr_, 0U, rec_start};
+    if (size < static_cast<size_t>(curr_ == 0 ? 40 : 24))
       return {curr_, 0U, rec_start};
 
     rsize_ = round_up(xlp_rem_len(ptr));
@@ -83,6 +86,9 @@ std::tuple<off_t, size_t, bool> WalFuseSegment::WalState::update(unsigned char c
   // it is start of a XLogReader, therefore read the size. If there are no more data to read then
   // it will return a block of zero size.
   if (!rsize_) {
+    // xl_tot_len may arrive in more than one write too.
+    if (size < 4)
+      return {curr_, 0U, rec_start};
     rec_start = true;
     rsize_    = round_up(xl_tot_len(ptr));
 
@@ -122,50 +128,45 @@ void WalFuseSegment::initialize() {
 
     log(INFO, "The file {} has data upto {}", lsn(), next_);
 
-    synced_ = next_;
+    synced_  = next_;
+    written_ = next_;
   }
 }
 
 void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
   initialize();
+  auto const end = off + static_cast<off_t>(size);
 
-  bool rec_start;
-  // Already processed
-  if ((off + i4(size)) < next_) {
-    check_modified(buf, size, off);
-    return;
+  // Bytes already walked: compared, and re-published if PostgreSQL changed them (a tail page
+  // being completed).
+  if (off < next_)
+    check_modified(buf, u8(std::min(end, next_) - off), off);
+
+  // The rest is stored as written, like any file: what isn't walked yet (a record or a page header
+  // cut by the end of this write, a standby's walreceiver writing at any byte) is walked once the
+  // rest of it arrives.
+  if (end > next_) {
+    auto const from = std::max(off, next_);
+    std::memcpy(mapping() + from, buf + (from - off), u8(end - from));
   }
+  written_ = std::max(written_, end);
 
-  // No wal records present, it is empty (zero elements).
-  // If we have content, then it will be written again.
-  if (next_ < off) {
-    // assert(!modified(mapping() + off, buf, size, off));
-    return;
-  }
-  check_modified(buf, u8(next_ - off), off);
-
-  // forward the buff for already processed bytes.
-  assert(next_ >= off);
-
-  buf  = buf + (next_ - off);
-  size = size - u8(next_ - off);
-  off  = next_;
-
-  // bytes with data.
+  // Walk the stored bytes, up to the highest offset written: the write boundaries don't matter.
   size_t bytes = 0;
+  bool   rec_start;
   auto   begin = next_;
-
   do {
-    std::tie(next_, bytes, rec_start) = state_.update(buf, size, off);
+    std::tie(next_, bytes, rec_start) = state_.update(mapping(), u8(written_), 0);
   } while (bytes);
 
-  std::memcpy(mapping() + begin, buf, u8(next_ - begin));
-  tracker_.async_publish(map_, begin, u8(next_ - begin));
+  if (next_ > begin)
+    tracker_.async_publish(map_, begin, u8(next_ - begin));
 }
 
 int WalFuseSegment::fsync() {
-  // page aligned size.
-  auto size = next_ - synced_;
+  // Everything stored, walked or not: on a standby the bytes past the last complete record are WAL
+  // too, and the walreceiver reports them as flushed.
+  auto size = std::max(next_, written_) - synced_;
   if (size == 0) {
     log(DEBUG, "Not doing sync next={} synced={}", next_, synced_);
     return 0;

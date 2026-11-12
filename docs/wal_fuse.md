@@ -132,22 +132,30 @@ standby replays it.
 **`write(buf, size, off)`**:
 
 1. On the first call, `initialize()` parses the existing file contents from offset 0. This sets
-   `next_` and `synced_` to the end of the valid data already on disk. This matters when the
-   segment is reopened after a restart.
-2. If the write lies entirely before `next_`, it is a **rewrite of bytes already processed**.
+   `next_`, `synced_` and `written_` to the end of the valid data already on disk. This matters
+   when the segment is reopened after a restart.
+2. The part of the write that lies before `next_` is a **rewrite of bytes already walked**.
    PostgreSQL legitimately rewrites the partial last page on each flush. `check_modified` compares
    the bytes. If they differ (the tail of a page was completed), it copies them, re-publishes the
    range, and pulls `synced_` back to the changed offset.
-3. If the write starts after `next_`, it is ignored. This happens with pre-zeroing or out-of-order
-   writes ahead of the parse cursor. The bytes will be written again when they become valid.
-4. Otherwise the overlapping prefix is checked as in step 2, and the new suffix is parsed with
-   `WalState`. Only the walked prefix `[begin, next_)` is `memcpy`'d into the mmap and
-   published through `tracker_.async_publish(map_, begin, len)`.
+3. The rest of the write is **stored as written**, like any file, and `written_` (the highest
+   offset written) moves up.
+4. `WalState` then walks the **stored segment** from `next_` up to `written_`, and the newly walked
+   range `[begin, next_)` is published through `tracker_.async_publish(map_, begin, len)`.
 
-**`fsync()`**: if `next_ > synced_`, it calls
-`tracker_.async_fsync(map_, synced_, next_-synced_, cb)` and **blocks the FUSE thread on a
-`std::future`** until the tracker completes. On success, `synced_ = next_`. On failure, it
-returns `-errno`, and PostgreSQL's WAL flush fails, which PANICs the backend. That failure mode
+Walking the stored bytes rather than each write's buffer makes the write boundaries irrelevant: a
+page header or an `xl_tot_len` cut by the end of one write is walked once the rest arrives
+(`WalState::update` never reads past what is stored). A standby's walreceiver writes at any byte,
+and FUSE may split PostgreSQL's writes. Earlier, the walk ran over each write's buffer: a cut page
+header made the cursor run past the write and tripped an assertion, and the bytes past the walk
+were not stored at all (`wal_segment_any_write_boundaries` covers both).
+
+**`fsync()`**: if anything is unsynced, it calls
+`tracker_.async_fsync(map_, synced_, max(next_, written_) - synced_, cb)`: everything stored,
+walked or not (on a standby the bytes past the last complete record are WAL the walreceiver
+reports as flushed). It **blocks the FUSE thread on a `std::future`** until the tracker
+completes. On success `synced_` moves to the end of that range. On failure, it returns `-errno`,
+and PostgreSQL's WAL flush fails, which PANICs the backend. That failure mode
 is intended: PostgreSQL never acknowledges a commit that is not durable on a quorum.
 `WalSegment::kNoConsensus = ECANCELED` is reserved for "msync succeeded locally, but there is no
 quorum".
@@ -179,16 +187,16 @@ quorum".
 
 ## 6. Known issues and open items
 
-1. **`WalState` relies on assertions.** A corrupt `xl_tot_len` or `xlp_rem_len` (for example
-   after a crash in the middle of a page) is not range-checked. CRC checks are not done.
+1. **`WalState` checks little.** It never reads past the stored bytes, but a corrupt
+   `xl_tot_len` or `xlp_rem_len` (for example after a crash in the middle of a page) is not
+   range-checked, and CRCs are not checked.
 2. **Non-WAL writes are not replicated**, except timeline history files (`op_rename`). Files
    such as `archive_status/`, and the `xlogtemp.*` copy of the old segment that becomes the new
    timeline's first segment on promotion, go straight to the backing directory. `WalSender` reads
    that copied prefix from the parent timeline's segment instead.
 3. **Retention.** Renamed `.X` files are never removed. The Raft layer needs a GC policy based
    on the minimum applied LSN across the cluster.
-4. `op_write` always returns `size`, even when the bytes are ignored (step 3 above). That is
-   fine because PostgreSQL rewrites them, but it hides real I/O errors such as a failed mmap.
+4. `op_write` always returns `size`, which hides real I/O errors such as a failed mmap.
 5. `WalFuseSegment::fsync` advances `synced_` to the *original* `next_` captured before the
    wait. That is correct for the range it synced, but writes that arrive during the wait are
    counted only by the next fsync. This is by design, but undocumented.

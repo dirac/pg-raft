@@ -12,7 +12,7 @@ way, and the known gaps.
 | `wal_fuse` | [wal_fuse.md](wal_fuse.md) | Implemented, tested |
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
 | `raft` | [raft.md](raft.md) | Implemented, tested; not yet wired into a node |
-| `node` | [node.md](node.md) | In progress: `pg_raft_initdb`, `NodeWalTracker`, `Node` startup and promotion implemented; demotion not yet |
+| `node` | [node.md](node.md) | In progress: `pg_raft_initdb`, `NodeWalTracker`, `Node` startup, promotion and demotion implemented and tested; joining and backups after bootstrap not yet |
 | `backup` | [backup.md](backup.md) | `BackupStore` and `DirBackupStore` implemented, tested; not yet used by a node |
 | `proxy` | [proxy.md](proxy.md) | Designed; not started (empty directory) |
 

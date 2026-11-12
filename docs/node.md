@@ -211,11 +211,22 @@ the old primary is served after this point.
 On the node strand:
 
 1. `set_serving(false)`.
-2. Reap the killed postmaster (`PgInstance::stop`).
-3. **Cut `pg/pg_wal` back to the committed WAL.** The old primary's `pg_wal` can hold WAL that it
-   wrote but never committed (its fsync failed). Truncate it at the end of the committed WAL,
-   `state.wal_end` (not `flushed_lsn`, which is stale): zero the rest of that segment and remove
-   the later segments. Otherwise the standby would replay that WAL on startup.
+2. Reap the killed postmaster (`PgInstance::stop`). (Demotion is implemented: `Node::demote` /
+   `restart_as_standby`; `node_test` hands the leadership over and checks the old primary comes
+   back as a standby.)
+3. **Rebuild `pg/pg_wal` from `raft/wal`** (`rebuild_pg_wal`, `src/node/wal_rebuild.h`;
+   implemented). The old primary's `pg_wal` can hold WAL that it wrote but never committed (its
+   fsync failed), and even `raft/wal` can (the leader copies bytes in before they commit), so the
+   committed end is `max(state.wal_end, the restored backup's end rounded up to its segment's
+   end)`: the backup's WAL is committed, and `pg_backup_stop` ends its last segment with an
+   `XLOG_SWITCH` record past the backup's End-LSN, which every standby replays. With FUSE
+   unmounted (`WalFuseOps` caches mmaps by LSN), each segment or history file of `pg/pg_wal`:
+   - not in `raft/wal`: deleted;
+   - on a later timeline than the committed end: deleted; on an earlier one: raft's copy;
+   - on the committed end's timeline: raft's copy if wholly before the end; raft's copy with
+     everything from the end zeroed if it holds the end; deleted if after it;
+   - `.X` (unlinked), `.partial` and `xlogtemp.*` files: deleted.
+   Otherwise the standby would replay uncommitted WAL on startup.
 4. Restart it as a standby: `standby.signal`, and `primary_conninfo` pointing at the local
    `WalSenderServer` port. Switch the tracker to follower mode just before. It replays its own
    `pg_wal` up to the committed point, then streams the rest from `raft/wal`. Restarting in the same
@@ -344,12 +355,15 @@ The result goes to:
 
 ## 6. Shutdown
 
-On SIGTERM or SIGINT:
+On SIGTERM or SIGINT (`Node::shutdown`, implemented):
 
-1. Raft step-down, which hands the leadership over.
-2. Stop PostgreSQL (Fast).
-3. Unmount FUSE.
-4. Close raft.
+1. Stop the transition thread and the status poller.
+2. Stop PostgreSQL (Fast) **first**. On the primary its shutdown checkpoint still commits through
+   raft, since the node still leads. A clean stop also releases PostgreSQL's System V shared memory
+   and semaphores; a kill leaves them behind, and only a postmaster in the same data directory
+   reclaims them (macOS allows 32 shared memory segments in all).
+3. Raft shutdown, which hands the leadership over; `stepped_down` finds nothing left to kill.
+4. Stop the WAL sender and its senders, unmount FUSE.
 
 ## 7. Timelines
 
