@@ -69,7 +69,8 @@ class WalSegment : public std::enable_shared_from_this<WalSegment> {
   std::mutex&                 map_mtx();
   map<LogSeqNumber, Mapping>& mappings();
 
-  /// Delete mappings that have not been used for 5 mins.
+  /// Unmap the unreferenced mappings idle for at least 5 s, and all unreferenced ones when more
+  /// than 5 remain.
   void gc(std::unique_lock<std::mutex> lk);
 };
 

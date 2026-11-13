@@ -24,6 +24,10 @@ void parse_node(T& data, Config& config) {
     config.backup_pending_timeout_secs = toml::find<unsigned>(data, "backup_pending_timeout_secs");
   if (data.contains("socket_dir"))
     config.socket_dir = toml::find<string>(data, "socket_dir");
+  if (data.contains("proxy_pg_port"))
+    config.proxy_pg_port = toml::find<uint16_t>(data, "proxy_pg_port");
+  if (data.contains("proxy_http_port"))
+    config.proxy_http_port = toml::find<uint16_t>(data, "proxy_http_port");
 }
 
 template <typename T>

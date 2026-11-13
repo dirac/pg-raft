@@ -117,7 +117,7 @@ The proxy reads `Config` (`config.toml`):
 
 - `proxy_pg_port`: the primary port. The per-server ports are `proxy_pg_port + 1 + i`.
 - `servers[i].hostname`, `servers[i].pg_port`: the targets.
-- `proxy_http_port`: reserved for an admin interface. Nothing listens on it yet (§6.2).
+- `proxy_http_port`: the admin interface (§6).
 
 The ports `proxy_pg_port .. proxy_pg_port + servers.size()` must not collide with a PostgreSQL
 listening on the same host. In particular, a server co-located with the proxy cannot use 5432
@@ -153,5 +153,6 @@ the response on the session's executor; an exception there is a `500`, never the
 
 ## 8. Open items
 
-1. Options (`ProxyOptions`): failover window 30 s, upstream connect timeout 5 s, raft status
-   heartbeats every 100 ms; not in `config.toml` yet.
+1. `ProxyOptions` (failover window 30 s, upstream connect timeout 5 s, raft status heartbeats
+   every 100 ms, reconnect interval) are not in `config.toml`.
+2. The admin interface has no authentication and no TLS; bind it to a trusted network.

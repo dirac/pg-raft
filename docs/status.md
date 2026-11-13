@@ -11,8 +11,10 @@ cheaply and often:
 - `pg_current_wal_flush_lsn()` on the primary
 - `pg_last_wal_replay_lsn()` on a standby
 
-These values feed the Raft `Status` that rides on every `RaftResponse`, as well as the client
-`StatusResponse`. Tests also use them to check row counts and LSN convergence.
+These values feed `RaftServer::set_pg_status()`, which reports them in the client channel's
+`StatusResponse` (the proxy's admin interface shows them), and the primary's flush LSN becomes
+the `flushed_lsn` of the leader's raft entries. The tests also use `PgClient` to check row counts
+and LSN convergence.
 
 `PgClient` speaks the PostgreSQL v3 frontend/backend protocol directly over a TCP socket. This
 avoids libpq, keeps everything on the shared Asio io_context, and makes queries non-blocking.
@@ -76,29 +78,34 @@ request starts. Each `DataRow` is bounds-checked, and a malformed message fails 
   `strand_`.
 - `queue_` and `running_` are protected by `mu_`, so `async_exec` can be called from any thread.
 - Callbacks run on the strand. A callback may call `async_exec` again.
-- `connect`, `prepare`, and `close` are blocking and use the same socket and header buffer.
-  **Do not call them while an `async_exec` is in flight** (see open item 1).
+- `connect` and `prepare` are blocking and use the same socket and header buffer. **Do not call
+  `prepare` while an `async_exec` is in flight** (see open item 1). `close` runs on the strand
+  (below) and may be called at any time.
 
-## 5. Intended use in pg-raft
+## 5. Use in pg-raft
 
-A per-node status poller (planned, alongside `raft`) prepares this statement once:
+The node's status poller (`Node::poll`, every 500 ms) prepares this statement once per
+connection, and reconnects when an exec fails or takes more than 2 s:
 
 ```sql
-SELECT CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_current_wal_flush_lsn()::numeric END,
-       CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::numeric ELSE NULL END;
+SELECT pg_is_in_recovery()::text,
+       CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_current_wal_flush_lsn()::text END,
+       CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_walfile_name(pg_current_wal_flush_lsn()) END,
+       CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::text END
 ```
 
-It then runs the statement periodically with `async_exec` to fill `Status` /
-`StatusResponse` (`primary_flushed_lsn`, `standby_applied_lsn`). The leader also uses
-`primary_flushed_lsn` as `WalCommand::flushed_lsn`, the "safe to stream" bound for followers'
-WAL senders. The statement text is documented in `raft_types.h`.
+On the primary, the flush LSN and the timeline (the first 8 hex digits of the WAL file name) go to
+`NodeWalTracker::set_flushed_lsn` (the `flushed_lsn` of the leader's entries, the "safe to stream"
+bound of the followers' WAL senders) and to `set_pg_status`; on a standby, the replay LSN goes to
+`set_pg_status`. The node's promotion also uses one-off queries (`pg_is_in_recovery()`, the
+current WAL file name).
 
 ## 6. Testing
 
 `pg_client_test` starts a real PostgreSQL. It covers connecting, preparing and executing simple
 queries, NULL handling, error queries, and many queued `async_exec` calls completing in order.
 
-## 7. Known issues and open items
+## 7. Open items
 
 1. **Sync and async calls share state.** `prepare()` reads into `hdr_`, which the async read
    chain also uses. Preparing while an exec is running corrupts both. Possible fixes are to
@@ -107,6 +114,8 @@ queries, NULL handling, error queries, and many queued `async_exec` calls comple
 2. Only trust authentication works. SCRAM would be needed for non-loopback use.
 3. Only loopback connections are supported (the address is hardcoded to `127.0.0.1`).
 4. No query parameters can be passed (Bind always sends 0 parameters).
-5. `close()` — fixed: it runs on the strand (it used to close the socket from the caller's thread
-   while an exec's read was pending, a data race in asio), cancelling an exec in flight, whose
-   callback then gets an error. Terminate is only sent when nothing is in flight.
+5. Every value is returned as text: callers parse LSNs and numbers themselves.
+
+`close()` runs on the strand (it used to close the socket from the caller's thread while an exec's
+read was pending, a data race in asio): an exec in flight is cancelled and its callback gets an
+error, and Terminate is only sent when nothing is in flight.

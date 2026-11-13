@@ -18,11 +18,16 @@ and `fsync`:
   quorum commit.
 
 ```
-$PGDATA/pg_wal/        ← FUSE mount point (empty dir, see PgInstance::create_raft_wal)
+data/pg_wal/      ← FUSE mount point (empty; see PgInstance::create_raft_wal and the node's restore)
       │  FUSE
       ▼
-raft_dir/pg_wal/       ← backing directory holding the real segment files
+pg/pg_wal/        ← backing directory holding the real segment files (in a node:
+                    wdir/node<N>/pg/pg_wal, the WAL PostgreSQL itself writes)
 ```
+
+The node's `WalTracker` is `NodeWalTracker` ([node.md](node.md#2-the-wal-path)): in leader mode it
+turns publishes, fsyncs and timelines into raft entries; in follower mode an fsync is local; in
+fenced mode (a node that lost leadership) every fsync fails.
 
 ## 2. Layering
 
@@ -81,22 +86,14 @@ least 2-byte aligned, which is asserted. A real fd never has bit 63 set.
 
 `WalFuseOps` owns one `WalSegmentCache`, so all handles to the same segment share one mapping.
 
-### 2.4 `WalSegment` (base layer)
+### 2.4 `WalSegment` and `WalTracker` (base layer)
 
-- Maps the whole 16 MiB file with `PROT_READ|PROT_WRITE, MAP_SHARED`.
-- **Shared mapping cache**: `WalSegmentCache { mutex; map<LogSeqNumber, Mapping> }`. A
-  `Mapping` holds `{map, fd, ref, last_epoch}`. `open()` reuses an existing mapping or creates
-  one and increments `ref`. The destructor decrements `ref`.
-- **GC**: runs on every open and destroy. It drops mappings with `ref==0` that have been idle for
-  at least 5 s. If more than 5 mappings remain, it also drops every mapping with `ref==0`.
-- `fsync(off, size)` rounds the range out to whole pages and calls `msync(MS_SYNC)`.
-- `write(buf, off, size)` is a plain `memcpy`. A Raft follower uses it to apply received WAL
-  bytes. `const_buffer(off, size)` gives a zero-copy view of the mapping. The Raft leader does
-  not send from it: it copies the bytes first, because PostgreSQL may rewrite them mid-send.
-- `WalTracker` has two virtual hooks. Their default implementations are a no-op publish and a
-  plain local `msync`:
-  - `async_publish(segment, off, size)`
-  - `async_fsync(segment, off, size, completion)`
+See [base.md](base.md#5-wal-segments-wal_segmenth): `WalSegment` is a shared, ref-counted mmap of
+a 16 MiB segment through a `WalSegmentCache` keyed by LSN, and `WalTracker` has three hooks:
+`async_publish`, `async_fsync` and `async_timeline`. A raft follower writes received WAL with
+`WalSegment::write`; the raft leader copies bytes out of the mapping before sending them, because
+PostgreSQL may rewrite them mid-send. Because the cache is keyed by LSN, the node unmounts FUSE
+before it replaces segment files (`rebuild_pg_wal`, a restore).
 
 ### 2.5 `WalFuseSegment`: parse, publish, and fsync
 
@@ -154,7 +151,8 @@ were not stored at all (`wal_segment_any_write_boundaries` covers both).
 `tracker_.async_fsync(map_, synced_, max(next_, written_) - synced_, cb)`: everything stored,
 walked or not (on a standby the bytes past the last complete record are WAL the walreceiver
 reports as flushed). It **blocks the FUSE thread on a `std::future`** until the tracker
-completes. On success `synced_` moves to the end of that range. On failure, it returns `-errno`,
+completes. On success `synced_` moves to the end of the range captured before the wait (writes
+that arrive during the wait are synced by the next fsync). On failure, it returns `-errno`,
 and PostgreSQL's WAL flush fails, which PANICs the backend. That failure mode
 is intended: PostgreSQL never acknowledges a commit that is not durable on a quorum.
 `WalSegment::kNoConsensus = ECANCELED` is reserved for "msync succeeded locally, but there is no
@@ -170,22 +168,25 @@ quorum".
   on that mount can proceed. That is acceptable because the WAL writer issues its fsync
   serially, but it limits group commit to whatever PostgreSQL batches by itself.
 
-## 4. Tools
+## 4. Tools and build notes
 
-- `debug_wal_ops`: an interactive driver for WAL operations.
-- `wal_fuse_bench`: a FUSE throughput benchmark.
+- `debug_wal_ops`: an interactive driver for WAL operations
+  (`/opt/pg_raft/bin/b2 src/wal_fuse//debug_wal_ops`).
+- `wal_fuse_bench`: a FUSE throughput benchmark (`/opt/pg_raft/bin/b2 src/wal_fuse//wal_fuse_bench`).
 - `wal_data.cc` / `wal_data_exp.cc`: captured real WAL bytes used as test fixtures.
+- `src/base/pch.h` defines `FUSE_USE_VERSION 26` and `_FILE_OFFSET_BITS 64` before it includes
+  `<fuse/fuse.h>`. A file that includes `<fuse/fuse.h>` outside the PCH must define them first.
 
 ## 5. Testing
 
 | Test | Covers |
 |---|---|
 | `fuse_test` | Mount/unmount and every passthrough op (rename, xattr, readdir, concurrency). Two cases run real PostgreSQL to confirm WAL lands in the backing directory. |
-| `wal_fuse_ops_test` | open/write/fsync/read/release against `WalFuseOps` backed by a `TmpDir`. |
+| `wal_fuse_ops_test` | open/write/fsync/read/release against `WalFuseOps` backed by a `TmpDir`; real WAL written in odd chunks (cutting page headers and `xl_tot_len`) is stored byte for byte and walked as far as when written at once (`wal_segment_any_write_boundaries`); the history-file rename hook. |
 | `wal_state_test` | Feeds the parser captured WAL and checks the `(off, size, record_start)` sequence. |
 | `wal_shadow_test` | Real PostgreSQL plus pgbench through a `ShadowWalOps` subclass. Checks that published bytes match the on-disk WAL. |
 
-## 6. Known issues and open items
+## 6. Open items
 
 1. **`WalState` checks little.** It never reads past the stored bytes, but a corrupt
    `xl_tot_len` or `xlp_rem_len` (for example after a crash in the middle of a page) is not
@@ -194,10 +195,8 @@ quorum".
    such as `archive_status/`, and the `xlogtemp.*` copy of the old segment that becomes the new
    timeline's first segment on promotion, go straight to the backing directory. `WalSender` reads
    that copied prefix from the parent timeline's segment instead.
-3. **Retention.** Renamed `.X` files are never removed. The Raft layer needs a GC policy based
-   on the minimum applied LSN across the cluster.
-4. `op_write` always returns `size`, which hides real I/O errors such as a failed mmap.
-5. `WalFuseSegment::fsync` advances `synced_` to the *original* `next_` captured before the
-   wait. That is correct for the range it synced, but writes that arrive during the wait are
-   counted only by the next fsync. This is by design, but undocumented.
-6. The `WalSegment::gc` comment says "5 mins". The code uses 5 s.
+3. `op_write` always returns `size`, which hides real I/O errors such as a failed mmap.
+4. An `fsync` blocks the single FUSE loop thread until the raft commit (see §3).
+
+The renamed `.X` segments are deleted by the node once they are before raft's first entry's
+segment ([backup.md](backup.md#5-wal-retention-and-raft-compaction)).

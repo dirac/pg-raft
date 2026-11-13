@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
 4. **Raft** (`raft`) — consensus over the WAL stream, the **node** process (`node`), and the client **proxy** (`proxy`).
 
-Per-component design documents are in `docs/` (one per module, plus `README.md`).
+Per-component design documents are in `docs/` (one per module, including `base.md`, plus `README.md` and `pg_notes.md`); the modules have no README of their own. Open items across modules are collected in `todo.md`.
 
 ## Build system
 

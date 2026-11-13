@@ -60,7 +60,7 @@ class RaftServer : public ClientConnectionApi,
                    public PeerConnectionApi,
                    public Server {
  public:
-  /// |dir| holds the raft log, |wal_dir| the WAL segments (raft_dir/pg_wal).
+  /// |dir| holds the raft log, |wal_dir| the WAL segments (raft/wal in a node).
   RaftServer(RaftNodeId                     id,
              boost::asio::ip::tcp::acceptor acceptor,
              Config const&                  config,

@@ -257,7 +257,7 @@ refers to them, in two independent steps:
    `pg/pg_wal`). It needs no coordination with compaction: whatever it deletes, no entry refers
    to.
 
-`RaftState` gets two per-node fields (planned):
+`RaftState` has two per-node fields:
 
 | Field | Meaning |
 |---|---|
@@ -308,16 +308,13 @@ between the backup and those entries, so it changes (decision 7 in
 
 ## 7. Open items
 
-1. **Code changes in `process`:** `PgInstance::backup` runs `pg_basebackup` on a standby too, and
-   keeps it running (done).
-   `write_hba`'s defaults need `host replication all 127.0.0.1/32 trust` (and `::1/128`). Their
-   order is also wrong: the `0.0.0.0/0 scram-sha-256` rule comes before the loopback `trust` rule,
-   so it matches loopback first. Today this is masked by `initdb`'s own loopback rules at the top
-   of `pg_hba.conf`.
-
-2. **Backup retention.** Which backups to keep (for example the latest N), and removing them with
+1. **Backup retention.** Which backups to keep (for example the latest N), and removing them with
    `remove`. WAL is kept only from the latest backup (§5), so an older backup can only be restored
    if its WAL is still there, for example from an archive.
-3. **Margin.** Keeping WAL from the latest backup only means a corrupt latest backup leaves nothing
+2. **Margin.** Keeping WAL from the latest backup only means a corrupt latest backup leaves nothing
    to restore from. Keeping WAL from the second-latest backup would cost one more
    `backup_wal_size` of WAL.
+3. **No S3 store** (decided). A shared filesystem works as a `DirBackupStore` if it has an atomic
+   rename, a shared mtime for the leases, and a durable fsync.
+4. A standby may take a backup before it has caught up with the primary; the backup is valid but
+   moves `keep_from` less than it could.

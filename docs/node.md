@@ -1,8 +1,8 @@
-# `node` — The pg-raft node process (design, not yet implemented)
+# `node` — The pg-raft node process
 
-Source: `src/node/` (to be written). The node process ties together the existing modules: `raft`,
-`wal_fuse`, `wal_sender`, `process` and `status`. This document is the proposed design for review.
-§10 lists the decisions that are still open.
+Source: `src/node/` — `node.{h,cc}`, `node_wal_tracker.{h,cc}`, `init.{h,cc}`, `wal_rebuild.{h,cc}`,
+`pg_raft_node.cc`, `pg_raft_initdb.cc`. The node process ties together `raft`, `wal_fuse`,
+`wal_sender`, `process`, `status` and `backup`. Everything below is implemented and tested (§8).
 
 ## 1. What a node is
 
@@ -181,7 +181,7 @@ is committed WAL.
    can end inside an incomplete record (§2.2), so `wal_end` can be past the last valid record;
    that is fine here, because PostgreSQL stops replaying at the last complete record.
 2. Wait until the standby has received all of it: its `StandbyStatusUpdate` (the WAL sender's
-   `StatusCb`, which `WalSenderServer` must now pass on) reports
+   `StatusCb`, which `WalSenderServer` passes on) reports
    `StandbyStatus::flushed_lsn >= wal_end` (what the standby has written to its disk). This is
    a bounded wait within the transition, with a timeout, not a loop. On timeout the node steps
    down, so that another node can take over.
@@ -244,7 +244,7 @@ Why this is safe without `pg_rewind`:
 - Step 3 removes the uncommitted WAL from `pg/pg_wal`; `raft/wal` gets the new leader's bytes
   through raft.
 
-`pg_rewind` is not needed (decision 2 in §10).
+`pg_rewind` is not needed (decision 2 in §9).
 
 ### 3.4 Startup and PostgreSQL exits
 
@@ -402,59 +402,42 @@ On SIGTERM or SIGINT (`Node::shutdown`, implemented):
 
 ## 8. Testing
 
-1. **Steady state:**
-   - 3 nodes in one process: 3 FUSE mounts and 3 PostgreSQL instances.
-   - pgbench on the leader.
-   - The standbys converge by LSN and row count.
-2. **Failover:**
-   - Kill the leader during pgbench.
-   - A new leader is promoted.
-   - No acknowledged transaction is lost (a row count of acknowledged inserts).
-   - The old leader rejoins as a standby.
-3. **Bootstrap and join:**
-   - `pg_raft_initdb`, then 3 nodes start from the backup, elect a leader and promote it.
-   - Add an empty node: it restores the latest backup, catches up, and can take over as leader.
-   - A node that receives an InstallSnapshot restores a backup and catches up.
+The tests need PostgreSQL and FUSE, and skip if either is absent. They run nodes in one process
+(3 raft servers, 3 FUSE mounts, 3 PostgreSQL).
 
-The tests need PostgreSQL and FUSE, and skip if either is absent.
+| Test | What |
+|---|---|
+| `init_test` | `backup_end_lsn()` from a manifest; `init_cluster()` stores one verified backup, which restores and starts as a primary with the configured settings; a second init is refused |
+| `node_wal_tracker_test` | `NodeWalTracker` against a 3-node raft ensemble: leader mode replicates bytes and completes the fsync on commit; on a follower it fails with `kNoConsensus`; follower mode adds nothing; a timeline's history file reaches every node |
+| `wal_rebuild_test` | `rebuild_pg_wal`: raft's copies kept, the end's segment zeroed from the end, uncommitted segments, timelines and leftovers removed; the backup-end case |
+| `node_test` | steady state and hand-over: pgbench through the proxy on the primary (timeline 2), the standbys converge; the primary steps down, another promotes to timeline 3, the old one is demoted, all converge (1200 rows) |
+| `node_backup_test` | with `backup_interval_secs = 15` a standby (never the primary) stores a backup on timeline 2; no lease is left; the backup restores and holds the 100000 accounts |
+| `node_recovery_test` | backups move `keep_from` and the leader compacts; a follower's directory is deleted, it restarts, restores, gets an InstallSnapshot of the oldest entries and catches up (`needs_backup` cleared) |
 
-## 9. Phases
+## 9. Decisions
 
-1. **Steady state:** `BackupStore` and `DirBackupStore`, `pg_raft_initdb`, restoring at
-   startup (§4.2), `set_needs_backup`, `Node`, `NodeWalTracker`, the applier, the poller, a leader
-   that promotes on start, and test 1.
-2. **Failover:** the hooks and transitions (§3), timelines (§7), and test 2.
-3. **Join and recovery:** §4.3, taking backups after bootstrap, `keep_from` in compaction and WAL
-   retention (decision 5), InstallSnapshot from the oldest entries (decision 7), and test 3.
-
-Later: the proxy.
-
-## 10. Open decisions
-
-1. **Bootstrap — resolved: `pg_raft_initdb`.** It creates the first backup in the backup
-   store; every node starts by restoring the latest backup (§4).
-2. **Demoting an old primary — resolved: no `pg_rewind`.** The old primary is restarted as a
-   standby after its `pg/pg_wal` is cut back (§3.3).
-3. **Scope:** implement phase 1 first and review it before failover (proposed)? Timelines need a
-   `wal_sender` change that deserves its own review.
-4. **WalSenderServer transport — resolved: Unix-domain socket.** No switch to TCP; the standby
-   connects through `socket_dir/.s.PGSQL.<bound_port()>` (§2.3).
-5. **Backups after bootstrap — resolved.** A standby runs `pg_basebackup` against itself (a hot
-   backup; every backup is a `pg_basebackup`) when `backup_interval` or `backup_wal_size` since the
-   latest backup is exceeded. The backup's name carries its end LSN
-   and time, so every node computes from a listing when the next one is due and how much WAL and
-   how many raft entries to keep (`keep_from`), and compaction respects it
-   ([backup.md](backup.md#4-taking-backups)).
-6. **Which standby backs up — resolved: staggered deadlines.** Node `i` of `N` backs up once
-   `backup_interval * (1 + i/N)` has passed, or `backup_wal_size * (1 + i/N)` of WAL has
-   accumulated, since the latest backup, unless another node holds a live pending lease (refreshed
-   within `pending_timeout`, so a node that died with a marker doesn't block the others). The
-   primary skips its turn; a node that is down misses it and the next one covers it
+1. **Bootstrap: `pg_raft_initdb`.** It creates the first backup in the backup store; every node
+   starts by restoring the latest backup (§4).
+2. **Demoting an old primary: no `pg_rewind`.** The old primary is restarted as a standby after its
+   `pg/pg_wal` is rebuilt from `raft/wal` (§3.3).
+3. **WalSenderServer transport: a Unix-domain socket** (`socket_dir/.s.PGSQL.<bound_port()>`, §2.3).
+4. **Backups after bootstrap: a standby runs `pg_basebackup` against itself** when
+   `backup_interval` or `backup_wal_size` since the latest backup is exceeded; the backup's name
+   carries its end LSN and time, so every node computes from a listing when the next one is due
+   and how much WAL to keep (`keep_from`) ([backup.md](backup.md#4-taking-backups)).
+5. **Which standby backs up: staggered deadlines.** Node `i` of `N` backs up once
+   `backup_interval * (1 + i/N)` (or `backup_wal_size * (1 + i/N)` of WAL) has passed since the
+   latest backup, unless another node holds a live lease; the primary skips its turn
    ([backup.md](backup.md#41-which-node-backs-up-staggered-deadlines)).
-7. **InstallSnapshot — resolved: the oldest entries.** A node with no recent entries needs a
-   starting point. The leader sends its oldest entries, trimmed to 2 WAL segments, with those
-   segments' full contents, instead of today's latest `snapshot_entries` entries. It still has
-   those segments: WAL files are only deleted before the oldest entry's segment (an entry only
-   refers to a WAL file). The follower restores the latest backup (its end LSN is in the
-   first of those segments) and AppendEntries continues from there
+6. **InstallSnapshot: the oldest entries**, trimmed to 2 WAL segments, with those segments' full
+   contents; the follower restores the latest backup, whose end is in those segments
    ([backup.md](backup.md#5-wal-retention-and-raft-compaction)).
+
+## 10. Open items
+
+1. The node tests are slow (about 2 minutes each) and can time out when run in parallel with each
+   other; run them serially. `node_recovery_test` has failed once at the restarted node's
+   `start()` in a parallel run.
+2. A killed test run can leak PostgreSQL's System V shared memory (macOS allows 32 segments);
+   `ipcs -m` shows them, `ipcrm` removes them.
+3. Joining a node that is not in `servers` (membership changes) is not supported.

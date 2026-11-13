@@ -6,19 +6,20 @@ way, and the known gaps.
 
 | Component | Doc | State |
 |---|---|---|
+| `base` | [base.md](base.md) | Implemented, tested |
 | `net` | [net.md](net.md) | Implemented, tested |
 | `process` | [process.md](process.md) | Implemented, tested |
 | `status` | [status.md](status.md) | Implemented, tested |
 | `wal_fuse` | [wal_fuse.md](wal_fuse.md) | Implemented, tested |
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
-| `raft` | [raft.md](raft.md) | Implemented, tested; not yet wired into a node |
-| `node` | [node.md](node.md) | In progress: `pg_raft_initdb`, `NodeWalTracker`, `Node` startup, promotion and demotion implemented and tested; joining and backups after bootstrap not yet |
-| `backup` | [backup.md](backup.md) | `BackupStore` and `DirBackupStore` implemented, tested; not yet used by a node |
-| `proxy` | [proxy.md](proxy.md) | Implemented, tested |
+| `raft` | [raft.md](raft.md) | Implemented, tested |
+| `backup` | [backup.md](backup.md) | `BackupStore` and `DirBackupStore` implemented, tested |
+| `node` | [node.md](node.md) | Implemented, tested: `pg_raft_initdb`, startup from a backup, promotion, demotion, standby backups, compaction bounded by the latest backup, `needs_backup` recovery |
+| `proxy` | [proxy.md](proxy.md) | Implemented, tested, with a read-only admin interface |
 
-`base` is shared infrastructure (logger, `Result<T>`, `Int<T,L>`, `Config`, `IoThreads`,
-`WalSegment`), and `CLAUDE.md` describes it. This set covers `WalSegment` because `wal_fuse` and
-`raft` both depend on it. See [wal_fuse.md](wal_fuse.md#walsegment-base-layer).
+[pg_notes.md](pg_notes.md) collects PostgreSQL internals (WAL format, replication protocol,
+promotion) that the modules rely on. The open items of every module are gathered in
+[`todo.md`](../todo.md) at the repository root.
 
 ## System picture
 
@@ -38,7 +39,7 @@ log**:
    `WalSenderServer` (`wal_sender`) that is advanced only to the *committed* LSN.
 5. `process` runs the PostgreSQL instances (initdb, start/stop, promote, backup/restore).
    `status` queries them (LSNs, recovery state) without libpq.
-6. `proxy` (planned) is the client entry point. It is a plain TCP proxy, not built on `net`.
+6. `proxy` is the client entry point. It is a plain TCP proxy, not built on `net`.
    Port `proxy_pg_port` forwards to the current leader, and `proxy_pg_port + 1 + i` forwards to
    `servers[i]`. TLS passes through to PostgreSQL. The proxy learns the leader from the nodes
    over `RaftServerConnection`.
@@ -74,8 +75,8 @@ base  ◀── net ◀── raft
   └── wal_sender
 ```
 
-`base` depends on nothing in this repo. Only `raft` pulls the layers together. The node process
-that wires it to the other modules is not written yet (see [node.md](node.md)).
+`base` depends on nothing in this repo. `backup` depends on `base`; `node` depends on every
+module but `proxy`, and `proxy` on `raft` (its client channel). See [node.md](node.md).
 
 ## Cross-cutting conventions
 

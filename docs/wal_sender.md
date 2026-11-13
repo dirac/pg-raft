@@ -10,9 +10,10 @@ a primary towards the standby**. It implements just enough of the streaming repl
 protocol for an unmodified PostgreSQL standby to connect with `primary_conninfo` and stream WAL.
 
 The key property is that **the sender never streams past the LSN that pg-raft allows**.
-`advance(lsn)` is the only way to move the stream forward, and the Raft layer calls it with the
-*committed* `WalCommand::flushed_lsn`. A standby therefore never applies WAL that could later be
-truncated by a leader change.
+`advance(LogSeqNumber)` is the only way to move the stream forward, and the node calls it with the
+*committed* `RaftState::flushed_lsn` as entries are applied (and with `wal_end` when it promotes,
+[node.md](node.md#32-promotion-became_leader)). A standby therefore never applies WAL that could
+later be truncated by a leader change.
 
 ## 2. Components
 
@@ -20,11 +21,24 @@ truncated by a leader change.
 
 This is a **Unix-domain-socket** acceptor. Standbys connect locally.
 
+```cpp
+auto server = WalSenderServer::create(
+    socket_dir, port, wal_dir, system_id, timeline, initial_flush_lsn,
+    [](shared_ptr<WalSender> s) { /* keep s, call s->advance() later */ },
+    [](StandbyStatus const& st) { /* the standby's written/flushed/applied LSNs */ });
+if (!server->start()) { ... }
+// standby: primary_conninfo = 'host=<socket_dir> port=<server->bound_port()>'
+server->shutdown();
+```
+
 - `start()` looks for a free `socket_dir/.s.PGSQL.<port>`. If the file already exists, it tries
   the next port number until one is free. It then binds and listens with a backlog of 16. The
   standby uses `primary_conninfo = 'host=<socket_dir> port=<bound_port()>'`.
 - For each connection it creates a `WalSender`, calls `start()` on it, and hands it to
   `on_sender`. The owner keeps it so it can call `advance()` and `shutdown()` later.
+- `bound_port()` and `socket_path()` report what was bound.
+- Every sender reports the standby's `StandbyStatusUpdate`s to the `status_cb` passed to
+  `create()`.
 - `shutdown()` closes the acceptor and removes the socket file. Running senders are not
   affected.
 - The constructor takes the **identity of the stream**: `system_id` (from `pg_controldata` of
@@ -103,37 +117,41 @@ written to the wire as two big-endian 32-bit halves. Text LSNs use the form `X/Y
 
 ## 3. Role in pg-raft
 
-```
-RaftServer (follower)                 WalSender ──XLogData──▶ local standby postgres
-  on commit of entry e:                   ▲
-    sender->advance(e.cmd.flushed_lsn) ───┘
-  StatusCb(standby flushed/applied) ──▶ Status.standby_applied_lsn in RaftResponse
-```
+Every node runs one `WalSenderServer` (`Node`), on `config.socket_dir` and port `pg_port + 20000`
+(so that it can't take another node's PostgreSQL socket in the same directory), reading raft's
+`wal_dir` (`raft/wal`). Its standby's `primary_conninfo` points at it.
 
-On the leader, the same server can feed any standby that is attached directly.
+```
+RaftObserver::applied(state)          WalSender ──XLogData──▶ local standby postgres
+  sender->advance(state.flushed_lsn) ───▲
+became_leader: advance(state.wal_end) ──┘
+StatusCb(standby flushed) ──▶ the promotion waits until the standby has flushed wal_end
+```
 
 ## 4. Testing
 
 | Test | Scenario |
 |---|---|
 | `wal_sender_test` | A real primary plus a standby that replicates through `WalSenderServer`. A loop polls `pg_current_wal_flush_lsn()` and calls `advance()`. pgbench runs, and the test checks that the LSNs and row counts converge. |
-| `pg_wal_switch_test` | Same setup, plus four concurrent `pg_switch_wal()` calls during pgbench. Checks that streaming crosses forced segment boundaries. |
+| `pg_wal_switch_test` | Same setup, plus four `pg_switch_wal()` calls, 150 ms apart, while pgbench runs. Checks that streaming crosses forced segment boundaries. |
 | `standby_wal_reset_test` | The standby is stopped, its `pg_wal` wiped, and it is restarted after more pgbench. Checks that the sender re-streams from the standby's requested LSN. |
+| `timeline_switch_test` | A failover: another standby is promoted to timeline 2 (through `PgInstance::promote()`) after the primary stops; the standby behind `WalSender`, reading a directory that mirrors the WAL as `raft/wal` would, follows onto timeline 2 and converges. |
 
-## 5. Known issues and open items
+## 5. Open items
 
-1. **`StatusCb`** — fixed: `WalSenderServer::create(..., on_sender, status_cb)` passes it to every
-   sender.
-2. **Unlinked segments.** `WalFuseOps::op_unlink` renames `X` to `.X`, but `do_advance` opens only
-   `X`. A standby that falls behind PostgreSQL's checkpoint-driven removal stalls silently. It
-   should fall back to `.X`, as `WalSegment::open` does, or read through the shared
-   `WalSegment` cache. That would also avoid an open/pread/close on every advance.
-3. **Message size.** A single `XLogData` can carry up to 16 MiB, and each `advance` allocates a
+1. **Unlinked segments.** `do_advance` opens `X` only, never `.X` (what `WalFuseOps::op_unlink`
+   renames a removed segment to). In a node the sender reads `raft/wal`, which has no `.X` files,
+   so this only matters for a sender reading a live `pg_wal` (the tests). Reading through the
+   shared `WalSegment` cache would also avoid an open/pread/close on every advance.
+2. **Message size.** A single `XLogData` can carry up to 16 MiB, and each `advance` allocates a
    new `Bytes`. The chunk size should be capped (PostgreSQL uses 128 KiB) to bound memory and
    latency.
-4. **Timelines** — implemented (above), tested by `timeline_switch_test`.
+3. `server_version` is hardcoded to `17.0`. It should come from `Config::pg_major_version`.
+4. Some errors close the socket without notifying the owner, which still holds the
+   `shared_ptr<WalSender>`. A close callback is needed so the owner can drop it (the node keeps
+   weak pointers, so they just expire).
 5. Command matching: `IDENTIFY_SYSTEM`, `START_REPLICATION` and `TIMELINE_HISTORY` match on the
-   start of the command; `SET`/`SHOW`/`SELECT` already did.
-6. `server_version` is hardcoded to `17.0`. It should come from `Config::pg_major_version`.
-7. Some errors close the socket without notifying the owner, which still holds the
-   `shared_ptr<WalSender>`. A close callback is needed so the owner can drop it.
+   start of the command; anything else that is not `SET`, `SHOW` or `SELECT` is an error.
+6. The end-of-timeline reply (the result set, then a second CommandComplete) follows PostgreSQL's
+   walreceiver code; it works with PostgreSQL 17, but it was not compared byte for byte with
+   PostgreSQL's own walsender.

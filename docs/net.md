@@ -64,6 +64,10 @@ The `ssl_socket` alternative is kept so that TLS can be enabled later. Nothing c
 
 ### 2.4 `Connection`
 
+The base class of every framed connection. Instantiate a subclass through
+`Connection::create<DerivedType>(...)`, which constructs it and calls `start()` (once); override
+`on_shutdown()` to release resources when the connection closes.
+
 #### Wire format
 
 Every frame starts with a header of **six little-endian 32-bit words**. The header is read in one

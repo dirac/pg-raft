@@ -997,24 +997,23 @@ length.
 
 ## 12. Action items for pg-raft
 
-1. **`PgInstance::promote()` doesn't promote PostgreSQL** (§8.1). Create `data_dir/promote` before
-   sending SIGUSR1, or use `pg_ctl promote` or `pg_promote()`. Set `role_` only after
-   `pg_is_in_recovery()` returns false. Add a `pg_instance_test` case that promotes a real standby.
-2. **Timeline support in `WalSender`** (§6.4, §8): it needs real `TIMELINE_HISTORY` contents,
-   `START_REPLICATION ... TIMELINE n` handling, and the end-of-timeline CopyDone and result-set
-   handshake. Today it returns an empty history and treats CopyDone as a disconnect.
-3. **Non-segment files in `pg_wal`** (§8.4): make sure `WalFuseOps` passes `*.history`,
-   `*.partial`, `xlogtemp.*`, `archive_status/` and `summaries/` through untouched. Decide how a
-   segment created as `xlogtemp.<pid>` and renamed into place is tracked (§2.4, §9.4).
-4. **Streaming boundary = durable boundary** (§6.3): advance `WalSender` only from fsync-confirmed
-   (and, later, Raft-committed) LSNs.
-5. **Leader change semantics** (§8.5): decide whether the WAL a new leader exposes must end on a
-   record boundary. Handle a WAL tail cut mid-record the way PostgreSQL does
-   (`OVERWRITE_CONTRECORD`), or make sure it can never happen.
-6. **Keep `wal_sync_method=fsync`** (§2.2). `F_FULLFSYNC` and `open_*sync` would bypass the fsync
-   hook.
-7. **Expect WAL at clean shutdown** (§2.5). The shutdown checkpoint record must reach the standby
-   for the final LSNs to match.
+Status as of 2026-11 (open ones are also in [`todo.md`](../todo.md)):
+
+1. **Done.** `PgInstance::promote()` creates `data_dir/promote` before SIGUSR1. `role_` is still
+   set before the promotion finishes ([process.md](process.md#5-open-items) item 1); the node waits
+   for the new timeline instead.
+2. **Done.** Timeline support in `WalSender`: `TIMELINE_HISTORY`, `START_REPLICATION ... TIMELINE
+   n`, and the end-of-timeline handshake (`timeline_switch_test`).
+3. **Done for history files** (`op_rename` → `TimelineOp`). Other non-segment files
+   (`*.partial`, `xlogtemp.*`, `archive_status/`, `summaries/`) pass through untouched; the
+   `xlogtemp.*` copy that starts a new timeline is read from the parent timeline's segment.
+4. **Done.** `WalSender` advances only to the committed `flushed_lsn`.
+5. **Done.** A new leader's standby receives everything up to `wal_end` before promotion;
+   PostgreSQL replays to the last complete record, discards an incomplete one at the end and
+   starts the new timeline there ([node.md](node.md#32-promotion-became_leader)). Demotion
+   rebuilds `pg/pg_wal` up to the committed end.
+6. **Done.** `write_config` sets `wal_sync_method=fsync`.
+7. **Done.** `node_test` checks that the standbys converge on the final LSN.
 
 ---
 
