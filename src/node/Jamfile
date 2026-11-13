@@ -49,6 +49,7 @@ unit-test node_wal_tracker_test
 unit-test node_test
   : node_test.cc
     libs
+    ../proxy//proxy
     ../base//testing
   ;
 

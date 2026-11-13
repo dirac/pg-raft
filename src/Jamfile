@@ -7,3 +7,4 @@ build-project wal_sender ;
 build-project raft ;
 build-project backup ;
 build-project node ;
+build-project proxy ;

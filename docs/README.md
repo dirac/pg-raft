@@ -14,7 +14,7 @@ way, and the known gaps.
 | `raft` | [raft.md](raft.md) | Implemented, tested; not yet wired into a node |
 | `node` | [node.md](node.md) | In progress: `pg_raft_initdb`, `NodeWalTracker`, `Node` startup, promotion and demotion implemented and tested; joining and backups after bootstrap not yet |
 | `backup` | [backup.md](backup.md) | `BackupStore` and `DirBackupStore` implemented, tested; not yet used by a node |
-| `proxy` | [proxy.md](proxy.md) | Designed; not started (empty directory) |
+| `proxy` | [proxy.md](proxy.md) | Implemented, tested |
 
 `base` is shared infrastructure (logger, `Result<T>`, `Int<T,L>`, `Config`, `IoThreads`,
 `WalSegment`), and `CLAUDE.md` describes it. This set covers `WalSegment` because `wal_fuse` and

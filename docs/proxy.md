@@ -1,7 +1,7 @@
-# `proxy` — Client entry point (design)
+# `proxy` — Client entry point
 
-Source: `src/proxy/` is **empty**, and the module is not in the build. This document is the
-agreed design.
+Source: `src/proxy/` — `proxy.{h,cc}` (`LeaderTracker`, `Bridge`, `Proxy`), `pg_raft_proxy.cc`
+(`pg_raft_proxy --config config.toml`), `proxy_test.cc`. Implemented as designed below, on Boost.Asio.
 
 ## 1. Purpose
 
@@ -123,12 +123,17 @@ The ports `proxy_pg_port .. proxy_pg_port + servers.size()` must not collide wit
 listening on the same host. In particular, a server co-located with the proxy cannot use 5432
 when the proxy does.
 
-## 6. Open items
+## 6. Testing
 
-1. **Raft dependency.** `RaftServerConnection` and `RaftClientConnection` are in `src/raft`. The
-   proxy links the `raft_client` library (`raft_server_connection.cc`, a separate target in
-   `raft/Jamfile.jam`), and needs the node process to be running for
-   `RaftClientConnection::status()` to report a serving leader.
-2. **Admin interface** on `proxy_http_port` (status, current primary). Not designed yet.
-3. **Failover window and timeouts**: the hold time when there is no primary, and the upstream
-   connect timeout.
+- `proxy_test`: an in-process raft ensemble and fake PostgreSQL echo servers. The per-server ports
+  reach their server; a primary-port client is held while no node serves and connected when the
+  leader starts serving; on a hand-over the old primary's primary-port clients are closed, new ones
+  reach the new primary, and a per-server client is untouched; with no primary for longer than the
+  failover window, a client is closed.
+- `node_test` runs pgbench through the proxy's primary port, before and after a hand-over.
+
+## 7. Open items
+
+1. **Admin interface** on `proxy_http_port` (status, current primary). Not designed yet.
+2. Options (`ProxyOptions`): failover window 30 s, upstream connect timeout 5 s, raft status
+   heartbeats every 100 ms; not in `config.toml` yet.

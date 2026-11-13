@@ -5,23 +5,26 @@
 #include "src/base/io_threads.h"
 #include "src/base/testing.h"
 #include "src/node/init.h"
+#include "src/proxy/proxy.h"
 #include "src/status/pg_client.h"
 
 // docs/node.md test 1, the steady state: pg_raft_initdb, then 3 nodes in one process (3 raft
 // servers, 3 FUSE mounts, 3 PostgreSQL instances). One becomes the primary (timeline 2, after the
 // promotion of the restored backup), pgbench runs on it, and the two standbys converge through
 // their WAL senders, by LSN and row count. Then a hand-over: the primary steps down, another
-// promotes (timeline 3), the old one is demoted to a standby, and all converge again.
+// promotes (timeline 3), the old one is demoted to a standby, and all converge again. pgbench
+// runs through the proxy's primary port, which follows the primary.
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 namespace {
 
-constexpr unsigned kNodes    = 3;
-constexpr uint16_t kPgPort   = 15530;  // + i
-constexpr uint16_t kHaPort   = 15540;  // + i
-constexpr uint16_t kInitPort = 15550;
+constexpr unsigned kNodes     = 3;
+constexpr uint16_t kPgPort    = 15530;  // + i
+constexpr uint16_t kHaPort    = 15540;  // + i
+constexpr uint16_t kInitPort  = 15550;
+constexpr uint16_t kProxyPort = 15660;  // + 1 + i for the servers
 
 string query(uint16_t port, char const* sql) {
   auto conn = PgClient::connect(port);
@@ -81,8 +84,16 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
                            .pg_port  = static_cast<uint16_t>(kPgPort + i),
                            .ha_port  = static_cast<uint16_t>(kHaPort + i)});
 
+  cfg.proxy_pg_port = kProxyPort;
+
   auto store = DirBackupStore{cfg.backup_store};
   BOOST_REQUIRE(init_cluster(cfg, store, kInitPort).has_value());
+
+  // The clients go through the proxy's primary port.
+  auto proxy_options           = ProxyOptions{};
+  proxy_options.listen_address = "127.0.0.1";
+  auto proxy                   = Proxy::create(io_context(), cfg, proxy_options);
+  BOOST_REQUIRE(proxy->start().has_value());
 
   auto options                        = NodeOptions{};
   options.raft.election_timeout_msecs = 1000;
@@ -109,8 +120,10 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
   BOOST_TEST(primary->raft()->serving());
 
   // Writes on the primary: every commit waits for a quorum.
-  pgbench(cfg, primary->pg_port(), {"-i"});
-  pgbench(cfg, primary->pg_port(), {"-t", "200", "-c", "4"});
+  BOOST_REQUIRE(wait_for(
+      30s, [&] { return proxy->primary() == std::optional<unsigned>{INT(primary->id())}; }));
+  pgbench(cfg, kProxyPort, {"-i"});
+  pgbench(cfg, kProxyPort, {"-t", "200", "-c", "4"});
   auto flushed = lsn(query(primary->pg_port(), "SELECT pg_current_wal_flush_lsn()::text"));
   auto rows    = query(primary->pg_port(), "SELECT count(*)::text FROM pgbench_history");
   BOOST_TEST(rows == "800");
@@ -148,7 +161,9 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
 
   // -n: no vacuum and no truncation of pgbench_history, so that the rows of before the hand-over
   // must still be there.
-  pgbench(cfg, primary->pg_port(), {"-n", "-t", "100", "-c", "4"});
+  BOOST_REQUIRE(wait_for(
+      30s, [&] { return proxy->primary() == std::optional<unsigned>{INT(primary->id())}; }));
+  pgbench(cfg, kProxyPort, {"-n", "-t", "100", "-c", "4"});
   flushed = lsn(query(primary->pg_port(), "SELECT pg_current_wal_flush_lsn()::text"));
   rows    = query(primary->pg_port(), "SELECT count(*)::text FROM pgbench_history");
   BOOST_TEST(rows == "1200");
@@ -166,6 +181,7 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
     BOOST_TEST(query(port, "SELECT count(*)::text FROM pgbench_history") == rows);
   }
 
+  proxy->stop();
   for (auto& n : nodes)
     n->shutdown();
 }

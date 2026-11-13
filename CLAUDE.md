@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **WAL interception** (`wal_fuse`) — a FUSE filesystem that mounts over `pg_wal` so that all WAL writes are transparently redirected to a separate `raft_dir/pg_wal` directory under pg-raft's control.
 2. **WAL streaming** (`wal_sender`) — a C++ server that speaks the PostgreSQL physical streaming replication protocol, streaming WAL from disk to a real PostgreSQL standby.
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
-4. **Raft** (`raft`) — consensus over the WAL stream. `src/proxy/` is empty.
+4. **Raft** (`raft`) — consensus over the WAL stream, the **node** process (`node`), and the client **proxy** (`proxy`).
 
 Per-component design documents are in `docs/` (one per module, plus `README.md`).
 
@@ -60,6 +60,7 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 /opt/pg_raft/bin/b2 src/node//node_test
 /opt/pg_raft/bin/b2 src/node//node_backup_test
 /opt/pg_raft/bin/b2 src/node//node_recovery_test
+/opt/pg_raft/bin/b2 src/proxy//proxy_test
 /opt/pg_raft/bin/b2 src/raft//raft_ensemble_sanity_test   # also _leader_stopped_, _stepdown_, _snapshot_, _needs_backup_, _keep_from_
 /opt/pg_raft/bin/b2 src/base//config_test
 
@@ -187,7 +188,7 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 - **`pg_raft_initdb --config config.toml [--port N]`** (`pg_raft_initdb.cc`, `init_cluster()` in `init.h`) — creates a cluster's first backup: initdb (with `pg_config` and the pg-raft defaults) into a scratch dir under `wdir`, start PostgreSQL on `--port` (default `servers[0].pg_port`) without FUSE, `pg_basebackup`, `verify_backup`, then `store.begin(0)` / `put` with the end LSN from `backup_manifest` (`backup_end_lsn()`). Refuses a store that already holds a backup. `pg_bin(config)` is `install_dir/<pg_major_version>/bin`.
 - **`NodeWalTracker(shared_ptr<RaftServer>)`** (`node_wal_tracker.h`) — the node's `WalTracker`. `set_mode(kLeader | kFollower)`, `set_flushed_lsn()` (from the status poller). Leader mode: `async_publish` copies the bytes into raft's `wal_dir` segment, then `exec(WriteOp)`; `async_fsync` msyncs both copies, then `exec(FlushOp)` and completes on commit, or with `WalSegment::kNoConsensus` if not leader; `async_timeline` → `exec(TimelineOp)`. Follower mode: publish/timeline ignored, fsync is a local msync. Fenced mode (set when the node loses leadership, until PostgreSQL restarts as a standby): every fsync fails with `kNoConsensus`.
 
-**`src/proxy/`** — empty. Planned: a Partow-style plain TCP proxy (not on `net`); `proxy_pg_port` → current leader, `proxy_pg_port + 1 + i` → `servers[i]`; TLS passed through to PostgreSQL; no read-only routing; leader learned via `RaftServerConnection` heartbeat status. See `docs/proxy.md`.
+**`src/proxy/`** — The client entry point (`docs/proxy.md`), a plain Boost.Asio TCP proxy (not on `net`): `proxy_pg_port` → the PostgreSQL of the node raft reports as leader and serving, `proxy_pg_port + 1 + i` → `servers[i]`. `LeaderTracker` keeps a `RaftServerConnection` (identity `proxy`) to each node's `ha_port` and reads the heartbeat status byte (`0x3` = serving); the primary is the one node serving. `Bridge` pumps both directions (one read in flight each way, 16 KiB buffers) on its own strand and closes both sockets once; `TCP_NODELAY` and keepalive. A primary-port client with no primary is held up to `ProxyOptions::failover_window` (30 s), then closed; a primary change closes the old primary's primary-port bridges. `pg_raft_proxy --config config.toml`.
 
 **`src/status/`** — PostgreSQL client for querying a running instance:
 
@@ -270,7 +271,8 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 - **`backup_store_test`** — backup names (round trip, rejects, sort order), `keep_from`, the staggered deadlines, leases, and `DirBackupStore` put/list/get/remove, partial copies and leases. No PostgreSQL needed.
 - **`init_test`** — `backup_end_lsn()` from a manifest, and `init_cluster()` with real PostgreSQL: one verified backup in the store, which restores and starts as a primary with the configured settings; a second init is refused. Requires PostgreSQL for the second case.
 - **`node_wal_tracker_test`** — `NodeWalTracker` against a 3-node in-process raft ensemble: leader mode replicates the published bytes to every `wal_dir` and completes the fsync on commit (with `flushed_lsn` and `wal_end` in every state); leader mode on a follower fails the fsync with `kNoConsensus`; follower mode adds no entry and copies nothing; a timeline's history file reaches every node.
-- **`node_test`** — `docs/node.md` test 1: `pg_raft_initdb`, then 3 `Node`s in one process (3 raft servers, 3 FUSE mounts, 3 PostgreSQL); one becomes the primary on timeline 2, pgbench runs on it, the standbys converge by LSN and row count; then the primary steps down, another promotes to timeline 3, the old one is demoted to a standby, and all converge again (1200 rows). ~2 minutes.
+- **`proxy_test`** — the proxy against an in-process raft ensemble and fake PostgreSQL echo servers: per-server routing, holding a primary-port client until a primary serves, closing the old primary's clients on a hand-over, closing after the failover window.
+- **`node_test`** — `docs/node.md` test 1 (pgbench through the proxy): `pg_raft_initdb`, then 3 `Node`s in one process (3 raft servers, 3 FUSE mounts, 3 PostgreSQL); one becomes the primary on timeline 2, pgbench runs on it, the standbys converge by LSN and row count; then the primary steps down, another promotes to timeline 3, the old one is demoted to a standby, and all converge again (1200 rows). ~2 minutes.
 - **`node_recovery_test`** — `docs/node.md` test 3: backups every 15 s move `keep_from`, the leader compacts; a follower's whole directory is deleted, it restarts, restores, gets an InstallSnapshot of the oldest entries, and catches up (1200 rows, `needs_backup` cleared).
 - **`raft_ensemble_keep_from_test`** — `set_wal_keep_from` compacts every server to the first entry of the kept segment, the earlier segments are deleted, and a wiped server catches up through InstallSnapshot of the oldest entries with the leader's boundary state.
 - **`node_backup_test`** — 3 nodes with `backup_interval_secs = 15`: a standby (never the primary) stores a backup on timeline 2 after pgbench, no lease is left, and the backup restores and holds the 100000 accounts.

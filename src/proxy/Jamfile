@@ -1,0 +1,27 @@
+alias deps
+  : ../base//libs
+    ../net//libs
+    ../raft//libs
+  ;
+
+lib proxy
+  : proxy.cc
+    deps
+  ;
+
+alias libs
+  : deps
+    proxy
+  ;
+
+exe pg_raft_proxy
+  : pg_raft_proxy.cc
+    libs
+  ;
+
+unit-test proxy_test
+  : proxy_test.cc
+    libs
+    ../raft//raft_test
+    ../base//testing
+  ;
