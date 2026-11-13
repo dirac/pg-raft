@@ -57,7 +57,7 @@ std::optional<LogSeqNumber> log_seq_number(char const* path) {
 
     return std::nullopt;
   }
-  if (path[25] != '\0')
+  if (path[24] != '\0')
     return std::nullopt;
 
   // Zero-allocation slicing using std::string_view
