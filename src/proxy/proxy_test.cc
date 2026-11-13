@@ -1,6 +1,9 @@
 #define BOOST_TEST_MODULE proxy
 #include "src/proxy/proxy.h"
 
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+
 #include "src/raft/raft_ensemble_test_common.h"
 
 // The proxy against an in-process raft ensemble (the leader learned from raft's client channel)
@@ -72,6 +75,25 @@ struct Client {
   tcp::socket             socket{io};
 };
 
+/// GET (or another method) on the admin interface: the status code and the body.
+std::tuple<unsigned, string> http(uint16_t                 port,
+                                  string const&            target,
+                                  boost::beast::http::verb verb = boost::beast::http::verb::get) {
+  namespace http = boost::beast::http;
+  boost::asio::io_context  io;
+  boost::beast::tcp_stream stream(io);
+  stream.connect(tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), port));
+  http::request<http::string_body> req{verb, target, 11};
+  req.set(http::field::host, "localhost");
+  http::write(stream, req);
+  boost::beast::flat_buffer         buffer;
+  http::response<http::string_body> res;
+  http::read(stream, buffer, res);
+  boost::beast::error_code ec;
+  stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+  return {res.result_int(), res.body()};
+}
+
 bool wait_for(std::chrono::seconds timeout, std::function<bool()> const& pred) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -97,7 +119,8 @@ BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) 
     pg.push_back(make_unique<EchoServer>(io, i));
     cfg.servers.at(i).pg_port = pg.back()->port();
   }
-  cfg.proxy_pg_port = kProxyPort;
+  cfg.proxy_pg_port   = kProxyPort;
+  cfg.proxy_http_port = 0;  // the admin interface on an ephemeral port
 
   service.start_all();
   service.wait_for_leader();
@@ -107,6 +130,24 @@ BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) 
   opts.listen_address  = "127.0.0.1";
   auto proxy           = Proxy::create(io, cfg, opts);
   BOOST_REQUIRE(proxy->start().has_value());
+
+  auto const admin = proxy->admin_port();
+  BOOST_REQUIRE(admin != 0);
+
+  // The admin interface: up, and no primary yet.
+  BOOST_TEST((http(admin, "/health") == std::tuple<unsigned, string>{200, "ok\n"}));
+  {
+    auto [code, body] = http(admin, "/primary");
+    BOOST_TEST(code == 503U);
+    BOOST_TEST(boost::json::parse(body).at("server").is_null());
+  }
+  BOOST_TEST(std::get<0>(http(admin, "/nope")) == 404U);
+  {
+    auto [code, page] = http(admin, "/primary.html");
+    BOOST_TEST(code == 503U);
+    BOOST_TEST(page.find("No primary") != string::npos);
+  }
+  BOOST_TEST(std::get<0>(http(admin, "/status", boost::beast::http::verb::post)) == 405U);
 
   // 1. The per-server ports reach their server, whatever its role.
   for (unsigned i = 0; i < 3; ++i) {
@@ -135,6 +176,57 @@ BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) 
   BOOST_TEST(on_primary.ask("a") == std::format("node{}:a", leader));
   Client on_server(static_cast<uint16_t>(kProxyPort + 1 + leader));
   BOOST_TEST(on_server.ask("b") == std::format("node{}:b", leader));
+
+  // The admin interface sees the primary, every node, and the open bridges.
+  {
+    auto [code, body] = http(admin, "/primary");
+    BOOST_TEST(code == 200U);
+    auto p = boost::json::parse(body).as_object();
+    BOOST_TEST(p.at("server").as_int64() == leader);
+    BOOST_TEST(p.at("pg_port").as_int64() == cfg.servers.at(leader).pg_port);
+  }
+  {
+    auto [code, body] = http(admin, "/status");
+    BOOST_TEST(code == 200U);
+    auto st = boost::json::parse(body).as_object();
+    BOOST_TEST(st.at("primary").as_int64() == leader);
+    auto const& servers = st.at("servers").as_array();
+    BOOST_REQUIRE(servers.size() == 3U);
+    for (unsigned i = 0; i < 3; ++i) {
+      auto const& s = servers.at(i).as_object();
+      BOOST_TEST(s.at("connected").as_bool(), i);
+      BOOST_TEST(s.at("serving").as_bool() == (i == leader), i);
+      BOOST_TEST(s.at("leader").as_bool() == (i == leader), i);
+      BOOST_TEST(s.contains("applied_idx"), i);
+    }
+    auto const& bridges = st.at("bridges").as_object();
+    BOOST_TEST(bridges.at("primary").as_int64() >= 1);
+    BOOST_TEST(bridges.at("servers").as_array().at(leader).as_int64() >= 1);
+  }
+
+  // The extension picks the format: .json is the same JSON, .html a page.
+  {
+    auto [code, body] = http(admin, "/status.json");
+    BOOST_TEST(code == 200U);
+    BOOST_TEST(boost::json::parse(body).as_object().at("primary").as_int64() == leader);
+
+    auto [pcode, pbody] = http(admin, "/primary.json");
+    BOOST_TEST(pcode == 200U);
+    BOOST_TEST(boost::json::parse(pbody).as_object().at("server").as_int64() == leader);
+
+    auto [hcode, page] = http(admin, "/status.html");
+    BOOST_TEST(hcode == 200U);
+    BOOST_TEST(page.starts_with("<!doctype html>"));
+    BOOST_TEST(page.find(std::format("primary: server {}.", leader)) != string::npos);
+    BOOST_TEST(page.find("<th>Serving</th>") != string::npos);
+
+    auto [phcode, ppage] = http(admin, "/primary.html");
+    BOOST_TEST(phcode == 200U);
+    BOOST_TEST(ppage.find(std::format(
+                   "Server {} &mdash; 127.0.0.1:{}", leader, cfg.servers.at(leader).pg_port)) !=
+               string::npos);
+    BOOST_TEST(std::get<0>(http(admin, "/nope.html")) == 404U);
+  }
 
   // 4. A hand-over: the old primary's primary-port clients are cut; new ones reach the new
   //    primary; the per-server port's client is untouched.

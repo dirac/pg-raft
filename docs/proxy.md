@@ -123,17 +123,35 @@ The ports `proxy_pg_port .. proxy_pg_port + servers.size()` must not collide wit
 listening on the same host. In particular, a server co-located with the proxy cannot use 5432
 when the proxy does.
 
-## 6. Testing
+## 6. Admin interface
 
-- `proxy_test`: an in-process raft ensemble and fake PostgreSQL echo servers. The per-server ports
+HTTP/1.1 on `proxy_http_port`, with Boost.Beast (`src/proxy/admin.{h,cc}`), read-only. The
+extension picks the format: `.json` (or none) is JSON, `.html` an HTML page that refreshes every
+5 s.
+
+| Request | Response |
+|---|---|
+| `GET /health` | `200 ok` |
+| `GET /primary[.json\|.html]` | `200` with the primary's `server`, `hostname` and `pg_port`; `503` (`"server": null`) when there is no primary |
+| `GET /status[.json\|.html]` | `200`: the primary port, the primary, every server (`connected`, `leader`, `serving`, and its raft status: `applied_idx`, `primary_flushed_lsn`, `standby_applied_lsn`), and the open bridges per port |
+| other | `404`, or `405` for a method other than GET |
+
+`/status` asks each node for its raft status (up to 2 s each) on a thread of its own, and writes
+the response on the session's executor; an exception there is a `500`, never the end of the proxy.
+`ProxyOptions::admin = false` turns it off; `proxy_http_port = 0` takes an ephemeral port
+(`Proxy::admin_port()`).
+
+## 7. Testing
+
+- `proxy_test`: an in-process raft ensemble and fake PostgreSQL echo servers. It also checks the
+  admin interface: `/health`, `/primary` and `/status` in JSON and HTML, 404 and 405. The per-server ports
   reach their server; a primary-port client is held while no node serves and connected when the
   leader starts serving; on a hand-over the old primary's primary-port clients are closed, new ones
   reach the new primary, and a per-server client is untouched; with no primary for longer than the
   failover window, a client is closed.
 - `node_test` runs pgbench through the proxy's primary port, before and after a hand-over.
 
-## 7. Open items
+## 8. Open items
 
-1. **Admin interface** on `proxy_http_port` (status, current primary). Not designed yet.
-2. Options (`ProxyOptions`): failover window 30 s, upstream connect timeout 5 s, raft status
+1. Options (`ProxyOptions`): failover window 30 s, upstream connect timeout 5 s, raft status
    heartbeats every 100 ms; not in `config.toml` yet.

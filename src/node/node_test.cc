@@ -84,7 +84,8 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
                            .pg_port  = static_cast<uint16_t>(kPgPort + i),
                            .ha_port  = static_cast<uint16_t>(kHaPort + i)});
 
-  cfg.proxy_pg_port = kProxyPort;
+  cfg.proxy_pg_port   = kProxyPort;
+  cfg.proxy_http_port = 0;  // the admin interface on an ephemeral port
 
   auto store = DirBackupStore{cfg.backup_store};
   BOOST_REQUIRE(init_cluster(cfg, store, kInitPort).has_value());

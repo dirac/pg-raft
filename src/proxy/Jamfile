@@ -6,6 +6,7 @@ alias deps
 
 lib proxy
   : proxy.cc
+    admin.cc
     deps
   ;
 

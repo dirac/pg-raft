@@ -2,6 +2,7 @@
 
 #include "src/base/logger.h"
 #include "src/net/async_connect.h"
+#include "src/proxy/admin.h"
 
 using tcp        = asio::ip::tcp;
 using error_code = boost::system::error_code;
@@ -42,6 +43,11 @@ void LeaderTracker::stop() {
 std::optional<unsigned> LeaderTracker::primary() const {
   auto lk = std::unique_lock{mtx_};
   return primary_;
+}
+
+vector<shared_ptr<RaftServerConnection>> LeaderTracker::connections() const {
+  auto lk = std::unique_lock{mtx_};
+  return conns_;
 }
 
 void LeaderTracker::connect(unsigned node) {
@@ -232,6 +238,12 @@ Result<void> Proxy::start() {
     acceptors_.push_back(std::move(a));
   }
 
+  if (options_.admin) {
+    admin_ = make_shared<AdminServer>(io_, weak_from_this());
+    if (auto r = admin_->start(address, config_.proxy_http_port); !r)
+      return r;
+  }
+
   tracker_->start();
   for (size_t i = 0; i < acceptors_.size(); ++i)
     accept(i);
@@ -250,6 +262,8 @@ void Proxy::stop() {
     error_code ec;
     a->close(ec);
   }
+  if (admin_)
+    admin_->stop();
   if (tracker_)
     tracker_->stop();
   auto lk = std::unique_lock{bridges_mtx_};
@@ -348,6 +362,66 @@ void Proxy::connect_upstream(shared_ptr<tcp::socket> client, unsigned node, bool
                 bridge->close();
             });
       });
+}
+
+uint16_t Proxy::admin_port() const {
+  return admin_ ? admin_->port() : 0;
+}
+
+boost::json::object Proxy::status() const {
+  auto lsn = [](std::optional<uint64_t> l) -> boost::json::value {
+    if (!l)
+      return nullptr;
+    return boost::json::value(
+        boost::json::string(std::format("{:X}/{:X}", *l >> 32U, *l & 0xFFFFFFFFU)));
+  };
+
+  auto const primary = tracker_->primary();
+  auto const conns   = tracker_->connections();
+
+  boost::json::array servers;
+  for (unsigned i = 0; i < config_.servers.size(); ++i) {
+    auto const&         s = config_.servers.at(i);
+    boost::json::object o{
+        {"id", i}, {"hostname", s.hostname}, {"pg_port", s.pg_port}, {"ha_port", s.ha_port}};
+    auto const c   = i < conns.size() ? conns.at(i) : nullptr;
+    o["connected"] = c && !c->closed();
+    o["leader"]    = c && c->is_leader();
+    o["serving"]   = c && c->is_serving();
+    if (c && !c->closed()) {
+      if (auto st = c->node_status(); st) {
+        o["applied_idx"]         = INT(st->applied_idx);
+        o["primary_flushed_lsn"] = lsn(st->primary_flushed_lsn);
+        o["standby_applied_lsn"] = lsn(st->standby_applied_lsn);
+      } else {
+        o["error"] = st.error().message();
+      }
+    }
+    servers.push_back(std::move(o));
+  }
+
+  // The open bridges, per port.
+  uint64_t              on_primary = 0;
+  std::vector<uint64_t> on_server(config_.servers.size(), 0);
+  {
+    auto lk = std::unique_lock{bridges_mtx_};
+    for (auto const& w : bridges_)
+      if (auto b = w.lock()) {
+        if (b->primary())
+          ++on_primary;
+        else
+          ++on_server.at(b->node());
+      }
+  }
+
+  return boost::json::object{
+      {"proxy_pg_port", config_.proxy_pg_port},
+      {"primary", primary ? boost::json::value(*primary) : boost::json::value(nullptr)},
+      {"servers", std::move(servers)},
+      {"bridges",
+       boost::json::object{{"primary", on_primary},
+                           {"servers", boost::json::array(on_server.begin(), on_server.end())}}},
+  };
 }
 
 void Proxy::on_primary_change(std::optional<unsigned> primary) {

@@ -20,6 +20,7 @@ struct ProxyOptions {
   std::chrono::milliseconds connect_timeout{5000};   // upstream connect
   std::chrono::milliseconds status_timeout{1000};    // raft connections: heartbeats every 100 ms
   std::chrono::milliseconds reconnect_interval{500};
+  bool                      admin          = true;  // the admin interface on proxy_http_port
   string                    listen_address = "0.0.0.0";
 };
 
@@ -40,6 +41,9 @@ class LeaderTracker : public std::enable_shared_from_this<LeaderTracker> {
   /// (during a transition).
   std::optional<unsigned> primary() const;
 
+  /// The connection to each node (nullptr while it is not connected).
+  vector<shared_ptr<RaftServerConnection>> connections() const;
+
  private:
   void connect(unsigned node);
   void check();
@@ -58,6 +62,7 @@ class LeaderTracker : public std::enable_shared_from_this<LeaderTracker> {
 };
 
 class Bridge;
+class AdminServer;
 
 class Proxy : public std::enable_shared_from_this<Proxy> {
  public:
@@ -68,6 +73,15 @@ class Proxy : public std::enable_shared_from_this<Proxy> {
   void         stop();
 
   std::optional<unsigned> primary() const { return tracker_->primary(); }
+
+  /// The admin interface's view (GET /status). Blocks up to 2 s per node (a raft status request):
+  /// call it off the io threads.
+  boost::json::object status() const;
+
+  Config const& config() const { return config_; }
+
+  /// The admin interface's port (proxy_http_port; 0 when it is not running).
+  uint16_t admin_port() const;
 
  private:
   Proxy(asio::io_context& io, Config config, ProxyOptions options);
@@ -84,7 +98,9 @@ class Proxy : public std::enable_shared_from_this<Proxy> {
   shared_ptr<LeaderTracker>                   tracker_;
   vector<unique_ptr<asio::ip::tcp::acceptor>> acceptors_;  // [0]: primary, [1 + i]: servers[i]
 
-  std::mutex               bridges_mtx_;
+  shared_ptr<AdminServer> admin_;
+
+  mutable std::mutex       bridges_mtx_;
   vector<weak_ptr<Bridge>> bridges_;
   std::atomic_bool         stopped_{false};
 };
