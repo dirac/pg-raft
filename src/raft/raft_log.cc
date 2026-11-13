@@ -335,6 +335,9 @@ Result<void> RaftLog::open_logs_db(unsigned factor, std::filesystem::path const&
                 strerror(rc));
 
   // With sync_commits_ every commit syncs, otherwise the sync thread syncs the commits.
+  // Not MDB_WRITEMAP: it would save the pwrite() of the dirty pages on each commit, but this LMDB
+  // (the 1.0 branch) then asserts in mdb_freelist_save() on large transactions
+  // (raft_ensemble_snapshot_test, raft_ensemble_keep_from_test).
   if (int rc = env_open(logs_env_, logs_file.c_str(), sync_commits_ ? 0U : MDB_NOSYNC); rc != 0)
     return elog(
         system_error_code(rc), "env_open for file {0} failed : {1}", logs_file, strerror(rc));

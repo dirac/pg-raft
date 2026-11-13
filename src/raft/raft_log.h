@@ -8,7 +8,10 @@
 // install_snapshot() replaces the log with the entries of an InstallSnapshot.
 class RaftLog {
  public:
-  constexpr static size_t kLmdbPageSize = 16384U;
+  // 4 KiB: every commit checksums (xxhash32) and writes each page it dirties; with 16 KiB pages
+  // that was most of a commit's cost for a ~100-byte entry. (The page size is fixed when a log is
+  // created.)
+  constexpr static size_t kLmdbPageSize = 4096U;
 
   /// With sync_commits every commit of the logs database is synced to the disk, otherwise a thread
   /// syncs the commits in the background (within a second).

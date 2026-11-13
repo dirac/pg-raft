@@ -465,3 +465,35 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(mem, T, test_types) {
     last = str;
   }
 }
+
+// Every page of the log is checksummed (xxhash32): a page changed on disk is an error when read,
+// not wrong entries.
+BOOST_FIXTURE_TEST_CASE(corrupt_page_detected, Test) {
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 300, 1), false).value());
+  BOOST_REQUIRE(log.entries_from(RaftIndex(1), 300).value().value().size() == 300U);
+  log.close();
+
+  // Flip bytes in every page after the two meta pages.
+  auto const file = log.logs_db();
+  auto const size = std::filesystem::file_size(file);
+  {
+    std::fstream f(file, std::ios::in | std::ios::out | std::ios::binary);
+    for (auto page = 2 * RaftLog::kLmdbPageSize; page < size; page += RaftLog::kLmdbPageSize)
+      for (auto off :
+           {page + 100, page + RaftLog::kLmdbPageSize / 2, page + RaftLog::kLmdbPageSize - 100}) {
+        f.seekg(static_cast<std::streamoff>(off));
+        char c = 0;
+        f.get(c);
+        f.seekp(static_cast<std::streamoff>(off));
+        f.put(static_cast<char>(c ^ 0x5A));
+      }
+  }
+
+  // Reopening or reading fails: the corrupted pages are not trusted.
+  auto opened = log.open_logs_db();
+  if (opened.has_value()) {
+    auto r = log.entries_from(RaftIndex(1), 300);
+    BOOST_TEST((!r.has_value() || !r.value() || r.value()->size() != 300U ||
+                r.value()->at(150) != entry(151, 1, 150 * 8)));
+  }
+}

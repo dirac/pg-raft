@@ -288,6 +288,21 @@ io_context (now called on the thread that read it).
 `--libpq` is what a client that follows failovers without the proxy does: libpq gets every node
 (`host=a,b,c port=...`, `target_session_attrs=read-write`) and connects to the one accepting writes.
 
+### 2026-11-13: 4 KiB pages for the raft log
+
+Profiled with pgbench straight to the primary: appending the entry to the raft log (an LMDB write
+transaction) was the largest cost of a commit, 20% of a follower's CPU and 12% of the leader's.
+Every commit checksums (xxhash32) and writes each page it dirties, and the pages were 16 KiB for a
+~100-byte entry. With 4 KiB pages:
+
+| pg-raft, direct | tps | % of solo | % of streaming replication | latency avg | `END` (commit) |
+|---|---|---|---|---|---|
+| 16 KiB pages | 32,104 | 58% | 85% | 0.496 ms | 0.268 ms |
+| 4 KiB pages | **33,609** | 61% | **89%** | 0.473 ms | 0.235 ms |
+
+(`MDB_WRITEMAP`, which would save the `pwrite` of each dirty page, makes this LMDB, the 1.0
+branch, assert in `mdb_freelist_save` on large transactions; not used.)
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
