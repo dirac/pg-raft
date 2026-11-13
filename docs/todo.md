@@ -5,6 +5,15 @@ to its section there). Ordered roughly by how much they matter to a running clus
 
 ## Correctness and durability
 
+- [ ] **node**: restarting a stopped cluster can leave a standby unable to rejoin (seen on Linux,
+  2026-11-13). Node 2 shut down as a standby whose last replayed checkpoint was at
+  `0/138C57E8` on timeline 4. On restart the new leader promoted with `wal_end = 0/138C57B0` and
+  forked timeline 5 there, so node 2's PostgreSQL failed with "requested timeline 5 is not a child
+  of this server's history" and the node exited after `wait_ready` timed out. A standby replayed
+  WAL past what the new leader treated as committed: either it received bytes beyond committed
+  `wal_end`, or `wal_end` stops short. Not yet investigated.
+  ([node.md §3.2](node.md#32-promotion-became_leader))
+
 Found in the second review (2026-11-12), not fixed yet:
 
 - [ ] **node**: nothing watches the postmaster. A PostgreSQL that dies on its own (OOM kill,
