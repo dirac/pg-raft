@@ -18,6 +18,11 @@ exit_on_error $? ${LINENO} "gunzip -d < ../${SOURCE} | tar xvf -"
 cd boost_${U_VERSION}
 exit_on_error $? ${LINENO} "cd boost_${U_VERSION}"
 
+for p in optional.h shared_ptr_helper.hpp; do
+  patch -p0 < ../../patch_files/boost_serialization_${p}.patch
+  exit_on_error $? ${LINENO} "patch boost_serialization_${p}.patch"
+done
+
 ./bootstrap.sh --prefix=${prefix}
 exit_on_error $? ${LINENO} "./bootstrap.sh --prefix=${prefix}"
 

@@ -23,6 +23,8 @@ project pg_raft
       <address-sanitizer>norecover:<cxxflags>-DUSE_ASAN=1
       <thread-sanitizer>norecover:<cxxflags>-DUSE_TSAN=1
       <toolset>gcc,<thread-sanitizer>norecover:<cxxflags>-Wno-tsan
+      # gcc (unlike clang) warns about fields omitted from designated initializers.
+      <toolset>gcc:<cxxflags>-Wno-missing-field-initializers
     ;
 
 
@@ -36,7 +38,8 @@ lib boost_serialization   : : <name>boost_serialization   <search>/opt/pg_raft/l
 lib boost_unit_test_framework  : : <name>boost_unit_test_framework <search>/opt/pg_raft/lib/ ;
 
 lib lmdb : : <name>lmdb <search>/opt/pg_raft/lib/ ;
-lib fuse : : <name>fuse <search>/usr/local/lib ;
+# Only a shared libfuse is installed on Linux.
+lib fuse : : <name>fuse <search>/usr/local/lib <target-os>linux:<link>shared ;
 
 lib ssl    : : <name>ssl    <search>/opt/pg_raft/lib/ <search>/opt/pg_raft/lib64 ;
 lib crypto : : <name>crypto <search>/opt/pg_raft/lib/ <search>/opt/pg_raft/lib64 ;

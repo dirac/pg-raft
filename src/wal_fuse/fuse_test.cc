@@ -593,6 +593,16 @@ BOOST_AUTO_TEST_CASE(statfs_mount, * boost::unit_test::timeout(60)) {
 
 // ── op counters ───────────────────────────────────────────────────────────────
 
+namespace {
+/// Waits up to 2 s for |counter| to reach |n|: Linux sends RELEASE and RELEASEDIR
+/// asynchronously, after close() / closedir() have returned.
+uint64_t wait_for(std::atomic<uint64_t> const& counter, uint64_t n) {
+  for (int i = 0; i < 200 && counter.load() < n; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  return counter.load();
+}
+}  // namespace
+
 BOOST_AUTO_TEST_CASE(op_counters_increment, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";
@@ -608,7 +618,7 @@ BOOST_AUTO_TEST_CASE(op_counters_increment, * boost::unit_test::timeout(60)) {
   BOOST_CHECK_GE(fuse.ops().n_create.load(), 1u);
   BOOST_CHECK_GE(fuse.ops().n_write.load(), 1u);
   BOOST_CHECK_GE(fuse.ops().n_flush.load(), 1u);
-  BOOST_CHECK_GE(fuse.ops().n_release.load(), 1u);
+  BOOST_CHECK_GE(wait_for(fuse.ops().n_release, 1u), 1u);
 
   // read: open + release (op_read may be bypassed by macOS VFS page cache)
   read_file(mount / "f");
@@ -624,10 +634,27 @@ BOOST_AUTO_TEST_CASE(op_counters_increment, * boost::unit_test::timeout(60)) {
     (void)e;
   BOOST_CHECK_GE(fuse.ops().n_opendir.load(), 1u);
   BOOST_CHECK_GE(fuse.ops().n_readdir.load(), 1u);
-  BOOST_CHECK_GE(fuse.ops().n_releasedir.load(), 1u);
+  BOOST_CHECK_GE(wait_for(fuse.ops().n_releasedir, 1u), 1u);
 }
 
 // ── xattr ─────────────────────────────────────────────────────────────────────
+
+// The macOS calls take a position and options; Linux has neither, and no ENOATTR.
+namespace {
+#ifdef __APPLE__
+int     x_set(char const* p, char const* n, void const* v, size_t s) { return setxattr(p, n, v, s, 0, 0); }
+ssize_t x_get(char const* p, char const* n, void* v, size_t s) { return getxattr(p, n, v, s, 0, 0); }
+ssize_t x_list(char const* p, char* l, size_t s) { return listxattr(p, l, s, 0); }
+int     x_remove(char const* p, char const* n) { return removexattr(p, n, 0); }
+constexpr int kNoAttr = ENOATTR;
+#else
+int     x_set(char const* p, char const* n, void const* v, size_t s) { return setxattr(p, n, v, s, 0); }
+ssize_t x_get(char const* p, char const* n, void* v, size_t s) { return getxattr(p, n, v, s); }
+ssize_t x_list(char const* p, char* l, size_t s) { return listxattr(p, l, s); }
+int     x_remove(char const* p, char const* n) { return removexattr(p, n); }
+constexpr int kNoAttr = ENODATA;
+#endif
+}  // namespace
 
 BOOST_AUTO_TEST_CASE(set_get_xattr, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
@@ -640,10 +667,10 @@ BOOST_AUTO_TEST_CASE(set_get_xattr, * boost::unit_test::timeout(60)) {
   Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
-  BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.test", "pg-raft", 7, 0, 0), 0);
+  BOOST_REQUIRE_EQUAL(x_set((mount / "f").c_str(), "user.test", "pg-raft", 7), 0);
 
   char    buf[64]{};
-  ssize_t n = getxattr((mount / "f").c_str(), "user.test", buf, sizeof(buf), 0, 0);
+  ssize_t n = x_get((mount / "f").c_str(), "user.test", buf, sizeof(buf));
   BOOST_REQUIRE_GE(n, 0);
   BOOST_CHECK_EQUAL(std::string(buf, static_cast<size_t>(n)), "pg-raft");
   BOOST_CHECK_GE(fuse.ops().n_setxattr.load(), 1u);
@@ -661,11 +688,11 @@ BOOST_AUTO_TEST_CASE(list_xattr, * boost::unit_test::timeout(60)) {
   Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
-  BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.a", "1", 1, 0, 0), 0);
-  BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.b", "2", 1, 0, 0), 0);
+  BOOST_REQUIRE_EQUAL(x_set((mount / "f").c_str(), "user.a", "1", 1), 0);
+  BOOST_REQUIRE_EQUAL(x_set((mount / "f").c_str(), "user.b", "2", 1), 0);
 
   char    buf[512]{};
-  ssize_t n = listxattr((mount / "f").c_str(), buf, sizeof(buf), 0);
+  ssize_t n = x_list((mount / "f").c_str(), buf, sizeof(buf));
   BOOST_REQUIRE_GT(n, 0);
   BOOST_CHECK_GE(fuse.ops().n_listxattr.load(), 1u);
 }
@@ -681,13 +708,13 @@ BOOST_AUTO_TEST_CASE(remove_xattr, * boost::unit_test::timeout(60)) {
   Fuse fuse(mount, std::make_unique<FuseOps>(backing));
   BOOST_REQUIRE(fuse.start());
 
-  BOOST_REQUIRE_EQUAL(setxattr((mount / "f").c_str(), "user.tmp", "val", 3, 0, 0), 0);
-  BOOST_REQUIRE_EQUAL(removexattr((mount / "f").c_str(), "user.tmp", 0), 0);
+  BOOST_REQUIRE_EQUAL(x_set((mount / "f").c_str(), "user.tmp", "val", 3), 0);
+  BOOST_REQUIRE_EQUAL(x_remove((mount / "f").c_str(), "user.tmp"), 0);
 
   char    buf[64]{};
-  ssize_t n = getxattr((mount / "f").c_str(), "user.tmp", buf, sizeof(buf), 0, 0);
+  ssize_t n = x_get((mount / "f").c_str(), "user.tmp", buf, sizeof(buf));
   BOOST_CHECK_EQUAL(n, -1);
-  BOOST_CHECK_EQUAL(errno, ENOATTR);
+  BOOST_CHECK_EQUAL(errno, kNoAttr);
   BOOST_CHECK_GE(fuse.ops().n_removexattr.load(), 1u);
 }
 

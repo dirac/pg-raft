@@ -13,8 +13,10 @@ Fuse::~Fuse() {
 bool Fuse::start(int timeout_ms) {
   struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
   fuse_opt_add_arg(&args, "fuse");
-  // noappledouble: suppress ._ resource-fork files in pg_wal.
+#ifdef __APPLE__
+  // noappledouble: suppress ._ resource-fork files in pg_wal (macFUSE only).
   fuse_opt_add_arg(&args, "-onoappledouble");
+#endif
 
   chan_ = fuse_mount(mount_point_.c_str(), &args);
   if (!chan_) {

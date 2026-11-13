@@ -288,7 +288,12 @@ int FuseOps::op_setxattr(char const* path,
   log(DEBUG, "setxattr {} {}", path, name);
   n_setxattr.fetch_add(1, std::memory_order_relaxed);
 
+#ifdef __APPLE__
   return setxattr(real_path(path).c_str(), name, value, size, position, options) == -1 ? -errno : 0;
+#else
+  (void)position;
+  return setxattr(real_path(path).c_str(), name, value, size, options) == -1 ? -errno : 0;
+#endif
 }
 
 int FuseOps::op_getxattr(char const* path,
@@ -299,7 +304,12 @@ int FuseOps::op_getxattr(char const* path,
   log(DEBUG, "getxattr {} {}", path, name);
   n_getxattr.fetch_add(1, std::memory_order_relaxed);
 
+#ifdef __APPLE__
   ssize_t res = getxattr(real_path(path).c_str(), name, value, size, position, XATTR_NOFOLLOW);
+#else
+  (void)position;
+  ssize_t res = lgetxattr(real_path(path).c_str(), name, value, size);
+#endif
   return res == -1 ? -errno : static_cast<int>(res);
 }
 
@@ -307,7 +317,11 @@ int FuseOps::op_listxattr(char const* path, char* list, size_t size) {
   log(DEBUG, "listxattr {}", path);
   n_listxattr.fetch_add(1, std::memory_order_relaxed);
 
+#ifdef __APPLE__
   ssize_t res = listxattr(real_path(path).c_str(), list, size, XATTR_NOFOLLOW);
+#else
+  ssize_t res = llistxattr(real_path(path).c_str(), list, size);
+#endif
   return res == -1 ? -errno : static_cast<int>(res);
 }
 
@@ -315,7 +329,11 @@ int FuseOps::op_removexattr(char const* path, char const* name) {
   log(DEBUG, "removexattr {} {}", path, name);
   n_removexattr.fetch_add(1, std::memory_order_relaxed);
 
+#ifdef __APPLE__
   return removexattr(real_path(path).c_str(), name, XATTR_NOFOLLOW) == -1 ? -errno : 0;
+#else
+  return lremovexattr(real_path(path).c_str(), name) == -1 ? -errno : 0;
+#endif
 }
 
 // ── make_ops ─────────────────────────────────────────────────────────────────
@@ -359,8 +377,13 @@ struct fuse_operations FuseOps::make_ops() {
   ops.flush       = [](const char* p, struct fuse_file_info* f)                                      { return ctx()->op_flush(p, f); };
   ops.release     = [](const char* p, struct fuse_file_info* f)                                      { return ctx()->op_release(p, f); };
   ops.fsync       = [](const char* p, int d, struct fuse_file_info* f)                               { return ctx()->op_fsync(p, d, f); };
+#ifdef __APPLE__
   ops.setxattr    = [](const char* p, const char* n, const char* v, size_t s, int o, uint32_t pos)   { return ctx()->op_setxattr(p, n, v, s, o, pos); };
   ops.getxattr    = [](const char* p, const char* n, char* v, size_t s, uint32_t pos)                { return ctx()->op_getxattr(p, n, v, s, pos); };
+#else
+  ops.setxattr    = [](const char* p, const char* n, const char* v, size_t s, int o)                 { return ctx()->op_setxattr(p, n, v, s, o, 0); };
+  ops.getxattr    = [](const char* p, const char* n, char* v, size_t s)                              { return ctx()->op_getxattr(p, n, v, s, 0); };
+#endif
   ops.listxattr   = [](const char* p, char* l, size_t s)                                             { return ctx()->op_listxattr(p, l, s); };
   ops.removexattr = [](const char* p, const char* n)                                                 { return ctx()->op_removexattr(p, n); };
   return ops;
