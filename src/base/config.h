@@ -57,6 +57,10 @@ struct Config {
   /// follower_sync: a follower msyncs the WAL blocks it receives before acknowledging them, and
   /// its standby's own fsync (through FUSE) msyncs too.
   bool follower_sync = false;
+  /// write_op_bytes: on the leader, the WAL written since the last flush is sent with the next
+  /// flush (one raft entry per fsync), or as soon as this much of a segment is pending (a WriteOp
+  /// of its own), so that a large transaction streams its WAL before its commit.
+  uint64_t write_op_bytes = 64 * 1024;
   /// log_sync: every commit of the raft log (LMDB) is synced. Off: MDB_NOSYNC, and a background
   /// thread syncs the log within a second.
   bool log_sync = false;

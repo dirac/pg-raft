@@ -329,8 +329,8 @@ BOOST_FIXTURE_TEST_CASE(install_snapshot, Test) {
   BOOST_TEST(log.append_entries(RaftIndex(505), RaftTerm(3), entries(105, 1, 3), true).value());
 }
 
-// wal_end is the highest end of the WriteOps applied: a rewrite of earlier offsets does not lower
-// it, and other commands do not move it.
+// wal_end is the highest end of the WAL bytes applied (WriteOps and FlushOps): a rewrite of earlier
+// offsets does not lower it, and other commands do not move it.
 BOOST_AUTO_TEST_CASE(state_wal_end) {
   auto const seg1 = LogSeqNumber{.timeline = 1, .lsn = 0x1000000};
   auto const seg2 = LogSeqNumber{.timeline = 1, .lsn = 0x2000000};
@@ -347,7 +347,7 @@ BOOST_AUTO_TEST_CASE(state_wal_end) {
   state.apply(RaftIndex(2), entry(seg1, WriteOp{.offset = 8192, .size = 100}));
   BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 1, .lsn = 0x1000000 + 16384}));
 
-  // A flush, a tick and a write without a segment don't move it.
+  // A flush over earlier bytes, a tick and a write without a segment don't move it.
   state.apply(RaftIndex(3), entry(seg1, FlushOp{.offset = 0, .size = 16384}));
   state.apply(RaftIndex(4), entry(std::nullopt, std::monostate{}));
   state.apply(RaftIndex(5), entry(std::nullopt, WriteOp{.offset = 0, .size = 1U << 20}));
@@ -357,9 +357,13 @@ BOOST_AUTO_TEST_CASE(state_wal_end) {
   state.apply(RaftIndex(6), entry(seg2, WriteOp{.offset = 0, .size = 8192}));
   BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 1, .lsn = 0x2000000 + 8192}));
 
+  // A flush that carries new bytes (the node's writes travel with the flush) moves it.
+  state.apply(RaftIndex(7), entry(seg2, FlushOp{.offset = 8192, .size = 300}));
+  BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 1, .lsn = 0x2000000 + 8492}));
+
   // A new timeline is later, even at a lower LSN.
   state.apply(
-      RaftIndex(7),
+      RaftIndex(8),
       entry(LogSeqNumber{.timeline = 2, .lsn = 0x1000000}, WriteOp{.offset = 0, .size = 40}));
   BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 2, .lsn = 0x1000000 + 40}));
 }

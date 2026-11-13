@@ -20,6 +20,7 @@ socket_dir = "/tmp/pgr"
 leader_sync = true
 follower_sync = true
 log_sync = true
+write_op_bytes = 131072
 pg_hba = ["host all all 10.0.0.0/16 trust", "host replication all 10.0.0.0/16 trust"]
 proxy_pg_port = 6432
 proxy_http_port = 6480
@@ -48,6 +49,7 @@ max_connections = 100
   BOOST_TEST(c.leader_sync);
   BOOST_TEST(c.follower_sync);
   BOOST_TEST(c.log_sync);
+  BOOST_TEST(c.write_op_bytes == 131072U);
   BOOST_REQUIRE(c.pg_hba.size() == 2U);
   BOOST_TEST(c.pg_hba.at(1) == "host replication all 10.0.0.0/16 trust");
   BOOST_TEST(c.proxy_pg_port == 6432);
@@ -73,6 +75,7 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   BOOST_TEST(!c.leader_sync);
   BOOST_TEST(!c.follower_sync);
   BOOST_TEST(!c.log_sync);
+  BOOST_TEST(c.write_op_bytes == 64U * 1024U);
   BOOST_TEST(c.pg_hba.empty());
   BOOST_TEST(c.proxy_pg_port == 5432);
   BOOST_TEST(c.proxy_http_port == 8080);

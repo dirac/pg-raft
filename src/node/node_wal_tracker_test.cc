@@ -95,6 +95,61 @@ BOOST_AUTO_TEST_CASE(leader_mode, *boost::unit_test::timeout(timeout)) {
   }
 }
 
+// The writes travel with the flush, unless enough of them is pending: then a WriteOp of its own.
+BOOST_AUTO_TEST_CASE(writes_batched_until_flush_or_threshold, *boost::unit_test::timeout(timeout)) {
+  Ensemble e;
+  auto     leader = e.service.leader().value();
+  auto     lsn    = LogSeqNumber{.timeline = 1, .lsn = 0x4000000};
+  auto     seg    = make_segment(e.dir() / "pg_wal", lsn);
+
+  NodeWalTracker tracker{e.service.server(leader), false, false, /*write_op_bytes=*/16384};
+  tracker.set_mode(NodeWalTracker::Mode::kLeader);
+  auto bytes = random_bytes(30000);
+  seg->write(bytes.data(), 0, bytes.size());
+
+  // The committed entries of the segment, once there are |n| (a WriteOp commits on its own).
+  auto wal_entries = [&](size_t n) {
+    vector<WalCommand> r;
+    for (int i = 0; i < 100; ++i, std::this_thread::sleep_for(50ms)) {
+      r.clear();
+      for (auto const& [idx, entry] : e.service.check_consistency({}).log)
+        if (entry.cmd.segment == lsn)
+          r.push_back(entry.cmd);
+      if (r.size() >= n)
+        break;
+    }
+    return r;
+  };
+
+  // Below the threshold: no entry.
+  tracker.async_publish(seg, 0, 8192);
+  BOOST_TEST(wal_entries(1).empty());
+
+  // The pending range reaches 16 KiB: one WriteOp of all of it.
+  tracker.async_publish(seg, 8192, 12000);
+  auto w = wal_entries(1);
+  BOOST_REQUIRE(w.size() == 1U);
+  BOOST_TEST((std::get<WriteOp>(w[0].command) == WriteOp{.offset = 0, .size = 20192}));
+
+  // The rest goes with the flush, and every node has every byte.
+  tracker.async_publish(seg, 20192, 30000 - 20192);
+  BOOST_TEST(fsync(tracker, seg, 0, 30000).has_value());
+  w = wal_entries(2);
+  BOOST_REQUIRE(w.size() == 2U);
+  BOOST_TEST((std::get<FlushOp>(w[1].command) == FlushOp{.offset = 20192, .size = 30000 - 20192}));
+  for (unsigned i = 0; i < 3; ++i) {
+    auto copy = e.service.server(i)->segment(lsn);
+    BOOST_REQUIRE(copy.has_value());
+    BOOST_TEST(std::memcmp(copy.value()->mapping(), bytes.data(), bytes.size()) == 0, i);
+  }
+
+  // A flush with nothing new: an empty FlushOp, still the barrier.
+  BOOST_TEST(fsync(tracker, seg, 30000, 0).has_value());
+  w = wal_entries(3);
+  BOOST_REQUIRE(w.size() == 3U);
+  BOOST_TEST(std::get<FlushOp>(w[2].command).size == 0U);
+}
+
 BOOST_AUTO_TEST_CASE(leader_mode_on_a_follower_fails, *boost::unit_test::timeout(timeout)) {
   Ensemble e;
   auto     follower = (e.service.leader().value() + 1U) % 3U;

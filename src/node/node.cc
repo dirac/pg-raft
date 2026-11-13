@@ -166,7 +166,8 @@ Result<void> Node::start() {
                                      raft_wal_dir_,
                                      raft_options,
                                      make_shared<Observer>(weak_from_this()));
-  tracker_ = make_shared<NodeWalTracker>(raft_, config_.leader_sync, config_.follower_sync);
+  tracker_                   = make_shared<NodeWalTracker>(
+      raft_, config_.leader_sync, config_.follower_sync, config_.write_op_bytes);
 
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
     raft_->set_needs_backup(true);  // no elections until there is something to promote

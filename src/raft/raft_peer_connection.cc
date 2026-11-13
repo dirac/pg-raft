@@ -177,20 +177,19 @@ inplace_vector<MemBlock, 2> RaftPeerConnection::mem_blocks(vector<Entry> const& 
   map<LogSeqNumber, std::tuple<off_t, off_t>> regions;
   for (auto const& e : entries) {
     auto const& cmd = e.cmd;
-    if (!cmd.segment)
-      continue;
-
-    if (auto const* op = std::get_if<WriteOp>(&cmd.command); op) {
-      auto const end = op->offset + static_cast<off_t>(op->size);
+    // The WAL bytes of a WriteOp, or of a FlushOp (which carries the writes since the last flush).
+    if (auto const bytes = wal_bytes(cmd); bytes) {
+      auto const [offset, size] = *bytes;
+      auto const end            = offset + static_cast<off_t>(size);
 
       auto pos = regions.find(cmd.segment.value());
       if (pos == regions.end()) {
         regions.emplace(cmd.segment.value(),
                         full_wal_segment ? std::make_tuple(off_t{0}, off_t{kWalSegmentSize})
-                                         : std::make_tuple(op->offset, end));
+                                         : std::make_tuple(offset, end));
       } else {
         auto& [s, f] = pos->second;
-        s            = std::min(op->offset, s);
+        s            = std::min(offset, s);
         f            = std::max(end, f);
       }
     }
@@ -212,8 +211,7 @@ void RaftPeerConnection::trim(vector<Entry>& entries) {
 
   for (auto iter = std::begin(entries); iter != std::end(entries); ++iter) {
     auto const& cmd = iter->cmd;
-    if (cmd.segment && std::holds_alternative<WriteOp>(cmd.command) &&
-        segments.insert(cmd.segment.value()).second && segments.size() == 3) {
+    if (wal_bytes(cmd) && segments.insert(cmd.segment.value()).second && segments.size() == 3) {
       entries.erase(iter, entries.end());
       return;
     }

@@ -11,12 +11,13 @@
 ///    standby may replay (WalSender::advance).
 ///  - needs_backup: the log was replaced by an InstallSnapshot, the WAL before its segments is
 ///    missing: the node needs a PostgreSQL backup before its standby can replay.
-///  - wal_end: the highest end (segment + offset + size) of the WriteOps applied, the end of the
+///  - wal_end: the highest end (segment + offset + size) of the WAL bytes applied (WriteOps, and
+///    FlushOps, which carry the writes since the previous flush: wal_bytes()), the end of the
 ///    WAL in wal_dir. A new leader advances its WalSender to it before promoting: flushed_lsn is
 ///    polled and stale, while wal_end covers every byte a previous primary acknowledged. It can
 ///    end inside an incomplete record (the FUSE layer does not check CRCs), which PostgreSQL
-///    discards when it promotes. It is a maximum: a rewritten page is published again as a
-///    WriteOp over earlier offsets.
+///    discards when it promotes. It is a maximum: a rewritten part of a page is sent again over
+///    earlier offsets.
 ///  - first_idx, first_segment: the node's own (each node compacts on its own schedule, so they
 ///    are not compared across nodes): the first entry of the log, and the segment of the first
 ///    entry that has one. Every entry in the log has its WAL in wal_dir, so the segments wholly
@@ -42,10 +43,10 @@ struct RaftState {
     if (flushed_lsn < e.cmd.flushed_lsn)
       flushed_lsn = e.cmd.flushed_lsn;
 
-    if (auto const* w = std::get_if<WriteOp>(&e.cmd.command); w && e.cmd.segment) {
+    if (auto const bytes = wal_bytes(e.cmd); bytes) {
       auto const end = LogSeqNumber{
           .timeline = e.cmd.segment->timeline,
-          .lsn      = e.cmd.segment->lsn + static_cast<uint64_t>(w->offset) + w->size,
+          .lsn      = e.cmd.segment->lsn + static_cast<uint64_t>(bytes->first) + bytes->second,
       };
       if (wal_end < end)
         wal_end = end;
@@ -54,13 +55,13 @@ struct RaftState {
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & log_idx;
-    ar & timestamp;
-    ar & flushed_lsn;
-    ar & needs_backup;
-    ar & wal_end;
-    ar & first_idx;
-    ar & first_segment;
+    ar& log_idx;
+    ar& timestamp;
+    ar& flushed_lsn;
+    ar& needs_backup;
+    ar& wal_end;
+    ar& first_idx;
+    ar& first_segment;
   }
 };
 

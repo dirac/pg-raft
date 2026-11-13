@@ -8,10 +8,15 @@
 //
 // Leader mode:
 //  - async_publish: the bytes go from PostgreSQL's segment (pg/pg_wal) into the same segment in
-//    raft's wal_dir (raft/wal), from which the peer connections send them; then a WriteOp.
-//  - async_fsync: msync both copies, then a FlushOp; PostgreSQL's fsync (and its commit) returns
-//    when the FlushOp is committed on a quorum, and fails with kNoConsensus if the node is not, or
-//    stops being, the leader (PostgreSQL then PANICs, by design).
+//    raft's wal_dir (raft/wal), from which the peer connections send them, and their range is
+//    added to the segment's pending range. Once that reaches write_op_bytes it is sent at once,
+//    as a WriteOp (a large transaction streams its WAL before its commit); smaller writes wait
+//    for the next flush.
+//  - async_fsync: (with leader_sync, msync both copies,) then one FlushOp that carries what is
+//    pending of the segment, the bytes written since its last WriteOp or flush; PostgreSQL's
+//    fsync (and its commit) returns when the FlushOp is committed on a quorum, and fails with
+//    kNoConsensus if the node is not, or stops being, the leader (PostgreSQL then PANICs, by
+//    design). Usually one entry and one raft round per fsync, instead of an entry per write.
 //  - async_timeline: a TimelineOp with the history file.
 //  Every command carries flushed_lsn: the primary's flush LSN, set by the status poller.
 //
@@ -28,11 +33,16 @@ class NodeWalTracker : public WalTracker {
   enum class Mode { kFollower, kLeader, kFenced };
 
   /// |leader_sync|: msync before the FlushOp in leader mode; |follower_sync|: msync PostgreSQL's
-  /// fsync in follower mode (Config::leader_sync / follower_sync).
+  /// fsync in follower mode (Config::leader_sync / follower_sync). |write_op_bytes|: the pending
+  /// writes of a segment are sent as a WriteOp once they reach it (Config::write_op_bytes).
   explicit NodeWalTracker(shared_ptr<RaftServer> raft,
-                          bool                   leader_sync   = false,
-                          bool                   follower_sync = false)
-      : raft_(std::move(raft)), leader_sync_(leader_sync), follower_sync_(follower_sync) {}
+                          bool                   leader_sync    = false,
+                          bool                   follower_sync  = false,
+                          size_t                 write_op_bytes = 64 * 1024)
+      : raft_(std::move(raft)),
+        leader_sync_(leader_sync),
+        follower_sync_(follower_sync),
+        write_op_bytes_(write_op_bytes) {}
 
   void set_mode(Mode mode);
   Mode mode() const { return mode_.load(); }
@@ -48,13 +58,37 @@ class NodeWalTracker : public WalTracker {
   void async_timeline(uint32_t timeline, string const& content) override;
 
  private:
-  LogSeqNumber flushed_lsn() const;
+  /// The flush LSN for an entry (the poller's); remembers it as carried.
+  LogSeqNumber carry();
 
   shared_ptr<RaftServer> raft_;
   bool const             leader_sync_;
   bool const             follower_sync_;
+  size_t const           write_op_bytes_;
   std::atomic<Mode>      mode_{Mode::kFollower};
 
+  // flushed_lsn_: PostgreSQL's flush LSN, polled (not the end of the published bytes: the FUSE
+  // walk can end inside a record whose body PostgreSQL hasn't copied yet, docs/node.md §2.2);
+  // carried_: the highest one an entry carried. A follower's WAL sender streams up to the
+  // flushed_lsn of the entries it has applied.
   mutable std::mutex flushed_mtx_;
   LogSeqNumber       flushed_lsn_{};
+  LogSeqNumber       carried_{};
+
+  /// Per segment, the range published since its last WriteOp or flush (leader mode), and the
+  /// mode epoch it was published in. Taking a range and appending its entry happen under
+  /// pending_mtx_, so that a FlushOp follows the WriteOps of the bytes before it. set_mode() does
+  /// not take pending_mtx_ (raft's stepped_down hook calls it with the server lock held, and
+  /// exec() takes that lock under pending_mtx_): it bumps epoch_, which voids the older ranges.
+  struct Pending {
+    off_t    begin;
+    off_t    end;
+    uint64_t epoch;
+  };
+  std::mutex                 pending_mtx_;
+  map<LogSeqNumber, Pending> pending_;
+  std::atomic<uint64_t>      epoch_{0};
+
+  /// Takes the segment's pending range (one of the current epoch), with pending_mtx_ held.
+  std::optional<std::pair<off_t, size_t>> take_pending(LogSeqNumber lsn);
 };

@@ -13,8 +13,8 @@ struct TimelineOp {
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
-    ar & timeline;
-    ar & content;
+    ar& timeline;
+    ar& content;
   }
 };
 
@@ -35,13 +35,16 @@ struct WriteOp {
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
-    ar & offset;
-    ar & size;
+    ar& offset;
+    ar& size;
   }
 };
 
-/// The fsync of [offset, offset + size) of the segment: the durability barrier. PostgreSQL's fsync
-/// returns when the entry is committed.
+/// PostgreSQL's fsync of the segment: the durability barrier. PostgreSQL's fsync returns when the
+/// entry is committed. It carries the WAL written since the previous flush: the bytes
+/// [offset, offset + size) of the segment, sent with the AppendEntries request like a WriteOp's
+/// (size 0: nothing new). The node sends the writes with the flush, one entry per fsync, instead of
+/// a WriteOp per write.
 struct FlushOp {
   off_t  offset;
   size_t size;
@@ -50,8 +53,8 @@ struct FlushOp {
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
-    ar & offset;
-    ar & size;
+    ar& offset;
+    ar& size;
   }
 };
 
@@ -61,6 +64,12 @@ struct CloseOp {
   template <typename Archive>
   void serialize(Archive& /*ar*/, unsigned int /* version */) {}
 };
+
+struct WalCommand;
+
+/// The WAL bytes an entry carries, [offset, offset + size) of cmd.segment: a WriteOp's, or a
+/// FlushOp's (see FlushOp); nothing for the other commands or without a segment.
+std::optional<std::pair<off_t, size_t>> wal_bytes(WalCommand const& cmd);
 
 struct WalCommand {
   /// The data before flushed_lsn is ready to be consumed.
@@ -79,11 +88,21 @@ struct WalCommand {
 
   template <typename Archive>
   void serialize(Archive& ar, unsigned int /* version */) {
-    ar & flushed_lsn;
-    ar & segment;
-    ar & command;
+    ar& flushed_lsn;
+    ar& segment;
+    ar& command;
   }
 };
+
+inline std::optional<std::pair<off_t, size_t>> wal_bytes(WalCommand const& cmd) {
+  if (!cmd.segment)
+    return std::nullopt;
+  if (auto const* w = std::get_if<WriteOp>(&cmd.command); w && w->size)
+    return std::pair{w->offset, w->size};
+  if (auto const* f = std::get_if<FlushOp>(&cmd.command); f && f->size)
+    return std::pair{f->offset, f->size};
+  return std::nullopt;
+}
 
 // Formatters
 

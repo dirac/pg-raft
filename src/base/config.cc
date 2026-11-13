@@ -30,6 +30,8 @@ void parse_node(T& data, Config& config) {
     config.leader_sync = toml::find<bool>(data, "leader_sync");
   if (data.contains("follower_sync"))
     config.follower_sync = toml::find<bool>(data, "follower_sync");
+  if (data.contains("write_op_bytes"))
+    config.write_op_bytes = toml::find<uint64_t>(data, "write_op_bytes");
   if (data.contains("log_sync"))
     config.log_sync = toml::find<bool>(data, "log_sync");
   if (data.contains("proxy_pg_port"))

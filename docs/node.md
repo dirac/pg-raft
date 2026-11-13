@@ -57,27 +57,36 @@ raft ensemble (`node_wal_tracker_test`).
 `NodeWalTracker` runs in **leader mode**:
 
 - `async_publish(seg, off, size)` → copy the published bytes from the FUSE segment (in
-  `pg/pg_wal`) into the same segment in `raft/wal`, then
-  `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{off, size}}, …)`. The peer connections send the
+  `pg/pg_wal`) into the same segment in `raft/wal`, and add `[off, off + size)` to the segment's
+  pending range. Once that reaches `write_op_bytes` (64 KiB) it is sent at once:
+  `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, …)`, so that a large transaction streams
+  its WAL before its commit. Smaller writes wait for the flush. The peer connections send the
   bytes from `raft/wal`.
-- `async_fsync(seg, off, size, cb)` → a local `msync` of both copies (`pg/pg_wal`, and the
-  leader's own copy in `raft/wal`, which counts towards the quorum), then
-  `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{off, size}}, h)`. `h` calls `cb(ok)` when the
-  entry commits, or `cb(kNoConsensus)` when it gets `kNotLeader`.
+- `async_fsync(seg, off, size, cb)` → with `leader_sync`, a local `msync` of both copies
+  (`pg/pg_wal`, and the leader's own copy in `raft/wal`, which counts towards the quorum), then
+  `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{pending range}}, h)`: the flush carries the
+  writes since the segment's last `WriteOp` or flush (an empty `FlushOp` when there are none, still
+  the barrier). Usually one entry and one raft round per fsync. `h` calls `cb(ok)` when the entry
+  commits, or `cb(kNoConsensus)` when it gets `kNotLeader`. Taking the pending range and
+  appending its entry happen under one lock, so a `FlushOp` always follows the `WriteOp`s of the
+  bytes before it.
 
 - `async_timeline(timeline, content)` → `exec(WalCommand{flushed_lsn, TimelineOp{timeline,
   content}})` (§7).
 
 PostgreSQL's fsync, and therefore its commit, returns only once the WAL is on a majority. Entries
 are appended in WAL order, so committing a `FlushOp` implies that the `WriteOp`s before it are
-committed too.
+committed too. The FUSE layer asks the tracker on every fsync, even when it sees nothing new: the
+writes may have been published through a handle that has since closed.
 
 **`flushed_lsn` is fetched from the primary**: it is the last value of
 `pg_current_wal_flush_lsn()` read by the status poller (§5), which `NodeWalTracker` puts into
 every command. It is not derived from the byte range being written or fsynced. The value is stale
 but safe: PostgreSQL reports a flush LSN only after its fsync returned, so whatever the poller read
 is already committed. The followers' WAL senders stream up to it (§2.2), so they only lag the
-primary by up to one poll interval.
+primary by up to one poll interval. When the poller reads a flush LSN that no entry has carried
+yet, the tracker appends an entry with it (no WAL): tick entries carry none, so without it the
+standbys would stay behind the last flush once the writes stop.
 
 ### 2.2 Follower (PostgreSQL is a standby)
 
@@ -176,8 +185,9 @@ acknowledged. At full leadership every entry in the log is committed, so everyth
 is committed WAL.
 
 1. Advance the WAL sender to the **end of the WAL in `raft/wal`**: `state.wal_end`, the highest
-   end (segment + offset + size) of the applied `WriteOp`s. It is a maximum, not the end of the
-   last `WriteOp`, because a rewritten page is published again over earlier offsets. A `WriteOp`
+   end (segment + offset + size) of the applied WAL bytes (`WriteOp`s and `FlushOp`s). It is a
+   maximum, not the end of the last entry, because a rewritten part of a page is sent again over
+   earlier offsets. A `WriteOp`
    can end inside an incomplete record (§2.2), so `wal_end` can be past the last valid record;
    that is fine here, because PostgreSQL stops replaying at the last complete record.
 2. Wait until the standby has received all of it: its `StandbyStatusUpdate` (the WAL sender's

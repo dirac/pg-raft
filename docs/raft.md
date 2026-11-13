@@ -50,7 +50,8 @@ struct WalCommand {
   LogSeqNumber                 flushed_lsn;   // the primary's flush LSN: safe to stream up to here
   optional<LogSeqNumber>       segment;       // the WAL segment of the op
   variant<monostate,           // tick entry
-          FlushOp{off,size},   // fsync of [off, off+size): the durability barrier
+          FlushOp{off,size},   // PostgreSQL's fsync: the durability barrier; carries the bytes
+                               // [off, off+size) written since the last WriteOp or flush (size 0: none)
           OpenOp, CloseOp,
           WriteOp{off,size},   // bytes [off, off+size) of `segment`; the bytes are sent alongside
           TimelineOp{tli, content}> command;
@@ -66,8 +67,9 @@ An entry only names a region; the bytes go in the same message as the request:
 [ RaftRequest (binary archive, incl. data = up to 2 MemBlocks) ][ block0 bytes ][ block1 bytes ]
 ```
 
-- `RaftPeerConnection::mem_blocks(entries)` takes the union range of the `WriteOp`s in each
-  segment. `trim()` cuts a batch so that it touches at most **2 segments**.
+- `RaftPeerConnection::mem_blocks(entries)` takes the union range of the WAL bytes in each segment
+  (`wal_bytes(cmd)`: a `WriteOp`'s, or a `FlushOp`'s). `trim()` cuts a batch so that it touches at
+  most **2 segments**.
 - `send_request` **copies** the block bytes out of the segment mmap into a buffer owned by the
   request, then attaches that buffer. The copy is required: PostgreSQL keeps writing into the
   segment and rewrites its last page, so sending directly from the mmap lets the bytes change
@@ -91,7 +93,7 @@ position:
 | `timestamp` | time of the last applied entry |
 | `flushed_lsn` | highest `flushed_lsn` applied: the committed WAL a standby may replay |
 | `needs_backup` | set when the log was replaced by an InstallSnapshot; the WAL before the snapshot's segments is missing until a PostgreSQL backup restores it |
-| `wal_end` | highest end (segment + offset + size) of the `WriteOp`s applied: the end of the WAL in `wal_dir`. A new leader's standby replays up to it before promotion (see [node.md](node.md#32-promotion-became_leader)). A maximum, because a rewritten page is published again over earlier offsets. It can end inside an incomplete record |
+| `wal_end` | highest end (segment + offset + size) of the WAL bytes applied (`WriteOp`s and `FlushOp`s): the end of the WAL in `wal_dir`. A new leader's standby replays up to it before promotion (see [node.md](node.md#32-promotion-became_leader)). A maximum, because a rewritten page is published again over earlier offsets. It can end inside an incomplete record |
 
 A `RaftObserver` (set by the node) receives `applied(idx, entry, state)` for each applied entry,
 `installed(state)` after a snapshot, `became_leader(term)` at full leadership (once every
@@ -241,9 +243,9 @@ entries inherited from earlier leaders have no handler.
 
 | Where | What |
 |---|---|
-| Leader `WalTracker::async_publish(seg, off, size)` (`NodeWalTracker`) | copy the bytes into `wal_dir`'s segment, then `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{off,size}}, …)` |
+| Leader `WalTracker::async_publish(seg, off, size)` (`NodeWalTracker`) | copy the bytes into `wal_dir`'s segment and add them to the segment's pending range; `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, …)` once it reaches `write_op_bytes`, else they go with the next flush |
 | Leader `WalTracker::async_timeline(tli, content)` | `exec(WalCommand{…, TimelineOp{tli, content}})` |
-| Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{off,size}}, h)`. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
+| Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{pending range}}, h)`: the flush carries the writes since the last `WriteOp` or flush. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
 | Follower `RaftObserver::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
 | Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, `set_needs_backup(true)` when it has no usable data directory, `restored_backup(end)` after a restore, and `set_wal_keep_from(keep_from(latest backup))` |
 
