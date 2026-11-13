@@ -56,8 +56,21 @@ class RaftLog {
   /// The saved state.
   Result<RaftState> load_snapshot() const;
 
-  /// Replace the log with the entries (log_idx, log_idx + entries.size()] and save the state.
-  Result<void> install_snapshot(RaftIndex log_idx, vector<Entry> const& entries, RaftState state);
+  /// Replace the log with the entries (log_idx, log_idx + entries.size()] and save the state, and
+  /// |boundary|, the state at log_idx (see compact()).
+  Result<void> install_snapshot(RaftIndex            log_idx,
+                                vector<Entry> const& entries,
+                                RaftState            state,
+                                RaftState const&     boundary);
+
+  /// Delete the entries before |first| and save |state| and |boundary|, in one transaction.
+  /// |boundary| is the state at first - 1, the entry before the first one left: it is what an
+  /// InstallSnapshot sends with the oldest entries. Doing both at once means the saved state
+  /// (with its first_idx and first_segment) never names a first entry the log doesn't start at.
+  Result<void> compact(RaftIndex first, RaftState const& state, RaftState const& boundary);
+
+  /// The state at the entry before the first one; RaftState{} if the log was never compacted.
+  Result<RaftState> load_boundary() const;
 
   /// The current term
   Result<RaftTerm> current_term() const;
@@ -121,7 +134,8 @@ class RaftLog {
   /// save_snapshot() with the mutex of the writes held.
   Result<void> save_snapshot_locked(RaftState const& state, unsigned log_size);
 
-  Result<void> save_meta(RaftState const& state);
+  Result<void> save_meta(RaftState const& state, RaftState const* boundary = nullptr);
+  int          put_meta(MDB_txn* txn, RaftState const& state, RaftState const* boundary);
 
   Result<RaftState> read_meta() const;
 
@@ -137,6 +151,7 @@ class RaftLog {
 
   /// Delete log entries before the index.
   Result<void> delete_older_entries(RaftIndex idx);
+  int          delete_older_entries(MDB_txn* txn, RaftIndex idx);
 
   /// Directory to store the databases.
   std::filesystem::path dir_;

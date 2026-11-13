@@ -47,9 +47,13 @@ struct PeerConnectionApi {
   /// The latest timeline history file in wal_dir, to send with an InstallSnapshot.
   virtual std::optional<TimelineOp> latest_timeline() const = 0;
 
-  /// A copy of the applied state, to send with an InstallSnapshot. It must not take the server
-  /// lock: the caller holds the connection's lock.
+  /// A copy of the applied state. It must not take the server lock: a caller may hold the
+  /// connection's lock.
   virtual RaftState applied_state() const = 0;
+
+  /// A copy of the state at the entry before the first one (RaftLog::load_boundary), sent with an
+  /// InstallSnapshot of the oldest entries. Without the server lock, as applied_state().
+  virtual RaftState boundary_state() const = 0;
 
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;
 };

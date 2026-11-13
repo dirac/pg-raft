@@ -183,33 +183,35 @@ entries inherited from earlier leaders have no handler.
 
 ### 3.5 Compaction and snapshots
 
-- **Compaction**: after `compaction_lag` entries have been applied since the last compaction, a
-  node saves its `RaftState` and deletes entries older than `log_idx - keep_old_logs`. Planned:
-  the boundary becomes `keep_from`, the segment of the latest backup's end LSN
-  (`set_wal_keep_from`, see [backup.md](backup.md#5-wal-retention-and-raft-compaction)), and
-  `keep_old_logs` goes away. Every entry must have its WAL in `raft/wal` (an entry only names a
-  segment, offset and size), so segments are deleted in a separate step, on another thread, only
-  before the oldest entry's segment, which compaction records in `RaftState` (`first_idx`,
-  `first_segment`) in the same transaction as it deletes the entries.
-  **The leader compacts too.** Stepping down to compact would mean a PostgreSQL failover. Entries
-  are small (the WAL is in the segments), so compacting on the leader is cheap.
-- **InstallSnapshot, phase 1 (raft)**: the leader sends its latest `snapshot_entries` entries,
-  trimmed to those that touch at most 2 segments, together with the **full contents** of those
-  segments, its applied `RaftState`, and its latest timeline history file, if any
-  (`InstallSnapshot::timeline`; the `TimelineOp`s that wrote it may be compacted away). The
-  follower writes the segments and the history file, and installs the entries with the leader's
-  state (`needs_backup = true`). If the state's `log_idx` is within the entries, the follower has
-  applied them up to it (the leader has, and their WAL is in the segments); otherwise, when the
-  leader applies far behind its log, the follower keeps the state's values at the snapshot's
-  `log_idx` (they come from earlier entries, so they are never ahead). It sets `commit_idx` to the
-  state's `log_idx` and can follow the leader from there at once. The connection reads the state
-  from a copy the server publishes under its own mutex (`applied_state()`), since it holds the
-  connection's lock, not the server's.
-- **Phase 2 (PostgreSQL backup)**: a node with `needs_backup` restores the latest backup from the
-  cluster's backup store ([backup.md](backup.md)), then replays the backup's WAL and streams the
-  rest from `raft/wal` (see [node.md](node.md#43-recovering-from-needs_backup)). The node logic is
-  not yet written (§8). Backups no longer come from peers, so the client channel's
-  `SnapshotRequest` and `set_backup_provider` are unused by the node design (§6).
+- **Compaction** (`compact_log`, implemented): after `compaction_lag` applied entries, or when
+  `set_wal_keep_from` moves. With a `keep_from` (the start of the latest backup's segment, set by
+  the node) the new first entry is the first one whose segment is at or after it; without one
+  (the raft tests) `keep_old_logs` entries are kept. Never past the last applied entry, which
+  stays. **The leader compacts too**; stepping down to compact would be a PostgreSQL failover.
+  The state at the entry before the new first one (the **boundary state**) is the previous
+  boundary with the deleted entries applied. `RaftLog::compact` deletes the entries and saves the
+  state (with `first_idx` and `first_segment`) and the boundary state in **one** transaction.
+- **WAL deletion** (`wal_gc`, a thread of its own): deletes the segments of `wal_dir` wholly before
+  `first_segment`, by address, so the parent timeline's copy of the segment where a timeline
+  starts is kept (the WAL sender reads the start of the new timeline's first segment from it).
+  Every entry in the log has its WAL in `wal_dir`.
+- **InstallSnapshot, phase 1 (raft)**: the leader sends its **oldest** entries (not the
+  sentinel), as many as write to at most 2 segments, with the **full contents** of those segments,
+  its **boundary state** (the state at the entry before them), and its latest timeline history
+  file, if any (`InstallSnapshot::timeline`). The follower writes the segments and the history
+  file, installs the entries with the boundary state as its state (`needs_backup = true`,
+  `first_idx`, `first_segment`) and as its boundary, and continues with AppendEntries from there.
+  Since the leader keeps every entry from the latest backup on, that backup and these entries
+  meet.
+- **No snapshot when none is needed**: a follower that is behind answers a failed AppendEntries
+  without a term when its log ends within what it committed; those entries match the leader's,
+  so the leader continues right after them if it still has that entry, and sends a snapshot only
+  when it has compacted it away.
+- **Phase 2 (PostgreSQL backup)** (implemented in the node, [node.md](node.md#43-recovering-from-needs_backup)):
+  a node with `needs_backup` restores the latest backup and restarts its standby;
+  `RaftServer::restored_backup(end)` clears `needs_backup` only if the backup's last segment
+  reaches `first_segment` (an InstallSnapshot during the restore can move it), under the server
+  lock.
 
 ## 4. Integration with `wal_fuse` and `wal_sender` (node, to be written)
 
@@ -280,13 +282,10 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
 3. `OpenOp` and `CloseOp` need FUSE hooks; today only writes, fsyncs and timelines (a rename to
    `<timeline>.history`, `WalTracker::async_timeline`) are generated. Applying a `TimelineOp`
    writes the history file into `wal_dir` on every node.
-4. WAL retention: segments are never removed from `raft/wal`, and the renamed `.X` segments are
-   never removed from `pg/pg_wal`. Planned: a WAL deletion thread removes the segments before
-   `RaftState::first_segment`, the segment of the oldest entry compaction left
-   ([backup.md](backup.md#5-wal-retention-and-raft-compaction)).
-5. `set_wal_keep_from(LogSeqNumber)` for compaction (replacing `keep_old_logs`), and
-   InstallSnapshot from the **oldest** entries (2 segments) instead of the latest
-   `snapshot_entries` (decision 7 in [node.md](node.md#10-open-decisions)).
+4. WAL retention — implemented: `wal_gc` removes the segments of `raft/wal` before
+   `first_segment`; the node removes the unlinked `.X` segments of `pg/pg_wal` before it.
+5. `set_wal_keep_from` and InstallSnapshot from the oldest entries — implemented
+   (`raft_ensemble_keep_from_test`).
 6. **Fixed (found by `node_test`):** on a short log the leader's walk-back could set
    `next_idx = 0`, so the next AppendEntries had `prev_log_idx = 0 - 1` and became an
    InstallSnapshot; and `send_install_snapshot` counted the `(0, 0)` sentinel as an entry, so

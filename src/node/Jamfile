@@ -63,3 +63,9 @@ unit-test node_backup_test
     libs
     ../base//testing
   ;
+
+unit-test node_recovery_test
+  : node_recovery_test.cc
+    libs
+    ../base//testing
+  ;

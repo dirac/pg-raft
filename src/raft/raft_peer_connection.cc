@@ -132,31 +132,30 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                                                RaftTerm                     leadership_term) {
   set_leader_term(rlog, leadership_term, lk);
 
-  auto r = rlog.latest_entries(options_.snapshot_entries);
+  // The oldest entries (not the (0, 0) sentinel): the leader keeps every entry from the latest
+  // backup on, so a follower that restores that backup gets the rest of the WAL from here.
+  auto first = rlog.first_entry();
+  if (!first)
+    return system_error(elog(first.error(), "Failed in getting the first entry"));
+  auto const start = std::max(std::get<RaftIndex>(first.value()), RaftIndex{1});
+
+  auto r = rlog.entries_from(start, options_.snapshot_entries);
   if (!r)
-    return system_error(elog(r.error(), "Failed in getting the latest entries"));
-
-  auto [idx, entries] = std::move(r.value());
-
-  // On a log shorter than snapshot_entries, the (0, 0) sentinel at index 0 comes last (the entries
-  // are the last first): it is in every log and is not sent, so log_idx below is at least 0.
-  if (entries.size() > INT(idx))
-    entries.resize(INT(idx));
-  if (entries.empty()) {
+    return system_error(elog(r.error(), "Failed in getting the oldest entries"));
+  if (!r.value() || r.value()->empty()) {
     // Nothing but the sentinel: the follower matches at index 0.
     next_idx_ = RaftIndex{1};
     return send_append_entries(std::move(lk), rlog, leadership_term, RaftIndex{0});
   }
+  auto entries = std::move(*r.value());
 
-  // The latest entries (the last first) that write to at most two segments.
+  // At most as many as write to two segments.
   trim(entries);
-  std::ranges::reverse(entries);
-
-  next_idx_ = idx + 1U;
+  next_idx_ = start + entries.size();
 
   auto server   = server_.lock();
   auto timeline = server ? server->latest_timeline() : std::nullopt;
-  auto state    = server ? server->applied_state() : RaftState{};
+  auto state    = server ? server->boundary_state() : RaftState{};  // the state at start - 1
 
   auto data = mem_blocks(entries, /*full_wal_segment=*/true);
   send_request(std::move(lk),
@@ -164,7 +163,7 @@ void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
                    .term = leadership_term,
                    .request =
                        InstallSnapshot{
-                           .log_idx  = idx - entries.size(),
+                           .log_idx  = start - 1U,
                            .entries  = std::move(entries),
                            .state    = state,
                            .timeline = std::move(timeline),

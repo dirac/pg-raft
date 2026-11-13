@@ -223,6 +223,11 @@ That only costs a duplicate backup; the larger name wins.
 
 ## 5. WAL retention and raft compaction
 
+Implemented: `RaftServer::set_wal_keep_from` (the node calls it from its backup thread with
+`keep_from(latest)`), `RaftLog::compact`, the WAL deletion thread `RaftServer::wal_gc`, and
+InstallSnapshot from the oldest entries with the boundary state; `raft_ensemble_keep_from_test`
+and `node_recovery_test` cover them.
+
 A node that restores the latest backup replays the backup's own WAL, then streams the rest from
 its `raft/wal`, starting at the segment that holds the backup's end LSN (a standby requests
 streaming from the start of a segment). So the cluster must keep, from that segment on:

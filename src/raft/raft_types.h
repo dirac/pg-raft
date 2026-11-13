@@ -88,18 +88,18 @@ struct AppendEntriesResponse {
   }
 };
 
-/// The latest entries of the leader's log, (log_idx, log_idx + entries.size()], and the full
-/// content of the (at most two) segments that they write. The follower replaces its log with them
-/// and can follow the leader from there; the WAL before the segments comes from a PostgreSQL
-/// backup (see RaftState::needs_backup).
+/// The oldest entries of the leader's log, (log_idx, log_idx + entries.size()], at most as many
+/// as write to two segments, with the full content of those segments. The follower replaces its
+/// log with them and continues with AppendEntries from there; the WAL before the segments comes
+/// from a PostgreSQL backup (see RaftState::needs_backup). The leader keeps every entry from the
+/// latest backup on (RaftServer::set_wal_keep_from), so that backup and these entries meet.
 struct InstallSnapshot {
   RaftIndex log_idx;
 
   vector<Entry> entries;
 
-  /// The leader's applied state. When state.log_idx is within the entries, the follower takes it
-  /// as is and has applied the entries up to it; otherwise (the leader applies far behind its log)
-  /// it takes its values at log_idx: they come from earlier entries, so they are never ahead.
+  /// The leader's state at log_idx (RaftLog::load_boundary): the follower's state before it
+  /// applies the entries.
   RaftState state;
 
   /// The leader's latest timeline history file, if there has been a promotion. The TimelineOps

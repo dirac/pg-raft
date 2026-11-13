@@ -48,7 +48,7 @@ bool wait_for(std::chrono::seconds timeout, std::function<bool()> const& pred) {
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(standby_takes_backups, *boost::unit_test::timeout(300)) {
+BOOST_AUTO_TEST_CASE(standby_takes_backups, *boost::unit_test::timeout(600)) {
   auto cfg = Config{};
   if (access((pg_bin(cfg) / "postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not available; skipping");

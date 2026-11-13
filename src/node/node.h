@@ -74,6 +74,17 @@ class Node : public std::enable_shared_from_this<Node> {
   void on_applied(RaftState const& state);
   void on_became_leader(RaftTerm term);
   void on_stepped_down(RaftTerm term);
+  void on_installed();
+
+  // needs_backup recovery (docs/node.md §4.3): an InstallSnapshot replaced the log, so the
+  // standby restores the latest backup (into the same data directory) and restarts. The latest
+  // backup's segment must reach the first entry's (no gap); otherwise needs_backup stays set and
+  // the backup thread asks again later.
+  Result<void> restore_and_restart();
+
+  // Retention (docs/backup.md §5): keep_from from the latest backup, and the unlinked segments of
+  // pg/pg_wal before the first entry's segment.
+  void retention();
 
   // The transition thread: acts on the latest role only.
   void transitions();
@@ -123,6 +134,7 @@ class Node : public std::enable_shared_from_this<Node> {
   std::condition_variable role_cv_;
   std::optional<RaftTerm> leader_term_;  // set by became_leader, cleared by stepped_down
   bool                    role_changed_{false};
+  bool                    restore_requested_{false};
   bool                    stopping_{false};
 
   std::atomic_bool primary_{false};

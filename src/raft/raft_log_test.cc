@@ -316,7 +316,7 @@ BOOST_FIXTURE_TEST_CASE(install_snapshot, Test) {
   auto state = RaftState{.log_idx = RaftIndex(500), .timestamp = 99, .needs_backup = true};
 
   auto r = exec<void>([&e, &state](RaftLog& log) -> Result<void> {
-    return log.install_snapshot(RaftIndex(500), e, state);
+    return log.install_snapshot(RaftIndex(500), e, state, state);
   });
   BOOST_TEST(r.has_value());
 
@@ -358,9 +358,57 @@ BOOST_AUTO_TEST_CASE(state_wal_end) {
   BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 1, .lsn = 0x2000000 + 8192}));
 
   // A new timeline is later, even at a lower LSN.
-  state.apply(RaftIndex(7), entry(LogSeqNumber{.timeline = 2, .lsn = 0x1000000},
-                                  WriteOp{.offset = 0, .size = 40}));
+  state.apply(
+      RaftIndex(7),
+      entry(LogSeqNumber{.timeline = 2, .lsn = 0x1000000}, WriteOp{.offset = 0, .size = 40}));
   BOOST_TEST((state.wal_end == LogSeqNumber{.timeline = 2, .lsn = 0x1000000 + 40}));
+}
+
+// compact() deletes the entries and saves the state and the boundary in one transaction: when any
+// LMDB call of it fails, nothing of it happened; once it succeeds, all of it did.
+BOOST_FIXTURE_TEST_CASE(compact_is_atomic, Test) {
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 100, 1), false).value());
+  BOOST_TEST((log.load_boundary().value() == RaftState{}));  // never compacted
+
+  auto const before = log.load_snapshot().value();
+  auto const state  = RaftState{.log_idx       = RaftIndex(90),
+                                .timestamp     = 90,
+                                .first_idx     = RaftIndex(40),
+                                .first_segment = LogSeqNumber{.timeline = 1, .lsn = 0x3000000}};
+  auto const bound  = RaftState{.log_idx = RaftIndex(39), .timestamp = 39};
+
+  for (int i = 0;; ++i) {
+    BOOST_REQUIRE(i < 500);  // about two LMDB calls per deleted entry, then the puts and the commit
+    log.fail       = true;
+    log.invocation = i;
+    auto r         = log.compact(RaftIndex(40), state, bound);
+    log.fail       = false;
+    BOOST_TEST(log.open_txn == nullptr);
+    BOOST_TEST(log.open_cursor == nullptr);
+
+    if (!r) {
+      // Nothing happened.
+      BOOST_TEST(std::get<RaftIndex>(log.first_entry().value()) == RaftIndex(0));
+      BOOST_TEST((log.load_snapshot().value() == before));
+      BOOST_TEST((log.load_boundary().value() == RaftState{}));
+      continue;
+    }
+    break;
+  }
+
+  // All of it happened.
+  BOOST_TEST(std::get<RaftIndex>(log.first_entry().value()) == RaftIndex(40));
+  BOOST_TEST(!log.entries_from(RaftIndex(39), 1).value().has_value());
+  BOOST_TEST(std::get<RaftIndex>(log.last_entry().value()) == RaftIndex(100));
+  BOOST_TEST((log.load_snapshot().value() == state));
+  BOOST_TEST((log.load_boundary().value() == bound));
+
+  // They survive a reopen.
+  log.close();
+  BOOST_REQUIRE(log.open_term_db().has_value());
+  BOOST_REQUIRE(log.open_logs_db().has_value());
+  BOOST_TEST((log.load_snapshot().value() == state));
+  BOOST_TEST((log.load_boundary().value() == bound));
 }
 
 BOOST_FIXTURE_TEST_CASE(term_and_vote, Test) {

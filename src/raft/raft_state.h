@@ -17,6 +17,10 @@
 ///    end inside an incomplete record (the FUSE layer does not check CRCs), which PostgreSQL
 ///    discards when it promotes. It is a maximum: a rewritten page is published again as a
 ///    WriteOp over earlier offsets.
+///  - first_idx, first_segment: the node's own (each node compacts on its own schedule, so they
+///    are not compared across nodes): the first entry of the log, and the segment of the first
+///    entry that has one. Every entry in the log has its WAL in wal_dir, so the segments wholly
+///    before first_segment (by address) can be deleted (RaftServer's WAL deletion thread).
 ///
 /// It is saved with the log on compaction (RaftLog::save_snapshot).
 struct RaftState {
@@ -25,6 +29,8 @@ struct RaftState {
   LogSeqNumber flushed_lsn{};
   bool         needs_backup{false};
   LogSeqNumber wal_end{};
+  RaftIndex    first_idx{0};
+  LogSeqNumber first_segment{};
 
   bool operator==(RaftState const&) const = default;
 
@@ -53,6 +59,8 @@ struct RaftState {
     ar & flushed_lsn;
     ar & needs_backup;
     ar & wal_end;
+    ar & first_idx;
+    ar & first_segment;
   }
 };
 
@@ -61,11 +69,13 @@ struct std::formatter<RaftState> : public parse_fn {
   auto format(RaftState const& s, std::format_context& ctx) const {
     return std::format_to(ctx.out(),
                           "RaftState {{ log_idx = {} timestamp = {} flushed_lsn = {} "
-                          "needs_backup = {} wal_end = {} }}",
+                          "needs_backup = {} wal_end = {} first_idx = {} first_segment = {} }}",
                           s.log_idx,
                           s.timestamp,
                           s.flushed_lsn,
                           s.needs_backup,
-                          s.wal_end);
+                          s.wal_end,
+                          s.first_idx,
+                          s.first_segment);
   }
 };

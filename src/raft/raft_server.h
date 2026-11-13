@@ -104,6 +104,19 @@ class RaftServer : public ClientConnectionApi,
   /// votes and replicates.
   void set_needs_backup(bool needs_backup);
 
+  /// The node restored a backup that ends at |end|: clears needs_backup, under the server lock, if
+  /// the backup reaches the log, i.e. its last segment is at or after first_segment (the standby
+  /// replays the backup's WAL, then streams from that segment, which wal_dir has). An
+  /// InstallSnapshot during the restore may have moved first_segment past it: then needs_backup
+  /// stays set and false is returned, and the node restores a newer backup.
+  bool restored_backup(LogSeqNumber end);
+
+  /// The start of the segment that holds the latest backup's end LSN (docs/backup.md §5): from
+  /// then on, compaction keeps every entry whose segment is at or after it (and always the last
+  /// applied entry), instead of keep_old_logs, so that a node restoring that backup gets the rest
+  /// of the WAL through AppendEntries. Set by the node whenever it sees a newer backup.
+  void set_wal_keep_from(LogSeqNumber keep_from);
+
   /// Connection from client and other peers.
   void new_connection(string peer, socket_type socket) override;
 
@@ -164,6 +177,7 @@ class RaftServer : public ClientConnectionApi,
   /// A copy of the state, published under its own mutex after every change, so that a peer
   /// connection can read it without the server lock.
   RaftState applied_state() const override;
+  RaftState boundary_state() const override;
 
   RaftResponse handle_peer_request(RaftNodeId node_id, RaftTerm term, std::monostate) override;
 
@@ -310,6 +324,16 @@ class RaftServer : public ClientConnectionApi,
   /// and truncates the log, if it holds the lock.
   void compact(RaftIndex idx, UniqueLock lk);
 
+  /// Compaction, with the server lock held: deletes the entries before the new first entry and
+  /// saves the state (first_idx, first_segment) and the boundary state, in one transaction; then
+  /// wakes the WAL deletion thread.
+  void compact_log();
+
+  /// The WAL deletion thread: deletes the segments of wal_dir wholly before first_segment (by
+  /// address: the parent timeline's copy of the segment where a timeline starts is kept, the WAL
+  /// sender reads the start of the new timeline's first segment from it).
+  void wal_gc();
+
   /// A stepdown that has not handed over the leadership in kStepdownTimeouts election timeouts is
   /// called off, so that the leader doesn't refuse the clients for ever.
   void check_stepdown_timeout();
@@ -387,10 +411,21 @@ class RaftServer : public ClientConnectionApi,
   // The state machine.
   RaftState state_;
 
-  /// A copy of state_ for applied_state(), under published_mtx_ (a leaf lock).
-  mutable std::mutex       published_mtx_;
-  RaftState                published_;
-  void                     publish_state();
+  /// A copy of state_ for applied_state() and of the boundary state for boundary_state(), under
+  /// published_mtx_ (a leaf lock).
+  mutable std::mutex published_mtx_;
+  RaftState          published_;
+  RaftState          published_boundary_;
+  void               publish_state();
+
+  std::optional<LogSeqNumber> keep_from_;  // under the server lock
+
+  // The WAL deletion thread.
+  std::mutex               gc_mtx_;
+  std::condition_variable  gc_cv_;
+  bool                     gc_wake_{false};
+  bool                     gc_stop_{false};
+  std::thread              gc_thread_;
   std::atomic<RaftIndex>   applied_idx_{RaftIndex{0}};
   shared_ptr<RaftObserver> observer_;
 

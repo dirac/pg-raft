@@ -53,6 +53,16 @@ void RaftServer::start() {
 
   state_ = load_snapshot();
   publish_state();
+  {
+    auto lk             = std::unique_lock{published_mtx_};
+    published_boundary_ = value(log_.load_boundary());
+  }
+  gc_thread_ = std::thread([this] { wal_gc(); });
+  {
+    auto lk  = std::unique_lock{gc_mtx_};
+    gc_wake_ = true;
+  }
+  gc_cv_.notify_all();
   applied_idx_    = state_.log_idx;
   commit_idx_     = state_.log_idx;
   compaction_idx_ = commit_idx_.load();
@@ -258,6 +268,25 @@ void RaftServer::set_needs_backup(bool needs_backup) {
   publish_state();
 }
 
+bool RaftServer::restored_backup(LogSeqNumber end) {
+  auto lk = unique_lock();
+  if (state_.first_segment.lsn > end.lsn - end.lsn % kWalSegmentSize) {
+    log(INFO,
+        "{}The restored backup ends at {}, before the first segment {}: needs_backup stays set",
+        log_prefix_,
+        end,
+        state_.first_segment);
+    return false;
+  }
+  if (state_.needs_backup) {
+    log(INFO, "{}needs_backup = false (restored a backup ending at {})", log_prefix_, end);
+    state_.needs_backup = false;
+    value(log_.save_snapshot(state_, std::numeric_limits<unsigned>::max()));
+    publish_state();
+  }
+  return true;
+}
+
 void RaftServer::publish_state() {
   auto lk    = std::unique_lock{published_mtx_};
   published_ = state_;
@@ -266,6 +295,11 @@ void RaftServer::publish_state() {
 RaftState RaftServer::applied_state() const {
   auto lk = std::unique_lock{published_mtx_};
   return published_;
+}
+
+RaftState RaftServer::boundary_state() const {
+  auto lk = std::unique_lock{published_mtx_};
+  return published_boundary_;
 }
 
 std::optional<TimelineOp> RaftServer::latest_timeline() const {
@@ -653,17 +687,30 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
   if (request.timeline)
     value(write_history_file(wal_dir_, u4(request.timeline->timeline), request.timeline->content));
 
-  // The leader's state. If it is within the entries, the follower has applied them up to it (the
-  // leader has, and the follower has their WAL, in the segments); otherwise the leader applies
-  // behind request.log_idx and its values, from earlier entries, are never ahead of the log.
-  auto state = request.state;
-  if (state.log_idx < request.log_idx || state.log_idx > request.log_idx + request.entries.size())
-    state.log_idx = request.log_idx;
+  // The leader's state at request.log_idx: the follower's state before it applies the entries,
+  // and its boundary state.
+  auto boundary      = request.state;
+  boundary.log_idx   = request.log_idx;
+  auto state         = boundary;
   state.needs_backup = true;
-  value(log_.install_snapshot(request.log_idx, request.entries, state));
+  state.first_idx    = request.log_idx + 1U;
+  if (auto pos = std::ranges::find_if(request.entries,
+                                      [](Entry const& e) { return e.cmd.segment.has_value(); });
+      pos != request.entries.end())
+    state.first_segment = *pos->cmd.segment;
+  value(log_.install_snapshot(request.log_idx, request.entries, state, boundary));
 
   state_ = state;
   publish_state();
+  {
+    auto lk             = std::unique_lock{published_mtx_};
+    published_boundary_ = boundary;
+  }
+  {
+    auto lk  = std::unique_lock{gc_mtx_};
+    gc_wake_ = true;
+  }
+  gc_cv_.notify_all();
   applied_idx_.store(state_.log_idx);
   commit_idx_.store(state_.log_idx);
   compaction_idx_.store(state_.log_idx);
@@ -828,9 +875,17 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
 
   } else if (auto lk = conn->should_send_append_entries(); lk) {
     conn->set_not_in_sync();
-    if (!response.term)
-      /// The node did not have an entry at the prev_log_idx, send a snapshot
+    if (!response.term) {
+      // The follower's log ends at response.idx, within what it has committed: those entries match
+      // ours (log matching), so it continues right after them, if we still have that entry. Only
+      // when we compacted it away does it need a snapshot.
+      if (value(raft_log().get_term(response.idx))) {
+        conn->set_next_idx(response.idx + 1U, lk);
+        return conn->send_append_entries(
+            std::move(lk), raft_log(), leadership_term(), commit_idx());
+      }
       return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
+    }
 
     if (!response.n)
       return;
@@ -990,17 +1045,143 @@ void RaftServer::compact(RaftIndex idx, UniqueLock lk) {
   if (!lk || compaction_idx() + options_.compaction_lag >= idx || state_.log_idx < idx)
     return;
 
-  auto last_entry = value(raft_log().last_entry());
-  log(INFO,
-      "{}Compacting ... applied = {} last_entry = {}",
-      log_prefix_,
-      idx,
-      std::get<RaftIndex>(last_entry));
-
-  value(log_.save_snapshot(state_, options_.keep_old_logs));
-
-  assert(last_entry <= value(raft_log().last_entry()));
+  compact_log();
   compaction_idx_.store(idx);
+}
+
+void RaftServer::set_wal_keep_from(LogSeqNumber keep_from) {
+  auto lk = unique_lock();
+  if (keep_from_ && !(*keep_from_ < keep_from))
+    return;
+  log(INFO, "{}Keeping the entries from segment {} on", log_prefix_, keep_from);
+  keep_from_ = keep_from;
+  compact_log();
+}
+
+void RaftServer::compact_log() {
+  RaftIndex const first        = std::get<RaftIndex>(value(raft_log().first_entry()));
+  RaftIndex const last_applied = state_.log_idx;
+  if (last_applied == RaftIndex{0})
+    return;
+
+  // The new first entry. With a keep_from (the latest backup's segment): the first entry whose
+  // segment is at or after it; otherwise keep_old_logs entries. Never past the last applied entry,
+  // which stays (AppendEntries needs its term).
+  RaftIndex target = last_applied;
+  if (keep_from_) {
+    for (RaftIndex idx = std::max(first, RaftIndex{1}); idx < last_applied;) {
+      auto batch = value(raft_log().entries_from(idx, 4096));
+      if (!batch || batch->empty())
+        break;
+      bool found = false;
+      for (auto const& e : *batch) {
+        if (idx >= last_applied)
+          break;
+        if (e.cmd.segment && !(*e.cmd.segment < *keep_from_)) {
+          target = idx;
+          found  = true;
+          break;
+        }
+        ++idx;
+      }
+      if (found)
+        break;
+    }
+  } else {
+    if (INT(last_applied) <= options_.keep_old_logs)
+      return;
+    target = last_applied - options_.keep_old_logs;
+  }
+  if (target <= first)
+    return;
+
+  // The state at target - 1: the previous boundary, with the entries being deleted applied.
+  auto            boundary = value(log_.load_boundary());
+  RaftIndex const from     = boundary.log_idx + 1U;
+  if (from < std::max(first, RaftIndex{1})) {
+    log(ERROR,
+        "{}No boundary state to compact from: {} vs first entry {}",
+        log_prefix_,
+        boundary,
+        first);
+    return;
+  }
+  for (RaftIndex idx = from; idx < target;) {
+    auto batch =
+        value(raft_log().entries_from(idx, std::min<size_t>(4096, INT(target) - INT(idx))));
+    if (!batch || batch->empty())
+      break;
+    for (auto const& e : *batch)
+      if (idx < target)
+        boundary.apply(idx++, e);
+  }
+
+  // The segment of the first entry, from target on, that has one.
+  auto first_segment = state_.first_segment;
+  for (RaftIndex idx = target;;) {
+    auto batch = value(raft_log().entries_from(idx, 4096));
+    if (!batch || batch->empty())
+      break;
+    auto pos =
+        std::ranges::find_if(*batch, [](Entry const& e) { return e.cmd.segment.has_value(); });
+    if (pos != batch->end()) {
+      first_segment = *pos->cmd.segment;
+      break;
+    }
+    idx = idx + batch->size();
+  }
+
+  log(INFO,
+      "{}Compacting: entries before {} (first segment {}), applied = {}",
+      log_prefix_,
+      target,
+      first_segment,
+      last_applied);
+  state_.first_idx     = target;
+  state_.first_segment = first_segment;
+  value(log_.compact(target, state_, boundary));
+  publish_state();
+  {
+    auto lk             = std::unique_lock{published_mtx_};
+    published_boundary_ = boundary;
+  }
+  {
+    auto lk  = std::unique_lock{gc_mtx_};
+    gc_wake_ = true;
+  }
+  gc_cv_.notify_all();
+}
+
+void RaftServer::wal_gc() {
+  while (true) {
+    {
+      auto lk = std::unique_lock{gc_mtx_};
+      gc_cv_.wait(lk, [this] { return gc_wake_ || gc_stop_; });
+      if (gc_stop_)
+        return;
+      gc_wake_ = false;
+    }
+
+    auto const first = applied_state().first_segment;
+    if (first.lsn == 0)
+      continue;
+
+    std::vector<std::filesystem::path> old;
+    std::error_code                    ec;
+    for (auto const& entry : std::filesystem::directory_iterator(wal_dir_, ec)) {
+      auto seg = log_seq_number(entry.path().filename().string().c_str());
+      if (seg && seg->lsn + kWalSegmentSize <= first.lsn)
+        old.push_back(entry.path());
+    }
+    for (auto const& p : old) {
+      std::filesystem::remove(p, ec);
+      log(INFO,
+          "{}Deleted the WAL segment {}: before the first entry's {}",
+          log_prefix_,
+          p.filename(),
+          first);
+    }
+  }
 }
 
 void RaftServer::check_stepdown_timeout() {
@@ -1083,6 +1264,14 @@ void RaftServer::close() {
       handler(make_error_code(ErrorCode::kNotLeader));
     handlers_.clear();
   }
+
+  {
+    auto lk  = std::unique_lock{gc_mtx_};
+    gc_stop_ = true;
+  }
+  gc_cv_.notify_all();
+  if (gc_thread_.joinable() && gc_thread_.get_id() != std::this_thread::get_id())
+    gc_thread_.join();
 
   auto lk = std::unique_lock<std::shared_mutex>{usage_lock_};
   log_.close();

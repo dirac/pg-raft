@@ -107,6 +107,10 @@ struct Node::Observer : public RaftObserver {
     if (auto n = node_.lock())
       n->on_stepped_down(term);
   }
+  void installed(RaftState const&) override {
+    if (auto n = node_.lock())
+      n->on_installed();
+  }
 
   weak_ptr<Node> node_;
 };
@@ -161,7 +165,9 @@ Result<void> Node::start() {
 
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
     raft_->set_needs_backup(true);  // no elections until there is something to promote
-    if (auto r = restore_latest_backup(); !r)
+    // Behind the log (EAGAIN): start anyway, needs_backup stays set and the backup thread restores
+    // a newer backup once there is one.
+    if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
       return r;
   }
 
@@ -269,7 +275,8 @@ Result<void> Node::restore_latest_backup() {
   std::ofstream(base_dir_ / "backup_end")
       << (*latest)->lsn.timeline << ' ' << (*latest)->lsn.lsn << '\n';
 
-  raft_->set_needs_backup(false);
+  if (!raft_->restored_backup((*latest)->lsn))
+    return elog(system_error_code(EAGAIN), "Node {}: the restored backup is behind the log", id_);
   return ok();
 }
 
@@ -339,18 +346,100 @@ void Node::on_stepped_down(RaftTerm term) {
   role_cv_.notify_all();
 }
 
+void Node::on_installed() {
+  // The log was replaced: the standby is behind the snapshot and is restored from a backup. Its
+  // PostgreSQL goes now (lock-free); the transition thread restores.
+  log(INFO, "Node {}: the log was replaced by an InstallSnapshot: restoring a backup", id_);
+  if (pg_)
+    pg_->kill();
+  needs_restart_.store(true);
+  {
+    auto lk            = std::unique_lock{role_mtx_};
+    restore_requested_ = true;
+  }
+  role_cv_.notify_all();
+}
+
+Result<void> Node::restore_and_restart() {
+  auto const state = raft_->applied_state();
+  if (!state.needs_backup)
+    return ok();
+
+  // No gap: the standby replays the backup's WAL, then streams from the start of the segment that
+  // holds its end, which raft/wal must have.
+  auto latest = store_->latest();
+  if (!latest)
+    return latest.error();
+  if (!*latest)
+    return elog(system_error_code(ENOENT), "Node {}: no backup to restore", id_);
+  auto const backup_segment = (*latest)->lsn.lsn - (*latest)->lsn.lsn % kWalSegmentSize;
+  if (state.first_segment.lsn > backup_segment)
+    return elog(system_error_code(EAGAIN),
+                "Node {}: the latest backup {} is older than the first entry's segment {}",
+                id_,
+                **latest,
+                state.first_segment);
+
+  pg_->kill();
+  pg_->stop(PgInstance::StopMode::Immediate, 5000);  // reaps it, and releases its IPC
+  fuse_->stop();
+  fuse_.reset();
+
+  if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
+    return r;  // (behind the log: restart anyway, needs_backup stays set and is retried)
+
+  fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
+  if (!fuse_->start())
+    return elog(system_error_code(EIO), "Unable to mount FUSE on {}", data_dir_ / "pg_wal");
+  if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
+    return r;
+  tracker_->set_mode(NodeWalTracker::Mode::kFollower);
+  needs_restart_.store(false);
+  if (!pg_->start() || !pg_->wait_ready(pg_port(), 120))
+    return elog(system_error_code(EIO), "PostgreSQL did not restart on port {}", pg_port());
+  log(INFO, "Node {}: restored and restarted as a standby", id_);
+  return ok();
+}
+
+void Node::retention() {
+  if (auto latest = store_->latest(); latest && *latest)
+    raft_->set_wal_keep_from(keep_from(**latest));
+
+  // PostgreSQL's unlinked segments (.X), before the first entry's segment: nothing refers to them.
+  auto const first = raft_->applied_state().first_segment;
+  if (first.lsn == 0)
+    return;
+  std::error_code                    ec;
+  std::vector<std::filesystem::path> old;
+  for (auto const& entry : std::filesystem::directory_iterator(pg_wal_dir_, ec)) {
+    auto name = entry.path().filename().string();
+    if (!name.starts_with('.'))
+      continue;
+    if (auto seg = log_seq_number(name.c_str() + 1); seg && seg->lsn + kWalSegmentSize <= first.lsn)
+      old.push_back(entry.path());
+  }
+  for (auto const& p : old)
+    std::filesystem::remove(p, ec);
+}
+
 // ── transitions ───────────────────────────────────────────────────────────────
 
 void Node::transitions() {
   while (true) {
     auto lk = std::unique_lock{role_mtx_};
-    role_cv_.wait(lk, [this] { return role_changed_ || stopping_; });
+    role_cv_.wait(lk, [this] { return role_changed_ || restore_requested_ || stopping_; });
     if (stopping_)
       return;
-    role_changed_ = false;
-    auto term     = leader_term_;
+    auto const restore = std::exchange(restore_requested_, false);
+    auto const changed = std::exchange(role_changed_, false);
+    auto       term    = leader_term_;
     lk.unlock();
 
+    if (restore)
+      if (auto r = restore_and_restart(); !r)
+        log(ERROR, "Node {}: the restore failed ({}); retrying later", id_, r.error().message());
+    if (!changed)
+      continue;
     if (term)
       promote(*term);
     else
@@ -556,8 +645,19 @@ bool Node::wait_stopping(std::chrono::milliseconds timeout) {
 }
 
 void Node::backups() {
-  while (!wait_stopping(options_.backup_check_interval))
+  while (!wait_stopping(options_.backup_check_interval)) {
     maybe_backup();
+    retention();
+
+    // A restore that couldn't be done yet (no backup recent enough): ask again.
+    if (raft_->applied_state().needs_backup) {
+      {
+        auto lk            = std::unique_lock{role_mtx_};
+        restore_requested_ = true;
+      }
+      role_cv_.notify_all();
+    }
+  }
 }
 
 void Node::maybe_backup() {

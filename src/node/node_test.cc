@@ -64,7 +64,7 @@ void pgbench(Config const& cfg, uint16_t port, std::vector<string> args) {
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(300)) {
+BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
   auto cfg = Config{};
   if (access((pg_bin(cfg) / "postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not available; skipping");

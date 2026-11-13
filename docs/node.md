@@ -312,6 +312,11 @@ senders.
 
 ### 4.3 Recovering from `needs_backup`
 
+Implemented (`Node::on_installed` / `restore_and_restart`; `node_recovery_test` deletes a
+follower's whole directory and checks it restores and catches up). The `installed` hook kills
+the standby at once; the transition thread restores; the backup thread asks again while
+`needs_backup` stays set (no backup recent enough yet).
+
 A node whose log was replaced by an InstallSnapshot has `needs_backup` set: `raft/wal` holds only
 the snapshot's segments, and the WAL before them is missing. The node:
 

@@ -83,6 +83,14 @@ MDB_val state_key() {
   return MDB_val{.mv_size = 6, .mv_data = data};
 }
 
+// The state at the entry before the first one (see RaftLog::compact).
+MDB_val boundary_key() {
+  static char* data = ::strdup("boundary");
+
+  assert(strlen(data) == 8);
+  return MDB_val{.mv_size = 9, .mv_data = data};
+}
+
 template <typename T>
 std::array<uint8_t, 8U + sizeof(T)> to_mem(std::array<uint8_t, 8> const& prefix, T t) {
   auto array = ::to_mem<T>(t);
@@ -431,7 +439,8 @@ Result<RaftState> RaftLog::load_snapshot() const {
 
 Result<void> RaftLog::install_snapshot(RaftIndex            log_idx,
                                        vector<Entry> const& entries,
-                                       RaftState            state) {
+                                       RaftState            state,
+                                       RaftState const&     boundary) {
   ScopedHandleCheck const check;
 
   assert(!entries.empty());
@@ -444,29 +453,98 @@ Result<void> RaftLog::install_snapshot(RaftIndex            log_idx,
   if (auto r = append_entries(log_idx + 1U, entries); !r)
     return elog(r.error(), "append entries failed");
 
-  return save_meta(state);
+  return save_meta(state, &boundary);
 }
 
-Result<void> RaftLog::save_meta(RaftState const& state) {
+Result<void> RaftLog::compact(RaftIndex first, RaftState const& state, RaftState const& boundary) {
+  ScopedHandleCheck const check;
+
+  std::unique_lock<std::mutex> lk{wmtx_};
+
+  MDB_txn* txn;
+  if (auto rc = txn_wbegin(logs_env_, &txn); rc != 0)
+    return system_error_code(rc);
+
+  if (auto rc = delete_older_entries(txn, first); rc != 0) {
+    txn_abort(txn);
+    return system_error_code(rc);
+  }
+  if (auto rc = put_meta(txn, state, &boundary); rc != 0) {
+    txn_abort(txn);
+    if (rc == MDB_MAP_FULL) {
+      if (auto r = resize_logs(); !r)
+        return r;
+      lk.unlock();
+      return compact(first, state, boundary);
+    }
+    return system_error_code(rc);
+  }
+
+  if (int rc = txn_commit(txn); rc != 0)
+    return system_error_code(rc);
+  return ok();
+}
+
+Result<RaftState> RaftLog::load_boundary() const {
+  ScopedHandleCheck const check;
+
+  std::shared_lock<std::shared_mutex> lk{rmtx_};
+
+  MDB_txn* txn;
+  if (int rc = txn_rbegin(logs_env_, &txn); rc != 0)
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
+
+  MDB_val key = boundary_key();
+  MDB_val val;
+
+  int rc = get(txn, meta_, &key, &val);
+  if (rc == MDB_NOTFOUND) {
+    txn_abort(txn);
+    return RaftState{};  // never compacted: the state at the (0, 0) sentinel
+  }
+  if (rc != 0) {
+    txn_abort(txn);
+    return elog(system_error_code(rc), "get(boundary) failed : {}", strerror(rc));
+  }
+
+  auto r = from_encoded_string<RaftState>(
+      string_view{reinterpret_cast<char const*>(val.mv_data), val.mv_size});
+  txn_abort(txn);
+  return r;
+}
+
+int RaftLog::put_meta(MDB_txn* txn, RaftState const& state, RaftState const* boundary) {
+  auto    val_str = to_encoded_string(state);
+  MDB_val key     = state_key();
+  MDB_val val{.mv_size = val_str.size(), .mv_data = val_str.data()};
+  if (auto rc = put(txn, meta_, &key, &val); rc != 0)
+    return rc;
+
+  if (boundary) {
+    auto    b_str = to_encoded_string(*boundary);
+    MDB_val b_key = boundary_key();
+    MDB_val b_val{.mv_size = b_str.size(), .mv_data = b_str.data()};
+    if (auto rc = put(txn, meta_, &b_key, &b_val); rc != 0)
+      return rc;
+  }
+  return 0;
+}
+
+Result<void> RaftLog::save_meta(RaftState const& state, RaftState const* boundary) {
   assert(wmtx_.try_lock() == false);
 
   MDB_txn* txn;
   if (auto rc = txn_wbegin(logs_env_, &txn); rc != 0)
     return system_error_code(rc);
 
-  auto val_str = to_encoded_string(state);
-
-  MDB_val key = state_key();
-  MDB_val val{.mv_size = val_str.size(), .mv_data = val_str.data()};
-
-  if (auto rc = put(txn, meta_, &key, &val); rc != 0) {
+  if (auto rc = put_meta(txn, state, boundary); rc != 0) {
     txn_abort(txn);
 
     if (rc == MDB_MAP_FULL) {
       if (auto r = resize_logs(); !r)
         return r;
 
-      return save_meta(state);
+      return save_meta(state, boundary);
     }
     return system_error_code(rc);
   }
@@ -508,11 +586,22 @@ Result<void> RaftLog::delete_older_entries(RaftIndex idx) {
   if (auto rc = txn_wbegin(logs_env_, &txn); rc != 0)
     return system_error_code(rc);
 
-  MDB_cursor* cursor;
-  if (auto rc = cursor_open(txn, logs_, &cursor); rc != 0) {
+  if (auto rc = delete_older_entries(txn, idx); rc != 0) {
     txn_abort(txn);
     return system_error_code(rc);
   }
+
+  if (auto rc = txn_commit(txn); rc != 0)
+    return system_error_code(rc);
+
+  return ok();
+}
+
+int RaftLog::delete_older_entries(MDB_txn* txn, RaftIndex idx) {
+  // In |txn|: the caller commits or aborts it.
+  MDB_cursor* cursor;
+  if (auto rc = cursor_open(txn, logs_, &cursor); rc != 0)
+    return rc;
 
   auto key_bytes = to_mem(idx, RaftTerm{0});
 
@@ -526,8 +615,7 @@ Result<void> RaftLog::delete_older_entries(RaftIndex idx) {
     if (std::memcmp(key.mv_data, key_bytes.data(), key_bytes.size()) < 0) {
       if (rc = cursor_del(cursor); rc != 0) {
         cursor_close(cursor);
-        txn_abort(txn);
-        return system_error_code(rc);
+        return rc;
       }
     } else {
       break;
@@ -536,15 +624,7 @@ Result<void> RaftLog::delete_older_entries(RaftIndex idx) {
   }
   cursor_close(cursor);
 
-  if (rc != 0 && rc != MDB_NOTFOUND) {
-    txn_abort(txn);
-    return system_error_code(rc);
-  }
-
-  if (rc = txn_commit(txn); rc != 0)
-    return system_error_code(rc);
-
-  return ok();
+  return rc == MDB_NOTFOUND ? 0 : rc;
 }
 
 Result<void> RaftLog::delete_all_entries() {
