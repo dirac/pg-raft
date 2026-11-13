@@ -19,6 +19,8 @@ This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake
 
 All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
+The code builds on macOS (Apple clang 17, toolset `clang-darwin-17`) and Linux (gcc 14, toolset `gcc-14`). On Linux, `~/user-config.jam` selects the compiler (`using gcc : 14 : gcc14-g++ ;`); the default gcc may be too old. Platform differences are behind `#ifdef __APPLE__` (macFUSE's xattr signatures and `-onoappledouble` mount option; libproc vs `/proc`; `ENOATTR` vs `ENODATA`).
+
 ```bash
 # Build everything
 /opt/pg_raft/bin/b2
@@ -67,19 +69,23 @@ All `b2` commands must be run from the repo root (the directory containing `Jamr
 # Run a single Boost.Test case within a unit-test binary (pass args after --):
 /opt/pg_raft/bin/b2 src/process//process_test -- --run_test=TestCaseName
 # Or run the binary directly for full Boost.Test flags (--log_level=all, etc.):
-./src/process/bin/clang-darwin-17/debug/cxxstd-23-iso/link-static/visibility-hidden/process_test --run_test=TestCaseName
+./src/process/bin/<toolset>/debug/cxxstd-23-iso/link-static/visibility-hidden/process_test --run_test=TestCaseName
 
 # Build with sanitizers
 /opt/pg_raft/bin/b2 address-sanitizer=norecover
 /opt/pg_raft/bin/b2 thread-sanitizer=norecover
 ```
 
-Build artifacts land in `src/<module>/bin/clang-darwin-17/debug/cxxstd-23-iso/link-static/visibility-hidden/` (sanitizer builds add a `thread-sanitizer-norecover/` or `address-sanitizer-norecover/` path component).
+Build artifacts land in `src/<module>/bin/<toolset>/debug/cxxstd-23-iso/link-static/visibility-hidden/`, where `<toolset>` is `clang-darwin-17` on macOS or `gcc-14` on Linux (sanitizer builds add a `thread-sanitizer-norecover/` or `address-sanitizer-norecover/` path component).
+
+The precompiled header (`src/base/bin/<toolset>/.../pch.gch`) is not rebuilt when headers under `/opt/pg_raft/include` change (they come in through `-isystem`, which b2 doesn't scan): delete it after patching an installed dependency's headers.
 
 Compiler flags (from `Jamroot.jam`):
 - `-Wall -Werror` always on; `-Wextra -Wconversion -Wuninitialized` in debug builds (so sign conversions, e.g. an `int` initializer list iterated as `size_t`, are errors)
 - Static linking, C++23 (`<cxxstd>23`), hidden visibility, debug symbols always on
 - `-Wno-tsan` is passed only for the gcc toolset (Apple clang rejects it)
+- `-Wno-missing-field-initializers` is passed only for gcc: gcc 14 warns about fields left out of designated initializers (`T{.a = x}`), clang doesn't, and the code relies on that
+- libfuse is linked shared on Linux (`<target-os>linux:<link>shared`): only `libfuse.so` is installed there
 - Apple clang 17's libc++ has no `std::move_only_function`; use `std::function`
 - `BOOST_ASIO_NO_DEPRECATED=1` — use only current Boost.Asio APIs
 
@@ -87,12 +93,14 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 ## Environment setup
 
-Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under `/opt/pg_raft/`. To build or rebuild them from source, run the scripts in `external/`:
+Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, etc.) are installed under `/opt/pg_raft/`; FUSE is macFUSE on macOS and libfuse 2 (`fuse-devel`, `libfuse.so` in `/usr/local/lib`) on Linux. To build or rebuild them from source, run the scripts in `external/`:
 
 ```bash
 ./external/install.sh          # install all dependencies
 ./external/install-boost.sh    # or individually
 ```
+
+`install-boost.sh` applies `external/patch_files/boost_serialization_{optional.h,shared_ptr_helper.hpp}.patch` before building Boost 1.90. Without the `shared_ptr_helper` patch, gcc 14 fails on any `std::optional` load (`invalid use of incomplete type 'boost::serialization::U'`); the patch drops the helper's friend declaration of `load` and makes its members public (Boost's own fallback), which also avoids an ambiguous `load` for `std::vector` under gcc.
 
 ## Code formatting and tooling
 
@@ -114,7 +122,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 - **`convert.h`** — Checked narrowing casts: `u8()`, `u4()`, `u2()`, `u1()`, `i8()`, `i4()`, `i2()`, `i1()`, `i<U>(v)`. All assert that the value fits in the target type.
 - **`formatter.h`** — Specializes `std::formatter<std::filesystem::path>` so paths work directly in `std::format` calls.
 - **`using.h`** — Project-wide type aliases bringing `std::` and `boost::` containers into the global namespace (`string`, `vector`, `map`, `unordered_map`, `unordered_flat_map`, `concurrent_unordered_map`, `circular_buffer`, `shared_ptr`, `Bytes`, etc.) and `asio` as an alias for `boost::asio`.
-- **`base.h`** — Also exposes: `kWalBlockSize` (8192), `kWalSegmentSize` (16 MiB), `LogSeqNumber`, `log_seq_number(path)` (parses a 24-hex-char WAL file name), `filename(lsn)`, `epoch_msec()` (wall-clock ms), `pcounter()`/`gcounter()` (monotonic counters), `tmp_dir()`/`tmp_file()` (temp path helpers), `file_mode()`, `system_error_code(errno)`.
+- **`base.h`** — Also exposes: `kWalBlockSize` (8192), `kWalSegmentSize` (16 MiB), `LogSeqNumber`, `log_seq_number(path)` (parses a 24-hex-char WAL file name; the name must end at `path[24]`), `filename(lsn)`, `epoch_msec()` (wall-clock ms), `pcounter()`/`gcounter()` (monotonic counters), `tmp_dir()`/`tmp_file()` (temp path helpers), `file_mode()`, `system_error_code(errno)`.
 - **`xxhash.h`** — `xxhash32(buffer | vector<const_buffer> | ptr+size | Bytes, seed)`. The hash of a buffer vector equals the hash of their concatenation. Used as the frame checksum in `net`.
 - **`WalSegment`** (`wal_segment.h/cc`) — Shared, ref-counted mmap wrapper for a WAL segment file on disk: `WalSegment(shared_ptr<WalSegmentCache>, dir, lsn)`. `open()` mmap's the file `PROT_READ|PROT_WRITE|MAP_SHARED` and registers it in the `WalSegmentCache` (`mutex` + `map<LogSeqNumber, Mapping>`) so that openers sharing a cache share the mapping; if `X` doesn't exist it opens `.X` (see `WalFuseOps::op_unlink`). `mapping()` returns the base pointer; `write(buf, off, size)` copies into it; `const_buffer(off, size)` is a zero-copy view; `fsync(off, size)` page-aligns and `msync`s. GC on every `open`/destructor evicts unreferenced mappings idle for ≥ 5 s, and all unreferenced ones when more than 5 remain. Used by `wal_fuse` and `raft`.
 - **`WalTracker`** (`wal_segment.h`) — Receiver of WAL events, with default implementations: `async_publish(segment, offset, size)` (no-op) is called for WAL bytes as the FUSE parser walks over them; `async_fsync(segment, offset, size, completion)` is called on fsync and must call `completion(Result<void>)` once the range is durable (default: local `msync`); `async_timeline(timeline, content)` (no-op) is called when PostgreSQL installs a timeline history file. The raft layer is meant to implement it. `wal_segment.h` also has the history-file helpers `history_timeline(path)`, `history_filename(tli)`, `write_history_file(dir, tli, content)` (atomic) and `read_history_file(dir, tli)`.
@@ -153,7 +161,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, FUSE, etc.) are installed under 
 
 **`src/wal_fuse/`** — FUSE-based interception layer for `pg_wal`. Primary classes:
 
-- **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
+- **`Fuse`** — Passthrough FUSE filesystem. Constructor: `Fuse(mount_point, unique_ptr<FuseOps>)`. Mounts at `mount_point` and delegates all file operations to the `FuseOps` instance (passed as `fuse_get_context()->private_data`). `start(timeout_ms)` mounts (with `-onoappledouble` on macOS only) and blocks until the mount is live (detected via `st_dev` change); `stop()` unmounts and joins the loop thread. Runs the FUSE event loop in its own thread.
 
 - **`FuseOps`** — Concrete FUSE operations base class. Constructed with a `backing_dir` path; every FUSE op is forwarded to that directory. Subclass and override virtual `op_*` methods to intercept specific operations. `static make_ops()` returns a `struct fuse_operations` whose entries are static trampolines that dispatch through `fuse_get_context()->private_data`. All ops expose `std::atomic<uint64_t> n_<opname>` counters (relaxed, observation-only) for testing.
 
@@ -183,7 +191,7 @@ Two additional executables live in `src/wal_fuse/` but are not part of any test 
 
 **`src/node/`** — The pg-raft node process (in progress; `docs/node.md`). So far:
 
-- **`Node`** (`node.h`) / **`pg_raft_node --config config.toml --id N`** — `Node::create(config, id, NodeOptions)`, `start()`, `shutdown()`. Layout `wdir/node<N>/{data, pg/pg_wal, raft, raft/wal}`. `start()`: raft first (a `RaftObserver` forwards `applied` / `became_leader` / `stepped_down`); with no usable data directory (or `needs_backup`) it sets `needs_backup`, restores the latest backup into `data/` (same directory), moves its `pg_wal` into `pg/pg_wal` and copies its WAL into `raft/wal` where missing; mounts FUSE (`WalFuseOps` + `NodeWalTracker`); starts a `WalSenderServer` on `raft/wal` (socket `socket_dir/.s.PGSQL.<pg_port+20000>`); writes `standby.signal` and `pg_raft.conf` (included once from `postgresql.conf`); starts PostgreSQL as a standby; starts the transition thread and the 500 ms status poller (`set_flushed_lsn`, `set_pg_status`). `became_leader` → the transition thread advances the WAL sender to `wal_end`, waits for the standby's flush (`StatusCb`), switches the tracker to leader mode, `promote()`s, waits until the new timeline's history file is in `raft/wal`, then `set_serving(true)`. `stepped_down` → in the hook: tracker fenced, `PgInstance::kill()`; the transition thread reaps it. `installed` (an InstallSnapshot replaced the log) → the standby is killed and the transition thread restores the latest backup and restarts it (`restore_and_restart`); the backup thread also calls `set_wal_keep_from(keep_from(latest))` and deletes `pg/pg_wal`'s unlinked `.X` segments before `first_segment`. Demotion (`demote` / `restart_as_standby`, `docs/node.md` §3.3): reap it, unmount FUSE, `rebuild_pg_wal` (`wal_rebuild.h`: `pg/pg_wal` rebuilt from `raft/wal` up to `max(wal_end, the restored backup's end rounded up to its segment)`), remount, restart as a standby; a promotion that finds PostgreSQL killed does that first. The restored backup's end LSN is kept in `node<N>/backup_end`. Backups after bootstrap: a backup thread checks every `NodeOptions::backup_check_interval` (60 s); a standby (not the leader, no `needs_backup`, PostgreSQL running) takes one when `backup_due()` says its staggered deadline has passed and `pending_blocks()` finds no live lease: `store.begin`, a refresher thread renews the lease every `pending_timeout/4`, `PgInstance::backup` (`pg_basebackup` on the standby) + `verify_backup`, then `store.put` with the manifest's end LSN, or `store.abort`. On start a node aborts its own leftover lease.
+- **`Node`** (`node.h`) / **`pg_raft_node --config config.toml --id N`** — `Node::create(config, id, NodeOptions)`, `start()`, `shutdown()` (PostgreSQL stopped Fast first; if it hasn't stopped within 12 s — a leader without a quorum can't commit the shutdown checkpoint, and on Linux the checkpointer blocked in a FUSE fsync can't be killed — raft is shut down, failing the pending fsyncs). Layout `wdir/node<N>/{data, pg/pg_wal, raft, raft/wal}`. `start()`: raft first (a `RaftObserver` forwards `applied` / `became_leader` / `stepped_down`); with no usable data directory (or `needs_backup`) it sets `needs_backup`, restores the latest backup into `data/` (same directory), moves its `pg_wal` into `pg/pg_wal` and copies its WAL into `raft/wal` where missing; mounts FUSE (`WalFuseOps` + `NodeWalTracker`); starts a `WalSenderServer` on `raft/wal` (socket `socket_dir/.s.PGSQL.<pg_port+20000>`); writes `standby.signal` and `pg_raft.conf` (included once from `postgresql.conf`); starts PostgreSQL as a standby; starts the transition thread and the 500 ms status poller (`set_flushed_lsn`, `set_pg_status`). `became_leader` → the transition thread advances the WAL sender to `wal_end`, waits for the standby's flush (`StatusCb`), switches the tracker to leader mode, `promote()`s, waits until the new timeline's history file is in `raft/wal`, then `set_serving(true)`. `stepped_down` → in the hook: tracker fenced, `PgInstance::kill()`; the transition thread reaps it. `installed` (an InstallSnapshot replaced the log) → the standby is killed and the transition thread restores the latest backup and restarts it (`restore_and_restart`); the backup thread also calls `set_wal_keep_from(keep_from(latest))` and deletes `pg/pg_wal`'s unlinked `.X` segments before `first_segment`. Demotion (`demote` / `restart_as_standby`, `docs/node.md` §3.3): reap it, unmount FUSE, `rebuild_pg_wal` (`wal_rebuild.h`: `pg/pg_wal` rebuilt from `raft/wal` up to `max(wal_end, the restored backup's end rounded up to its segment)`), remount, restart as a standby; a promotion that finds PostgreSQL killed does that first. The restored backup's end LSN is kept in `node<N>/backup_end`. Backups after bootstrap: a backup thread checks every `NodeOptions::backup_check_interval` (60 s); a standby (not the leader, no `needs_backup`, PostgreSQL running) takes one when `backup_due()` says its staggered deadline has passed and `pending_blocks()` finds no live lease: `store.begin`, a refresher thread renews the lease every `pending_timeout/4`, `PgInstance::backup` (`pg_basebackup` on the standby) + `verify_backup`, then `store.put` with the manifest's end LSN, or `store.abort`. On start a node aborts its own leftover lease.
 
 - **`pg_raft_initdb --config config.toml [--port N]`** (`pg_raft_initdb.cc`, `init_cluster()` in `init.h`) — creates a cluster's first backup: initdb (with `pg_config` and the pg-raft defaults) into a scratch dir under `wdir`, start PostgreSQL on `--port` (default `servers[0].pg_port`) without FUSE, `pg_basebackup`, `verify_backup`, then `store.begin(0)` / `put` with the end LSN from `backup_manifest` (`backup_end_lsn()`). Refuses a store that already holds a backup. `pg_bin(config)` is `install_dir/<pg_major_version>/bin`.
 - **`NodeWalTracker(shared_ptr<RaftServer>)`** (`node_wal_tracker.h`) — the node's `WalTracker`. `set_mode(kLeader | kFollower)`, `set_flushed_lsn()` (from the status poller). Leader mode: `async_publish` copies the bytes into raft's `wal_dir` segment, then `exec(WriteOp)`; `async_fsync` msyncs both copies, then `exec(FlushOp)` and completes on commit, or with `WalSegment::kNoConsensus` if not leader; `async_timeline` → `exec(TimelineOp)`. Follower mode: publish/timeline ignored, fsync is a local msync. Fenced mode (set when the node loses leadership, until PostgreSQL restarts as a standby): every fsync fails with `kNoConsensus`.
@@ -251,7 +259,7 @@ LSNs in `wal_sender` are `uint64_t` (high 32 bits = segment number, low 32 bits 
 
 ## Tests
 
-Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-skip if the binaries are absent.
+Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-skip if the binaries are absent. Run the node tests (`node_test`, `node_backup_test`, `node_recovery_test`) one at a time: with `b2 -jN` their clusters run together, and under that load a leader can miss the tests' 1 s election timeout.
 
 - **`semaphore_lock_test`** — unit tests for `SemaphoreLock`. No PostgreSQL needed.
 - **`xxhash_test`** — known xxHash32 vectors and multi-buffer equivalence.
@@ -264,7 +272,7 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 - **`pg_wal_switch_test`** — integration test for WAL segment boundary handling. Same setup as `wal_sender_test` but calls `pg_switch_wal()` four times, 150 ms apart, while pgbench runs in the background, forcing the WalSender to follow WAL across multiple forced segment transitions. Requires PostgreSQL; auto-skips if absent.
 - **`standby_wal_reset_test`** — integration test for standby reconnection after WAL loss. Runs a first pgbench batch and waits for the standby to catch up, then stops the standby and deletes all WAL segment files from its `pg_wal` directory. Runs a second pgbench batch while the standby is down, then restarts it. Verifies the WalSender re-streams the missing WAL from the earlier position and the standby converges to the final primary LSN. Requires PostgreSQL; auto-skips if absent.
 - **`timeline_switch_test`** — integration test for timelines: a standby (S2) of the primary is promoted to timeline 2 after the primary stops; another standby (S1) streaming through `WalSender` from a WAL directory that mirrors the primary's and S2's WAL (as hard links, playing `raft/wal`) must follow onto timeline 2 and converge with S2. Requires PostgreSQL; auto-skips if absent.
-- **`fuse_test`** — tests for `Fuse` and `FuseOps`. The majority of cases (lifecycle, passthrough reads/writes, getattr, xattr, rename, concurrency, etc.) run without PostgreSQL. Two cases (`wal_moved_to_raft_dir`, `wal_writes_to_backing_dir`) start a real PostgreSQL instance and skip if it's absent.
+- **`fuse_test`** — tests for `Fuse` and `FuseOps`. The majority of cases (lifecycle, passthrough reads/writes, getattr, xattr, rename, concurrency, etc.) run without PostgreSQL. Two cases (`wal_moved_to_raft_dir`, `wal_writes_to_backing_dir`) start a real PostgreSQL instance and skip if it's absent. Linux sends `RELEASE`/`RELEASEDIR` after `close()` returns, so `op_counters_increment` waits for those counters.
 - **`wal_fuse_ops_test`** — unit tests for `WalFuseOps` and `WalFuseSegment` interaction. Exercises open/write/fsync/read/release ops against a `WalFuseOps` instance backed by a `TmpDir`. No real PostgreSQL needed.
 - **`wal_state_test`** — unit tests for `WalFuseSegment::WalState` XLog parsing. Feeds real captured WAL bytes (from `wal_data.cc`) through `WalState::update()` and checks the returned `(offset, size, complete)` tuples. No real PostgreSQL needed.
 - **`wal_shadow_test`** — integration test using `WalFuseOps` directly (via a `ShadowWalOps` subclass that mirrors writes into an in-memory buffer). Starts a real PostgreSQL instance, runs pgbench, then cross-checks the shadow buffer against the on-disk WAL bytes. Auto-skips if PostgreSQL is absent.

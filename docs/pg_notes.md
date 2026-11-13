@@ -872,6 +872,13 @@ cascading changes, or `pg_rewind` (which rewinds a server so it can join an exis
 - Unmount with `umount`/`diskutil unmount` on macOS and `fusermount -u` on Linux. Linux non-root
   mounts need `user_allow_other` in `/etc/fuse.conf` for `-o allow_other`.
 - Useful mount options: `-f` (foreground), `-d` (debug), `-ovolname=`, `-olocal`.
+  `-onoappledouble` is macFUSE-only; Linux's libfuse fails the mount on it.
+- On Linux, `close()` returns after `FLUSH`; `RELEASE` (and `RELEASEDIR`) arrive asynchronously.
+- On Linux, once the daemon has read a request, the calling process waits for the answer
+  uninterruptibly (state `D`, `request_wait_answer`): even SIGKILL doesn't free it until the
+  daemon answers or the connection is aborted (`/sys/fs/fuse/connections/<n>/abort`, or the daemon
+  exits). macFUSE instead times unanswered requests out (`daemon_timeout`, 60 s by default). A
+  WAL fsync that waits for a raft commit can therefore hang PostgreSQL forever on Linux.
 
 > **pg-raft:** `src/base/pch.h` defines `FUSE_USE_VERSION 26` and `_FILE_OFFSET_BITS 64`. `Fuse`
 > runs the loop in its own thread and detects the mount by watching `st_dev` change.

@@ -369,6 +369,13 @@ On SIGTERM or SIGINT (`Node::shutdown`, implemented):
    raft, since the node still leads. A clean stop also releases PostgreSQL's System V shared memory
    and semaphores; a kill leaves them behind, and only a postmaster in the same data directory
    reclaims them (macOS allows 32 shared memory segments in all).
+   A leader without a quorum (the last node of a cluster that is shutting down) never commits
+   that checkpoint: the checkpointer's fsync waits in FUSE for a commit that never comes. On Linux
+   a process waiting on a FUSE request the daemon has read cannot be killed, so it keeps
+   PostgreSQL's output pipes open and `PgInstance::stop()` (which waits for them) never returns.
+   (macFUSE times such requests out.) So the stop runs on its own thread, and if PostgreSQL has
+   not stopped after 12 s, raft is shut down first: `close()` fails the pending `exec`s with
+   `kNotLeader`, the fsync fails, the checkpointer PANICs and PostgreSQL exits.
 3. Raft shutdown, which hands the leadership over; `stepped_down` finds nothing left to kill.
 4. Stop the WAL sender and its senders, unmount FUSE.
 

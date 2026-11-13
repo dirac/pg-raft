@@ -102,7 +102,10 @@ Found in the second review (2026-11-12), not fixed yet:
 
 - [ ] **node tests**: about 2 minutes each and can time out in parallel; run serially.
   `node_recovery_test` failed once at the restarted node's `start()` in a parallel run — not yet
-  investigated. ([node.md §10](node.md#10-open-items))
+  investigated. On Linux (2026-11-13), with all three running together, `node_test` lost its
+  leader mid-pgbench (the leader process went silent for >1 s, past the tests' 1 s election
+  timeout) and `node_backup_test`'s standby took its backup before replaying pgbench's WAL; both
+  pass when run alone. ([node.md §10](node.md#10-open-items))
 - [ ] A killed test run can leak PostgreSQL's System V shared memory (macOS allows 32 segments):
   `ipcs -m`, then `ipcrm -m <id>`.
 - [ ] `data_test` takes ~50 s and times out under ASAN.

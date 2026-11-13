@@ -43,8 +43,8 @@ Fuse                  mount lifecycle, event-loop thread
 ### 2.1 `Fuse`
 
 - `Fuse(mount_point, unique_ptr<FuseOps>)` takes ownership of the ops object.
-- `start(timeout_ms)` calls `fuse_mount` with `-onoappledouble` (so macOS does not create `._*`
-  files) and `fuse_new(…, ops_instance_)`, then starts `fuse_loop` on its own thread. It **waits
+- `start(timeout_ms)` calls `fuse_mount` with `-onoappledouble` on macOS (so it does not create
+  `._*` files; Linux's libfuse rejects the option) and `fuse_new(…, ops_instance_)`, then starts `fuse_loop` on its own thread. It **waits
   until the mount is live**, which it detects when `st_dev(mount_point) != st_dev(parent)`. This
   avoids a race where PostgreSQL starts before the mount takes effect and writes WAL to the
   underlying directory.
@@ -58,7 +58,9 @@ Fuse                  mount lifecycle, event-loop thread
   recovers `FuseOps*` from `fuse_get_context()->private_data` and makes a virtual call.
   Subclasses intercept an operation by overriding it.
 - Each operation maps a path to `backing_dir / path` (`real_path`) and calls the matching
-  syscall: `lstat`, `open`, `pread`, `pwrite`, `fsync`, `rename`, xattrs, and so on.
+  syscall: `lstat`, `open`, `pread`, `pwrite`, `fsync`, `rename`, xattrs, and so on. The xattr ops
+  keep macFUSE's signatures (with a `position`); on Linux the trampolines pass 0 and the ops call
+  `setxattr` / `lgetxattr` / `llistxattr` / `lremovexattr`.
   `fi->fh` holds the real file descriptor. For directories it holds a `DirInfo*` that keeps the
   `DIR*` and resumes from the readdir offset.
 - Each operation increments an `n_<op>` atomic counter. These counters are for tests only.

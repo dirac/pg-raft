@@ -10,8 +10,9 @@ failure, the node with the most complete log wins the election, and its standby 
 acknowledged byte before it is promoted.
 
 > **Status:** experimental. Every component is implemented and covered by integration tests
-> against real PostgreSQL 17, but pg-raft has not run in production. It is developed and tested
-> on macOS (Apple clang 17, macFUSE). Known gaps are listed in [docs/todo.md](docs/todo.md).
+> against real PostgreSQL 17, but pg-raft has not run in production. It is developed on macOS
+> (Apple clang 17, macFUSE) and also builds and passes its tests on Linux (gcc 14, libfuse 2;
+> Amazon Linux 2023 on aarch64). Known gaps are listed in [docs/todo.md](docs/todo.md).
 
 ## How it works
 
@@ -68,8 +69,10 @@ The design is described in [docs/README.md](docs/README.md), with one document p
 
 Requirements:
 
-- A C++23 compiler (Apple clang 17).
-- macFUSE, with libfuse under `/usr/local`.
+- A C++23 compiler: Apple clang 17 on macOS, gcc 14 on Linux.
+- FUSE 2: macFUSE on macOS, with libfuse under `/usr/local`. On Linux, libfuse 2 (`fuse` and
+  `fuse-devel`): `libfuse.so` in `/usr/local/lib` or the linker's default path, and a usable
+  `/dev/fuse`. On Linux the build links libfuse dynamically, so no static `libfuse.a` is needed.
 
 Everything else is built from source into `/opt/pg_raft` by the scripts in `external/`:
 Boost (with b2), LMDB, toml11, cxxopts, OpenSSL, ICU and PostgreSQL 17.
@@ -83,10 +86,23 @@ sudo mkdir -p /opt/pg_raft && sudo chown $USER /opt/pg_raft
 /opt/pg_raft/bin/b2 src/raft//raft_ensemble_sanity_test   # one test
 ```
 
+On Linux, point b2 at gcc 14 once (the distribution's default gcc may be too old for C++23), in
+`~/user-config.jam`:
+
+```
+using gcc : 14 : gcc14-g++ ;
+```
+
+`install-boost.sh` patches two Boost.Serialization headers (`external/patch_files/`) that do not
+compile with gcc 14's libstdc++. If you patch already-installed headers by hand, delete the
+precompiled header (`src/base/bin/<toolset>/.../pch.gch`): b2 does not track headers under
+`/opt/pg_raft/include`.
+
 pg-raft builds with Boost.Build (`b2`), not CMake. The binaries are written to
 `src/<module>/bin/<toolset>/debug/...`. The integration tests start real PostgreSQL instances and
 FUSE mounts, and skip themselves when PostgreSQL is not installed. The node tests take about two
-minutes each, so run them one at a time.
+minutes each, so run them one at a time: `b2 -jN` starts their clusters together, and under that
+load a leader can miss the tests' 1 s election timeout.
 
 ## Running a cluster
 
