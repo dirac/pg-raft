@@ -14,8 +14,9 @@ struct [[nodiscard]] Result : public std::expected<T, std::error_code> {
   Result(boost::system::error_code const& ec)
       : std::expected<T, std::error_code>(std::unexpected(ec)) {}
 
+  // std::forward, not std::move: an lvalue is copied (returning a member must not empty it).
   template <typename U>
-  Result(U&& u) : std::expected<T, std::error_code>(std::move(u)) {}
+  Result(U&& u) : std::expected<T, std::error_code>(std::forward<U>(u)) {}
 
   template <class... Args>
   Result(Args&&... args)
