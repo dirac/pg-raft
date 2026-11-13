@@ -41,7 +41,7 @@ Linux)
 esac
 
 ./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl \
-            --with-icu ICU_LIBS="$ICU_LIBS" ICU_CFLAGS="$ICU_CFLAGS" \
+             --without-icu \
             --with-includes=${prefix}/include \
             --with-libraries=${prefix}/lib \
             --without-readline --without-zlib
