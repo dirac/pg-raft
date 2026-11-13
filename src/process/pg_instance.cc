@@ -134,7 +134,7 @@ void PgInstance::stop(StopMode mode, int timeout_ms) {
   if (!postgres_.is_running())
     return;
 
-  int sig;
+  int sig = SIGINT;  // Fast; set below for every mode
   switch (mode) {
     case StopMode::Smart:
       sig = SIGTERM;
