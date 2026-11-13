@@ -33,6 +33,10 @@ struct SendInfoHandler {
     if (ec)
       return handler(elog(ec, "Handshake ack error with host {}:{}", host.address, host.port));
 
+    // Small request/response frames: without TCP_NODELAY, Nagle and the peer's delayed ACK hold
+    // a frame back for up to 40 ms (one raft round per commit).
+    boost::system::error_code nd;
+    socket->set_option(boost::asio::ip::tcp::no_delay(true), nd);
     handler(tcp_socket(std::move(*socket)));
   }
 };

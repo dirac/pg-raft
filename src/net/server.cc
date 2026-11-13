@@ -170,6 +170,10 @@ void Server::do_accept() {
       return shutdown();
     }
 
+    // As on the connecting side (async_connect.cc): no Nagle for the small frames.
+    boost::system::error_code nd;
+    socket.set_option(boost::asio::ip::tcp::no_delay(true), nd);
+
     make_shared<HandshakeConnection>(std::move(socket),
                                      [this, self](string peer, socket_type socket) {
                                        if (!shutdown_signal())
