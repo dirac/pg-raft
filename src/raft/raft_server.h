@@ -288,7 +288,9 @@ class RaftServer : public ClientConnectionApi,
   // Returns true if an tick entry was appended.
   bool tick(bool force = false);
 
-  unsigned send_append_entries(bool check_sync_flag);
+  /// |here|: on the calling thread (exec(): its caller waits for the commit anyway, and posting to
+  /// the io threads cost a thread wake-up per commit); otherwise posted to the io threads.
+  unsigned send_append_entries(bool check_sync_flag, bool here = false);
 
   unsigned send_request_votes(RaftTerm term);
 

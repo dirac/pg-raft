@@ -144,6 +144,17 @@ void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi> const&            
   }
 }
 
+unsigned PeerConnectionMgr::run(std::function<void(shared_ptr<RaftPeerConnection>)> const& func) {
+  unsigned closed = 0;
+  for (auto& conn : get_connections()) {
+    if (conn && !conn->closed())
+      func(conn);
+    else
+      ++closed;
+  }
+  return nodes() - closed;
+}
+
 unsigned PeerConnectionMgr::post(std::function<void(shared_ptr<RaftPeerConnection>)> func) {
   unsigned closed = 0;
 

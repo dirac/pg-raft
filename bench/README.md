@@ -125,7 +125,7 @@ per-statement latencies) and `summary.txt`.
 | `start_proxy.sh` | the proxy, in the background |
 | `wait.sh [secs]` | where the proxy runs: wait for a primary, then for every node's PostgreSQL |
 | `start.sh` | one machine: every node, the proxy, `wait.sh` |
-| `bench.sh [--direct] [--no-init]` | pgbench through the proxy, or straight to the primary |
+| `bench.sh [--direct \| --libpq] [--no-init]` | pgbench through the proxy, straight to the primary, or with every node given to libpq (it finds the primary) |
 | `stop.sh [ids]` | the proxy and the nodes running here: followers first, the primary last |
 | `reset.sh --yes` | one machine: stop, and delete the nodes' data and the backup store |
 
@@ -270,6 +270,23 @@ solo and 80% of streaming replication, commits 0.294 ms. The proxy costs about a
 throughput on one machine, whatever its engine: its CPU is kernel time (on loopback a send runs
 the receiving side's TCP and wakes it), so the extra hop costs the same with epoll, io_uring or
 busy-polling.
+
+### 2026-11-13: fewer thread hand-offs on the commit path
+
+A commit went through three avoidable thread wake-ups: the leader posted the AppendEntries send to
+an io thread (now the caller of `exec()` sends it: it waits for the commit anyway), every write was
+started by a task posted to the connection's strand (now started where it is queued, when nothing
+else is in flight), and every message read was handed to its handler by a task posted to the
+io_context (now called on the thread that read it).
+
+| pg-raft | tps | % of solo | % of streaming replication | latency avg | `END` (commit) |
+|---|---|---|---|---|---|
+| direct, before | 30,139 | 55% | 80% | 0.528 ms | 0.294 ms |
+| direct (`bench.sh --direct`) | **32,104** | 58% | 85% | 0.496 ms | 0.268 ms |
+| every node to libpq (`bench.sh --libpq`) | **31,803** | 58% | 85% | 0.500 ms | 0.271 ms |
+
+`--libpq` is what a client that follows failovers without the proxy does: libpq gets every node
+(`host=a,b,c port=...`, `target_session_attrs=read-write`) and connects to the one accepting writes.
 
 ## pg-raft notes
 

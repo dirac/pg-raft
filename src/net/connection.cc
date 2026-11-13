@@ -146,10 +146,9 @@ void Connection::enqueue(Result<M> elem, ReadQ<M>& q) {
     q.handlers.pop_front();
     lk.unlock();
 
-    boost::asio::post(io_context(),
-                      [elem = std::move(elem), handler = std::move(handler)]() mutable {
-                        handler(std::move(elem));
-                      });
+    // On the thread that read it: posting it cost a wake-up of another thread per message (on
+    // raft's commit path, one on each side).
+    handler(std::move(elem));
   } else {
     q.queue.emplace_back(std::move(elem));
   }
@@ -383,10 +382,10 @@ void Connection::async_write(M                                 elem,
 
     write_queue_.emplace_back(token);
 
+    // Nothing in flight: start the write here (the socket's calls are serialized by its mutex, and
+    // only one write is in flight), rather than waking an io thread to do it.
     if (write_queue_.size() == 1)
-      boost::asio::post(io_context(), boost::asio::bind_executor(strand_, [this, s = self()] {
-                          do_write(std::unique_lock<std::mutex>{write_mtx_});
-                        }));
+      do_write(std::move(lk));
   }
 }
 

@@ -18,6 +18,10 @@ struct PeerConnectionMgr : public std::enable_shared_from_this<PeerConnectionMgr
 
   unsigned post(std::function<void(shared_ptr<RaftPeerConnection>)> func);
 
+  /// Run |func| for every open connection here, on the calling thread (post() queues it on the io
+  /// threads instead).
+  unsigned run(std::function<void(shared_ptr<RaftPeerConnection>)> const& func);
+
   void reconnect(weak_ptr<PeerConnectionApi> const&                  server,
                  Config const&                                       config,
                  std::function<void(shared_ptr<RaftPeerConnection>)> on_connect);

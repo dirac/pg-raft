@@ -253,7 +253,7 @@ void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
     handlers_.emplace_back(prev_log_idx + 1U, std::move(handler), epoch_msec());
   }
 
-  send_append_entries(/*check_sync_flag=*/true);
+  send_append_entries(/*check_sync_flag=*/true, /*here=*/true);
 }
 
 void RaftServer::set_needs_backup(bool needs_backup) {
@@ -398,13 +398,13 @@ bool RaftServer::tick(bool force) {
   return false;
 }
 
-unsigned RaftServer::send_append_entries(bool check_sync_flag) {
-  return connections_->post(
-      [this, self = self(), check_sync_flag](shared_ptr<RaftPeerConnection> conn) {
-        if (check_sync_flag && !conn->in_sync())
-          return;
-        conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
-      });
+unsigned RaftServer::send_append_entries(bool check_sync_flag, bool here) {
+  auto send = [this, self = self(), check_sync_flag](shared_ptr<RaftPeerConnection> conn) {
+    if (check_sync_flag && !conn->in_sync())
+      return;
+    conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
+  };
+  return here ? connections_->run(send) : connections_->post(send);
 }
 
 unsigned RaftServer::send_request_votes(RaftTerm term) {
