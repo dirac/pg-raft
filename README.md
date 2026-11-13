@@ -64,6 +64,7 @@ The design is described in [docs/README.md](docs/README.md), with one document p
 | `src/node` | `pg_raft_node`, `pg_raft_initdb` ([docs](docs/node.md)) |
 | `src/proxy` | `pg_raft_proxy` ([docs](docs/proxy.md)) |
 | `external` | scripts that build the dependencies into `/opt/pg_raft` |
+| `bench` | benchmark: pg-raft vs PostgreSQL streaming replication, with pgbench ([README](bench/README.md)) |
 
 ## Building
 

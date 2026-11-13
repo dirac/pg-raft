@@ -1,0 +1,55 @@
+# Sourced by the raft/ scripts.
+RAFT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$RAFT_DIR/../env.sh"
+
+CONFIG="${CONFIG:-$RAFT_DIR/config.toml}"
+BIN="${BIN:-$RAFT_DIR/bin}"          # release binaries (copied from the pg-raft build)
+LOG_DIR="$RAFT_DIR/logs"
+RUN_DIR="$RAFT_DIR/run"              # pid files
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+# Values from config.toml (top-level keys only; good enough for this file).
+cfg() { sed -nE "s/^$1[[:space:]]*=[[:space:]]*\"?([^\"#]*[^\"#[:space:]])\"?.*/\1/p" "$CONFIG" | head -1; }
+DATA_ROOT="$(cfg dir)"
+BACKUP_STORE="$(cfg backup_store)"
+PROXY_PG_PORT="$(cfg proxy_pg_port)"
+PROXY_HTTP_PORT="$(cfg proxy_http_port)"
+NODE_COUNT="$(grep -c '^\[\[server\]\]' "$CONFIG")"
+
+# server_field ID FIELD: hostname / pg_port / ha_port of server ID.
+server_field() {
+  awk -v id="$1" -v f="$2" '
+    /^\[\[server\]\]/ { n++; next }
+    /^\[/             { n = -1 }
+    n == id + 1 && $1 == f { gsub(/"/, "", $3); print $3; exit }' "$CONFIG"
+}
+
+pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# primary_json: the proxy's view of the primary ({"server": N, ...} or {"server": null}).
+primary_json() { curl -s --max-time 2 "http://127.0.0.1:$PROXY_HTTP_PORT/primary.json"; }
+
+# primary_id: the serving primary's server index, or nothing.
+primary_id() {
+  primary_json | python3 -I -c 'import json,sys
+try:
+    s = json.load(sys.stdin).get("server")
+    print("" if s is None else s)
+except Exception:
+    pass'
+}
+
+# wait_primary TIMEOUT_SECS: until the proxy reports a serving primary and the primary port
+# accepts connections.
+wait_primary() {
+  local timeout=$1 i id
+  for ((i = 0; i < timeout * 2; i++)); do
+    id="$(primary_id)"
+    if [[ -n "$id" ]] && "$PG_BIN/pg_isready" -q -h 127.0.0.1 -p "$PROXY_PG_PORT" -d postgres; then
+      echo "$id"
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}

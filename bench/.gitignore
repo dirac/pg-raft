@@ -1,0 +1,8 @@
+# What the scripts create when run in place.
+results/
+raft/bin/
+raft/data/
+raft/logs/
+raft/run/
+std/data/
+std/logs/
