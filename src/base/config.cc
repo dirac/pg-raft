@@ -24,6 +24,8 @@ void parse_node(T& data, Config& config) {
     config.backup_pending_timeout_secs = toml::find<unsigned>(data, "backup_pending_timeout_secs");
   if (data.contains("socket_dir"))
     config.socket_dir = toml::find<string>(data, "socket_dir");
+  if (data.contains("pg_hba"))
+    config.pg_hba = toml::find<vector<string>>(data, "pg_hba");
   if (data.contains("leader_sync"))
     config.leader_sync = toml::find<bool>(data, "leader_sync");
   if (data.contains("follower_sync"))

@@ -35,6 +35,7 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 | | `pg_major_version` (the binaries are `install_dir/<version>/bin`) | `17` |
 | `[[server]]` `hostname`, `pg_port`, `ha_port` | `servers[i]`: node `i` | |
 | `[pg_config]` | `pg_config`: settings written into `postgresql.conf` by `pg_raft_initdb` | |
+| `pg_hba` | lines written into `pg_hba.conf` by `pg_raft_initdb`, ahead of pg-raft's defaults (loopback trusted, other addresses `scram-sha-256`), e.g. `["host all all 10.0.0.0/16 trust"]` | `[]` |
 | `backup_store` | the backup store's directory ([backup.md](backup.md)) | |
 | `backup_interval_secs` | when a standby takes the next backup | `21600` (6 h) |
 | `backup_wal_size` | or after this much WAL, in bytes | 4 GiB |

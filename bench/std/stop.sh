@@ -1,8 +1,8 @@
 #!/bin/bash
-# Stop the cluster: the primary first (fast shutdown sends the standbys everything it wrote),
-# then the standbys.
+# Stop the nodes on this machine: the primary first (a fast shutdown sends the standbys
+# everything it wrote), then the standbys.
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 
-for id in $(seq 0 $((NODE_COUNT - 1))); do stop_pg "$id"; done
+for ((id = 0; id < NODE_COUNT; id++)); do local_node "$id" && stop_pg "$id"; done
 log "stopped"

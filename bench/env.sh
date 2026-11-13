@@ -16,7 +16,11 @@ BACKUP_ROOT="${BACKUP_ROOT:-/mnt/efs/fs1/pg_raft}"
 SCALE="${SCALE:-100}"          # pgbench -i -s: 100 = 10M accounts, ~1.5 GB
 CLIENTS="${CLIENTS:-16}"
 THREADS="${THREADS:-4}"
-DURATION="${DURATION:-300}"    # seconds
+DURATION="${DURATION:-300}"    # seconds, measured
+# An unmeasured run of the same workload right before the measured one (0: none), so that the
+# start-up (caches, connections, the first segments, pg-raft's first rounds) isn't counted.
+# The cluster is already serving (wait.sh): elections and promotion are before it.
+WARMUP="${WARMUP:-60}"         # seconds
 PGBENCH_ARGS="${PGBENCH_ARGS:-}"  # extra arguments for the run, e.g. "-N" or "-S"
 
 RESULTS_DIR="${RESULTS_DIR:-$TESTING_DIR/results}"
@@ -55,7 +59,7 @@ run_pgbench() {
 
   {
     echo "setup=$setup host=$host port=$port"
-    echo "scale=$SCALE clients=$CLIENTS threads=$THREADS duration=$DURATION args=$PGBENCH_ARGS"
+    echo "scale=$SCALE clients=$CLIENTS threads=$THREADS warmup=$WARMUP duration=$DURATION args=$PGBENCH_ARGS"
     echo "date=$(date -Is) host=$(hostname) nproc=$(nproc)"
     for s in $COMPARED_SETTINGS; do
       echo "$s = $(psql_val "$host" "$port" "SHOW $s" 2>/dev/null)"
@@ -68,6 +72,14 @@ run_pgbench() {
       || { cat "$out/init.log"; die "pgbench -i failed"; }
     # A checkpoint, so that the run doesn't start with the load's dirty pages.
     psql_val "$host" "$port" "CHECKPOINT" > /dev/null
+  fi
+
+  if (( WARMUP > 0 )); then
+    log "warm-up: pgbench -c $CLIENTS -j $THREADS -T $WARMUP $PGBENCH_ARGS, not measured (log: $out/warmup.log)"
+    # shellcheck disable=SC2086
+    "$PG_BIN/pgbench" -h "$host" -p "$port" -c "$CLIENTS" -j "$THREADS" -T "$WARMUP" \
+      -P 10 $PGBENCH_ARGS postgres > "$out/warmup.log" 2>&1 \
+      || { cat "$out/warmup.log"; die "pgbench (warm-up) failed"; }
   fi
 
   log "pgbench -c $CLIENTS -j $THREADS -T $DURATION $PGBENCH_ARGS (log: $out/run.log)"

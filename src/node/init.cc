@@ -72,7 +72,7 @@ Result<BackupInfo> init_cluster(Config const& config, BackupStore& store, uint16
 
   if (!pg.init())
     return elog(system_error_code(EIO), "initdb failed in {}", data);
-  if (!pg.write_config(config.pg_config) || !pg.write_hba({}))
+  if (!pg.write_config(config.pg_config) || !pg.write_hba(config.pg_hba))
     return elog(system_error_code(EIO), "Unable to configure {}", data);
   if (!pg.start() || !pg.wait_ready(port))
     return elog(system_error_code(EIO), "PostgreSQL did not start on port {}", port);

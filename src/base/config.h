@@ -29,6 +29,11 @@ struct Config {
   /// Values in postgresql.conf
   map<string, string> pg_config;
 
+  /// Lines for pg_hba.conf, written by pg_raft_initdb ahead of pg-raft's defaults (which trust
+  /// only the loopback and ask other addresses for a scram-sha-256 password), e.g.
+  /// "host all all 10.0.0.0/16 trust" for a proxy or clients on other machines.
+  vector<string> pg_hba;
+
   /// The backup store: a directory (DirBackupStore); an s3:// URL later (docs/backup.md).
   string backup_store;
 

@@ -18,95 +18,131 @@ settings actually in effect.
 
 ## Setup
 
-The scripts keep their data, logs and results next to themselves, so copy this directory to where
-the clusters should live (a fast local disk), then point `raft/config.toml` there:
+The scripts keep their data, logs and results next to themselves, so put a copy of this directory
+(or the whole repository) where the clusters should live, on a fast local disk, on every machine:
 
 ```bash
 cp -r bench /data/testing && cd /data/testing
-# raft/config.toml: `dir` (the nodes' data) and `backup_store` (a directory every node can reach,
-# e.g. an NFS mount); the ports if they clash with something.
-PG_RAFT_REPO=/path/to/pg-raft ./raft/install_bins.sh   # release build of pg-raft into raft/bin
 ```
 
-Requirements: pg-raft's dependencies and PostgreSQL 17 in `/opt/pg_raft` (see the top-level
-README), FUSE, `curl` and `python3`. `env.sh` holds the shared settings: `PG_BIN`, the pgbench
-defaults, `RESULTS_DIR`.
+Requirements on every machine: pg-raft's dependencies and PostgreSQL 17 in `/opt/pg_raft` (see the
+top-level README), FUSE, `curl` and `python3`. The PostgreSQL binaries (`pgbench`, `psql`) are the
+ones in `PG_BIN` (`env.sh`, with the pgbench defaults and `RESULTS_DIR`).
 
-## A comparison run
+Edit before the first run:
 
-Run one setup at a time, on a fresh cluster each time:
+- `raft/config.toml`: `dir` (each machine's node data), `backup_store` (a directory every node
+  machine reaches, e.g. an NFS mount), the `[[server]]` hostnames and ports, and `pg_hba` if the
+  proxy runs on another machine.
+- `std/cluster.sh`: `HOSTS` / `PORTS` (node 0 is the primary), and `PG_HBA` for other machines.
+
+## A run on one machine
+
+One setup at a time, on a fresh cluster each time:
 
 ```bash
 # pg-raft
-./raft/reset.sh --yes          # delete the old cluster and its backups (skip the first time)
+./raft/install_bins.sh         # release build into raft/bin; deletes old backups and node data
 ./raft/init.sh                 # initdb + the cluster's first backup, into backup_store
 ./raft/start.sh                # 3 nodes + proxy; waits for the primary and every node
 ./raft/bench.sh                # pgbench through the proxy (--direct: to the primary itself)
 ./raft/stop.sh
 
 # streaming replication
-./std/reset.sh --yes           # skip the first time
+./std/prepare.sh               # deletes the old cluster's data
 ./std/init.sh                  # primary + 2 standbys from base backups, started; waits for quorum
 ./std/bench.sh
 ./std/stop.sh
 ```
 
+(`raft/reset.sh --yes` and `std/reset.sh --yes` also delete a cluster without rebuilding.)
+
+## A run on several machines
+
+Three node machines and a client machine (proxy and pgbench), all with the same `config.toml` /
+`cluster.sh`.
+
+pg-raft:
+
+| Where | Step |
+|---|---|
+| every node machine | `./raft/install_bins.sh`: the binaries, and deletes the old backups and node directories |
+| one node machine | `./raft/init.sh`, **after** every `install_bins.sh` (a later one would delete the new backup) |
+| node machine *i* | `./raft/start_node.sh i` |
+| client | `./raft/install_bins.sh --keep` (only the binaries: the proxy), `./raft/start_proxy.sh`, `./raft/wait.sh`, `./raft/bench.sh` |
+| client, then every node machine | `./raft/stop.sh` |
+
+Streaming replication:
+
+| Where | Step |
+|---|---|
+| every node machine | `./std/prepare.sh`: deletes the old cluster's data |
+| node 0's machine | `./std/init_primary.sh` |
+| node *i*'s machine (1, 2) | `./std/init_standby.sh i` |
+| client | `./std/wait.sh`, `./std/bench.sh` |
+| every node machine | `./std/stop.sh` (`./std/start.sh` restarts the nodes that are there) |
+
+Connections from other machines need `pg_hba` lines: in `raft/config.toml` (`pg_hba`, written by
+`init.sh`; the client's network, for the proxy) and `std/cluster.sh` (`PG_HBA`; the standbys'
+`replication` and the client's network). Without them only 127.0.0.1 is trusted, and pg-raft asks
+other addresses for a `scram-sha-256` password.
+
+## pgbench and results
+
 pgbench takes its parameters from the environment (defaults in `env.sh`: scale 100, 16 clients,
-4 threads, 300 s):
+4 threads, a 60 s warm-up, then 300 s measured). The warm-up runs the same workload unmeasured, so
+the start-up isn't counted; leader elections and promotion are over before it, since `bench.sh`
+starts once the cluster serves. `WARMUP=0` skips it.
 
 ```bash
 SCALE=100 CLIENTS=16 THREADS=4 DURATION=300 ./raft/bench.sh
 PGBENCH_ARGS="-N" ./std/bench.sh --no-init      # simple-update, reusing the loaded tables
 ```
 
-Each run writes `results/<setup>-<time>/`: `settings.txt` (the parameters and the PostgreSQL
-settings in effect), `init.log`, `run.log` (10 s progress and per-statement latencies) and
-`summary.txt`.
+Each run writes `results/<setup>-<time>/` on the machine that ran it: `settings.txt` (the
+parameters and the PostgreSQL settings in effect), `init.log`, `warmup.log` (not measured), `run.log` (10 s progress and
+per-statement latencies) and `summary.txt`.
 
 ## The scripts
 
 | `raft/` | |
 |---|---|
-| `config.toml` | the cluster: nodes, ports, backup store, commit-path syncs, `[pg_config]` |
-| `install_bins.sh` | release build of `pg_raft_node`, `pg_raft_initdb`, `pg_raft_proxy` into `raft/bin` |
+| `config.toml` | the cluster: nodes, ports, backup store, `pg_hba`, commit-path syncs, `[pg_config]` |
+| `install_bins.sh [--keep]` | release build into `raft/bin`; without `--keep`, deletes the backups and this machine's node directories |
 | `init.sh` | `pg_raft_initdb`: initdb and the first backup |
-| `start.sh [ids]` | `start_node.sh` for each node, `start_proxy.sh`, then wait for a primary and every node |
-| `start_node.sh id`, `start_proxy.sh` | one node / the proxy, in the background (logs in `raft/logs/`) |
+| `start_node.sh id` | one node, in the background (log in `raft/logs/`) |
+| `start_proxy.sh` | the proxy, in the background |
+| `wait.sh [secs]` | where the proxy runs: wait for a primary, then for every node's PostgreSQL |
+| `start.sh` | one machine: every node, the proxy, `wait.sh` |
 | `bench.sh [--direct] [--no-init]` | pgbench through the proxy, or straight to the primary |
-| `stop.sh [ids]` | the proxy, then the followers, then the primary |
-| `reset.sh --yes` | stop, and delete the nodes' data and the backup store |
+| `stop.sh [ids]` | the proxy and the nodes running here: followers first, the primary last |
+| `reset.sh --yes` | one machine: stop, and delete the nodes' data and the backup store |
 
 | `std/` | |
 |---|---|
-| `postgresql.std.conf` | appended to every node's `postgresql.conf` |
-| `init.sh` | initdb the primary, base-backup the two standbys, start all three |
-| `start.sh`, `stop.sh` | start (and wait for both standbys to stream) / stop |
-| `bench.sh [--no-init]` | pgbench against the primary, after checking both standbys are quorum members |
-| `reset.sh --yes` | stop, and delete the data |
+| `cluster.sh` | the cluster: `HOSTS`, `PORTS`, `DATA_ROOT`, `PG_HBA` |
+| `postgresql.std.conf` | appended to the primary's `postgresql.conf` (the standbys copy it) |
+| `prepare.sh` | stop and delete the nodes whose data is on this machine |
+| `init_primary.sh` | initdb node 0, configure and start it |
+| `init_standby.sh i` | base-backup node *i* from the primary, as standby `s<i>`, and start it |
+| `init.sh` | one machine: `init_primary.sh`, `init_standby.sh 1` and `2`, `wait.sh` |
+| `wait.sh [secs]` | from anywhere: the primary is up and both standbys stream as quorum members |
+| `start.sh`, `stop.sh` | the nodes whose data is on this machine |
+| `bench.sh [--no-init]` | pgbench against the primary, after checking the quorum |
+| `reset.sh --yes` | one machine: `prepare.sh` |
 
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
   `false`: a commit is durable once a majority has the WAL in its page cache (durability by
   replication). Set them to `true` to measure the cost of syncing to disk as well.
-- **Use a fresh cluster per run.** Restarting a stopped pg-raft cluster can leave a standby unable
-  to rejoin ("requested timeline N is not a child of this server's history"); `start.sh` then
-  fails and names the node. That is a known pg-raft bug (`docs/todo.md`).
-- `start.sh` waits for the proxy to report a primary, then for every node's PostgreSQL. The
-  proxy's admin page is http://127.0.0.1:8080/status.html.
+- **Use a fresh cluster per run** (`install_bins.sh`, `init.sh`). Restarting a stopped pg-raft
+  cluster can leave a standby unable to rejoin ("requested timeline N is not a child of this
+  server's history"); `wait.sh` then fails and names the node. That is a known pg-raft bug
+  (`docs/todo.md`).
 - Stopping takes ~20 s: once the others are gone, the last node can't commit PostgreSQL's shutdown
   checkpoint (no quorum), so after 12 s it fails the fsync and PostgreSQL PANICs, as intended.
   `start_node.sh` disables core dumps for that reason.
 - Backups: `config.toml` pushes the periodic backups out (1 day or 1 TiB of WAL) so that none
   starts in the middle of a run. Lower `backup_interval_secs` / `backup_wal_size` to include them.
-
-## Moving to several machines
-
-- raft: give each `[[server]]` in `config.toml` its machine's address (the ports can then be the
-  same everywhere), copy the directory and `raft/bin` to every machine, and run
-  `./raft/start_node.sh <id>` on each (or `./raft/start.sh <id>`, which also starts the proxy).
-  `init.sh` runs once, anywhere. `backup_store` must be reachable from every machine.
-- std: `PRIMARY_HOST=<the primary's address>` for `init.sh`, and the base backups run on the
-  standby machines. The scripts assume all three nodes are local; split `init.sh` per machine.
-- Remote clients need `pg_hba.conf` entries: both setups only trust 127.0.0.1 (pg-raft adds
-  `scram-sha-256` for other addresses, which needs a password).
+- The proxy's admin page: http://<proxy machine>:8080/status.html.

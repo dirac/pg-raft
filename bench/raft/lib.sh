@@ -39,6 +39,26 @@ except Exception:
     pass'
 }
 
+# wait_nodes TIMEOUT_SECS: until every node's PostgreSQL accepts connections, reached at its
+# configured hostname (so it works from the client machine too); prints each node's role.
+wait_nodes() {
+  local timeout=$1 n host port i role
+  for ((n = 0; n < NODE_COUNT; n++)); do
+    host="$(server_field "$n" hostname)" port="$(server_field "$n" pg_port)"
+    for ((i = 0; i < timeout * 2; i++)); do
+      pid_alive "$RUN_DIR/node$n.pid" || [[ ! -f "$RUN_DIR/node$n.pid" ]] \
+        || { echo "node $n exited; see $LOG_DIR/node$n.log" >&2; return 1; }
+      "$PG_BIN/pg_isready" -q -h "$host" -p "$port" -d postgres && break
+      sleep 0.5
+    done
+    "$PG_BIN/pg_isready" -q -h "$host" -p "$port" -d postgres \
+      || { echo "node $n's PostgreSQL ($host:$port) is not ready after ${timeout} s" >&2; return 1; }
+    role="$(psql_val "$host" "$port" \
+      "SELECT CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END" 2>&1)"
+    log "node $n: $role ($host:$port)"
+  done
+}
+
 # wait_primary TIMEOUT_SECS: until the proxy reports a serving primary and the primary port
 # accepts connections.
 wait_primary() {

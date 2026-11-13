@@ -32,6 +32,13 @@ leader_sync   = false
 follower_sync = false
 log_sync      = false
 
+# Lines for pg_hba.conf, written by init.sh ahead of pg-raft's defaults (the loopback is trusted,
+# any other address asked for a scram-sha-256 password). With the proxy and pgbench on another
+# machine, trust its network (the nodes replicate through raft, not PostgreSQL connections):
+pg_hba = [
+  # "host all all 10.0.0.0/16 trust",
+]
+
 [[server]]
 hostname = "127.0.0.1"
 pg_port  = 5441
