@@ -108,18 +108,29 @@ std::tuple<off_t, size_t, bool> WalFuseSegment::WalState::update(unsigned char c
 void breakpoint();
 
 void WalFuseSegment::check_modified(unsigned char const* buf, size_t size, off_t off) {
-  if (std::memcmp(mapping() + off, buf, size) == 0)
+  // The smallest range [first, last) of the write that differs from what is stored.
+  auto* const stored = mapping() + off;
+  auto const  first  = std::mismatch(buf, buf + size, stored).first - buf;
+  if (static_cast<size_t>(first) == size)
     return;
+  auto const last =
+      size - static_cast<size_t>(std::mismatch(std::make_reverse_iterator(buf + size),
+                                               std::make_reverse_iterator(buf + first),
+                                               std::make_reverse_iterator(stored + size))
+                                     .first -
+                                 std::make_reverse_iterator(buf + size));
+  auto const changed = last - static_cast<size_t>(first);
 
-  log(INFO, "The wal-buffer got updated at {} lsn={}", off, lsn());
-  std::memcpy(mapping() + off, buf, size);
-  tracker_.async_publish(map_, off, size);
+  log(DEBUG, "The wal-buffer got updated at {} ({} bytes) lsn={}", off + first, changed, lsn());
+  std::memcpy(stored + first, buf + first, changed);
+  tracker_.async_publish(map_, off + first, changed);
 
-  synced_ = std::min(synced_, off);
+  synced_ = std::min(synced_, off + first);
+  ++modified_;
 }
 
 void WalFuseSegment::initialize() {
-  if (!initialized_.test_and_set()) [[unlikely]] {
+  if (!std::exchange(initialized_, true)) [[unlikely]] {
     bool   rec_start;
     size_t bytes = 0;
     do {
@@ -134,6 +145,7 @@ void WalFuseSegment::initialize() {
 }
 
 void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
+  auto lk = std::unique_lock{mtx_};
   initialize();
   auto const end = off + static_cast<off_t>(size);
 
@@ -165,17 +177,26 @@ void WalFuseSegment::write(unsigned char const* buf, size_t size, off_t off) {
 
 int WalFuseSegment::fsync() {
   // Everything stored, walked or not: on a standby the bytes past the last complete record are WAL
-  // too, and the walreceiver reports them as flushed.
-  auto size = std::max(next_, written_) - synced_;
-  if (size == 0) {
-    log(DEBUG, "Not doing sync next={} synced={}", next_, synced_);
-    return 0;
+  // too, and the walreceiver reports them as flushed. The lock is not held while the tracker
+  // completes (on the leader, a raft round): writes go on meanwhile.
+  off_t    from = 0, to = 0;
+  uint64_t modified = 0;
+  {
+    auto lk = std::unique_lock{mtx_};
+    initialize();
+    from     = synced_;
+    to       = std::max(next_, written_);
+    modified = modified_;
   }
+  // Even with nothing new here, the tracker is asked: it may hold writes of this segment that it
+  // has not sent yet (published through a handle since closed: this state was then read back from
+  // the file, as synced), and a flush is also the barrier that acknowledges them.
+  auto const size = to - from;
 
   auto promise = std::make_shared<std::promise<int>>();
   auto future  = promise->get_future();
 
-  tracker_.async_fsync(map_, synced_, u8(size), [p = std::move(promise)](Result<void> r) mutable {
+  tracker_.async_fsync(map_, from, u8(size), [p = std::move(promise)](Result<void> r) mutable {
     if (!r)
       p->set_value(-r.error().value());
     else
@@ -185,10 +206,15 @@ int WalFuseSegment::fsync() {
   if (auto r = future.get(); r)
     return r;
 
-  synced_ += size;
+  // Durable up to |to|, unless a rewrite pulled synced_ back meanwhile: then the next fsync covers
+  // it again.
+  auto lk = std::unique_lock{mtx_};
+  if (modified_ == modified && synced_ < to)
+    synced_ = to;
   return 0;
 }
 
 void WalFuseSegment::read(unsigned char* buf, size_t size, off_t off) {
+  auto lk = std::unique_lock{mtx_};
   std::memcpy(buf, mapping() + off, size);
 }

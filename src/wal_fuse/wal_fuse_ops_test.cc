@@ -191,16 +191,19 @@ BOOST_AUTO_TEST_CASE(wal_segment_fsync_calls_tracker, *boost::unit_test::timeout
   BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, kWalBlockSize);
 }
 
-BOOST_AUTO_TEST_CASE(wal_segment_fsync_without_write_is_noop, *boost::unit_test::timeout(60)) {
+BOOST_AUTO_TEST_CASE(wal_segment_fsync_without_write_asks_tracker, *boost::unit_test::timeout(60)) {
   TmpDir           tmp;
   RecordingTracker tracker;
 
   auto seg = make_fuse_segment(tmp(), LogSeqNumber{1, 0}, tracker);
   BOOST_REQUIRE(seg);
 
-  // No write → next_==synced_==0 → dirty range size rounds to 0.
+  // No write: nothing new here, but the tracker is still asked (an empty range). It may hold
+  // writes of the segment published through a handle since closed, and the flush is the barrier
+  // that acknowledges them.
   BOOST_REQUIRE_EQUAL(seg->fsync(), 0);
-  BOOST_CHECK_EQUAL(tracker.fsyncs.size(), 0u);
+  BOOST_REQUIRE_EQUAL(tracker.fsyncs.size(), 1u);
+  BOOST_CHECK_EQUAL(tracker.fsyncs[0].size, 0u);
 }
 
 BOOST_AUTO_TEST_CASE(wal_segment_read, *boost::unit_test::timeout(60)) {

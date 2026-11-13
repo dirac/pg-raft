@@ -33,6 +33,12 @@ class WalFuseOps : public FuseOps {
   int op_rename(char const* from, char const* to) override;
 
  private:
+  /// The segment's WalFuseSegment, shared by every handle open on it (created by the first).
+  Result<shared_ptr<WalFuseSegment>> wal_segment(LogSeqNumber lsn);
+
   WalTracker&                 tracker_;
   shared_ptr<WalSegmentCache> cache_;
+
+  std::mutex                                       segments_mtx_;
+  map<LogSeqNumber, std::weak_ptr<WalFuseSegment>> segments_;
 };

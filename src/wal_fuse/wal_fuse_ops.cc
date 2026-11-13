@@ -4,7 +4,11 @@
 
 namespace {
 
-void set_wal_segment(struct fuse_file_info* fi, WalFuseSegment* segment) {
+// A WAL file handle: fi->fh holds a heap-allocated reference to the segment's shared
+// WalFuseSegment, tagged so that it is told apart from a passthrough file descriptor.
+using Handle = shared_ptr<WalFuseSegment>;
+
+void set_wal_segment(struct fuse_file_info* fi, Handle* segment) {
   uint64_t fh = reinterpret_cast<uint64_t>(segment);
   assert((fh & 0x1) == 0x0);
 
@@ -16,7 +20,7 @@ void set_wal_segment(struct fuse_file_info* fi, WalFuseSegment* segment) {
   fi->direct_io = 1;
 }
 
-WalFuseSegment* get_wal_segment(struct fuse_file_info* fi) {
+Handle* get_handle(struct fuse_file_info* fi) {
   uint64_t fh = fi->fh;
 
   if (!(fh & (u8(0x1) << 63)))
@@ -27,29 +31,50 @@ WalFuseSegment* get_wal_segment(struct fuse_file_info* fi) {
   else
     fh = fh ^ (u8(0x1) << 63);
 
-  return reinterpret_cast<WalFuseSegment*>(fh);
+  return reinterpret_cast<Handle*>(fh);
+}
+
+WalFuseSegment* get_wal_segment(struct fuse_file_info* fi) {
+  auto* h = get_handle(fi);
+  return h ? h->get() : nullptr;
 }
 }  // namespace
+
+Result<shared_ptr<WalFuseSegment>> WalFuseOps::wal_segment(LogSeqNumber lsn) {
+  auto lk = std::unique_lock{segments_mtx_};
+  if (auto pos = segments_.find(lsn); pos != segments_.end())
+    if (auto seg = pos->second.lock(); seg)
+      return seg;
+
+  auto map = std::make_shared<WalSegment>(cache_, backing_dir(), lsn);
+  if (auto r = map->open(); !r)
+    return r.error();
+  auto seg       = std::make_shared<WalFuseSegment>(tracker_, std::move(map));
+  segments_[lsn] = seg;
+
+  // Forget the segments no handle has open any more.
+  std::erase_if(segments_, [](auto const& kv) { return kv.second.expired(); });
+  return seg;
+}
 
 int WalFuseOps::op_open(char const* path, struct fuse_file_info* fi) {
   if (auto lsn = log_seq_number(path); lsn) {
     log(DEBUG, "open {} flags={} lsn={}", path, fi->flags, *lsn);
     n_open.fetch_add(1, std::memory_order_relaxed);
 
-    auto seg = std::make_shared<WalSegment>(cache_, backing_dir(), *lsn);
-    if (auto r = seg->open(); !r)
-      return -r.error().value();
+    auto seg = wal_segment(*lsn);
+    if (!seg)
+      return -seg.error().value();
 
-    auto fuse_seg = std::make_unique<WalFuseSegment>(tracker_, std::move(seg));
-    set_wal_segment(fi, fuse_seg.release());
+    set_wal_segment(fi, new Handle(std::move(seg.value())));
     return 0;
   } else
     return FuseOps::op_open(path, fi);
 }
 
 int WalFuseOps::op_release(char const* path, struct fuse_file_info* fi) {
-  if (auto segment = std::unique_ptr<WalFuseSegment>{get_wal_segment(fi)}; segment) {
-    log(DEBUG, "release {}, lsn={}", path, segment->lsn());
+  if (auto handle = std::unique_ptr<Handle>{get_handle(fi)}; handle) {
+    log(DEBUG, "release {}, lsn={}", path, (*handle)->lsn());
     n_release.fetch_add(1, std::memory_order_relaxed);
 
     fi->fh = 0;

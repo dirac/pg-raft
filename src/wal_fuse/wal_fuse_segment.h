@@ -3,6 +3,10 @@
 #include "src/base/base.h"
 #include "src/base/wal_segment.h"
 
+/// The FUSE layer's state of one WAL segment: the walk (what has been published), what is stored
+/// and what is synced. One per segment, shared by every handle open on it (WalFuseOps keeps them):
+/// PostgreSQL backends write the WAL through handles of their own, and a walk per handle would
+/// publish every byte once per handle. Thread-safe.
 class WalFuseSegment {
  public:
   WalFuseSegment(WalTracker& tracker, shared_ptr<WalSegment> map)
@@ -48,16 +52,18 @@ class WalFuseSegment {
  private:
   void initialize();
 
-  /// The expectation is the data has not been modified.
+  /// Bytes already walked, written again: PostgreSQL rewrites the last, partial page on every
+  /// flush. Only the smallest range that differs is stored and published again.
   void check_modified(unsigned char const* buf, size_t size, off_t off);
 
   WalTracker&            tracker_;
   shared_ptr<WalSegment> map_;
 
-  off_t    next_;        // the walk: [0, next_) is walked (published)
-  off_t    synced_;      // [0, synced_) is durable
-  off_t    written_{0};  // the highest offset written: [next_, written_) is stored, not walked
-  WalState state_;
-
-  std::atomic_flag initialized_;
+  std::mutex mtx_;          // guards everything below
+  off_t      next_;         // the walk: [0, next_) is walked (published)
+  off_t      synced_;       // [0, synced_) is durable
+  off_t      written_{0};   // the highest offset written: [next_, written_) is stored, not walked
+  uint64_t   modified_{0};  // counts the rewrites that pulled synced_ back
+  WalState   state_;
+  bool       initialized_{false};
 };

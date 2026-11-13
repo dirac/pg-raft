@@ -35,7 +35,7 @@ fenced mode (a node that lost leadership) every fsync fails.
 Fuse                  mount lifecycle, event-loop thread
  └─ FuseOps           passthrough of every FUSE op to backing_dir; virtual op_* hooks
      └─ WalFuseOps    routes 24-hex-char WAL files to WalFuseSegment; everything else passes through
-         └─ WalFuseSegment   per-open-handle XLog parser + publish/fsync logic
+         └─ WalFuseSegment   per-segment XLog parser + publish/fsync logic, shared by its handles
              └─ WalSegment   (base) shared, ref-counted 16 MiB mmap of one segment file
                  └─ WalTracker  (interface) receiver of publish / fsync events — implemented by raft
 ```
@@ -72,12 +72,12 @@ A path is a WAL segment if `log_seq_number(path)` parses it as 24 hex characters
 
 | Op | Behaviour |
 |---|---|
-| `op_open` | Creates `WalSegment(cache_, backing_dir, lsn)` and calls `open()` (mmap). Wraps it in a heap-allocated `WalFuseSegment` and stores a **tagged pointer** in `fi->fh`. Sets `direct_io=1` so every read and write reaches the handler without the kernel page cache. |
+| `op_open` | Takes the segment's `WalFuseSegment` from a registry (`weak_ptr`s by segment), or creates it: `WalSegment(cache_, backing_dir, lsn)`, `open()` (mmap), wrapped in a `WalFuseSegment`. The handle gets a heap-allocated `shared_ptr` to it, stored as a **tagged pointer** in `fi->fh`. Sets `direct_io=1` so every read and write reaches the handler without the kernel page cache. |
 | `op_write` | `segment->write(buf, size, off)`. Always returns `size`. |
 | `op_read` | `memcpy` out of the mmap. |
 | `op_fsync` | `segment->fsync()`, which can block (see below). |
 | `op_flush` | No-op (logged). |
-| `op_release` | Deletes the `WalFuseSegment`, which releases its `WalSegment` reference. |
+| `op_release` | Drops the handle's reference; the last one frees the `WalFuseSegment` and its `WalSegment` reference. |
 | `op_rename` | Passthrough. When the target is a timeline history file (`%08X.history`, installed by PostgreSQL on promotion), it reads the file and calls `WalTracker::async_timeline(timeline, content)`; raft replicates it as a `TimelineOp`. |
 | `op_unlink` | **Never deletes a WAL file.** Renames `X` to `.X` in the backing directory. Followers and lagging WAL senders may still need the segment, so the HA layer owns WAL retention, not PostgreSQL. `WalSegment::open()` falls back to the `.X` name when it opens a segment. |
 
@@ -99,7 +99,11 @@ before it replaces segment files (`rebuild_pg_wal`, a restore).
 
 ### 2.5 `WalFuseSegment`: parse, publish, and fsync
 
-State for each open handle:
+State for each segment, **shared by every handle open on it**. PostgreSQL backends write the WAL
+through handles of their own (each flushes its own commits). With a state per handle, each
+handle's walk started where that handle last wrote and published again everything the others had
+written since: about 16 times the WAL with 16 clients. Every method takes the segment's mutex
+(not held while `fsync` waits).
 
 | Field | Meaning |
 |---|---|
@@ -135,8 +139,9 @@ standby replays it.
    when the segment is reopened after a restart.
 2. The part of the write that lies before `next_` is a **rewrite of bytes already walked**.
    PostgreSQL legitimately rewrites the partial last page on each flush. `check_modified` compares
-   the bytes. If they differ (the tail of a page was completed), it copies them, re-publishes the
-   range, and pulls `synced_` back to the changed offset.
+   the bytes. If they differ (the tail of a page was completed), it copies and re-publishes only the
+   **smallest range that differs** (from the first differing byte to the last), and pulls `synced_`
+   back to its start.
 3. The rest of the write is **stored as written**, like any file, and `written_` (the highest
    offset written) moves up.
 4. `WalState` then walks the **stored segment** from `next_` up to `written_`, and the newly walked
@@ -149,8 +154,11 @@ and FUSE may split PostgreSQL's writes. Earlier, the walk ran over each write's 
 header made the cursor run past the write and tripped an assertion, and the bytes past the walk
 were not stored at all (`wal_segment_any_write_boundaries` covers both).
 
-**`fsync()`**: if anything is unsynced, it calls
-`tracker_.async_fsync(map_, synced_, max(next_, written_) - synced_, cb)`: everything stored,
+**`fsync()`**: it always calls
+`tracker_.async_fsync(map_, synced_, max(next_, written_) - synced_, cb)`, even when the range is
+empty: the tracker may hold writes of this segment published through a handle that has since
+closed (the state was then read back from the file, as synced), and the flush is the barrier that
+acknowledges them. The range is everything stored,
 walked or not (on a standby the bytes past the last complete record are WAL the walreceiver
 reports as flushed). It **blocks the FUSE thread on a `std::future`** until the tracker
 completes. On success `synced_` moves to the end of the range captured before the wait (writes
@@ -162,8 +170,8 @@ quorum".
 
 ## 3. Concurrency
 
-- libfuse runs operations on its loop thread. `fuse_loop` is single-threaded in this build. Each
-  `WalFuseSegment` belongs to one open handle, so its parse state is not shared.
+- libfuse runs operations on its loop thread. `fuse_loop` is single-threaded in this build. A
+  `WalFuseSegment` is shared by the handles open on its segment and guarded by its mutex.
 - The mapping cache is guarded by `WalSegmentCache::mtx`. Mappings are shared across handles and
   with the Raft layer (`shared_ptr<WalSegment>`).
 - An `fsync` blocks the FUSE loop. While PostgreSQL waits for durability, no other WAL operation
