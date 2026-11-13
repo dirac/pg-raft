@@ -165,6 +165,31 @@ statement is ~0.02–0.05 ms slower, mostly the extra hop through the proxy. Wit
 (the first run), pg-raft averaged 17,141 tps: it ramps from ~6,000 tps in its first 10 s to its
 steady rate in about a minute; streaming replication reaches its rate within 20 s.
 
+### 2026-11-13: after one walk per segment and the writes carried with the flush
+
+Same machine and settings. Profiling the first run showed the leader sending each follower 16 times
+the WAL: every PostgreSQL backend writes through a FUSE handle of its own, and each handle's walk
+published again what the others had written since its last write. Now one walk state per segment
+is shared by its handles, a rewrite of the partial last page sends only the bytes that differ, and
+the writes travel in the fsync's `FlushOp` (or as a `WriteOp` once 64 KiB of a segment is pending).
+
+| Per commit (16 clients) | before | after |
+|---|---|---|
+| WAL written | 443 B | 440 B |
+| sent to each follower | 7,248 B | **531 B** |
+| raft entries | 0.60 | **0.31** |
+
+| Setup | tps | latency avg | latency stddev | `END` (commit) | 10 s intervals |
+|---|---|---|---|---|---|
+| streaming replication (unchanged) | 37,623 | 0.423 ms | 0.223 ms | 0.150 ms | 37,100–38,100 |
+| pg-raft, before | 17,853 | 0.895 ms | 0.657 ms | 0.442 ms | 17,500–18,000 |
+| pg-raft, after | **20,349** | 0.785 ms | 0.655 ms | 0.373 ms | 20,000–20,530 |
+
+pg-raft is at 54% of streaming replication. On one machine loopback bandwidth was not the limit,
+so the 14x less traffic gave +14%; across machines it matters more (at these rates, about
+200 MB/s per follower before, 15 MB/s now). What is left: the commit's raft round through FUSE
+(0.37 ms vs 0.15 ms), and the proxy hop on every statement (the proxy used over two cores).
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
