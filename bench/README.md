@@ -1,19 +1,19 @@
 # Benchmark: PostgreSQL streaming replication vs pg-raft
 
-Scripts that set up two 3-node PostgreSQL HA clusters on one machine, with the same PostgreSQL
-settings, and run the same pgbench workload against each.
+Scripts that set up two 3-node PostgreSQL HA clusters, and a single PostgreSQL without HA as the
+baseline, all with the same PostgreSQL settings, and run the same pgbench workload against each.
 
-| | `std/` | `raft/` |
-|---|---|---|
-| Nodes | primary `pg0` (5532) + standbys `s1` (5533), `s2` (5534) | 3 pg-raft nodes (PostgreSQL on 5441–5443, raft on 7001–7003) |
-| Commit | quorum sync replication: `synchronous_standby_names = 'ANY 1 (s1, s2)'` | quorum commit through raft (2 of 3) |
-| Clients | the primary, port 5532 | the proxy, port 5432 (`--direct`: the primary's own port) |
-| Backups | none | pg-raft's backup store (`backup_store` in `raft/config.toml`) |
-| Data | `std/data/pg{0,1,2}` | `raft/data/node{0,1,2}` (`dir` in `raft/config.toml`) |
+| | `solo/` | `std/` | `raft/` |
+|---|---|---|---|
+| Nodes | one PostgreSQL (5632), no standbys | primary `pg0` (5532) + standbys `s1` (5533), `s2` (5534) | 3 pg-raft nodes (PostgreSQL on 5441–5443, raft on 7001–7003) |
+| Commit | the local flush | quorum sync replication: `synchronous_standby_names = 'ANY 1 (s1, s2)'` | quorum commit through raft (2 of 3) |
+| Clients | port 5632 | the primary, port 5532 | the proxy, port 5432 (`--direct`: the primary's own port) |
+| Backups | none | none | pg-raft's backup store (`backup_store` in `raft/config.toml`) |
+| Data | `solo/data/pg` | `std/data/pg{0,1,2}` | `raft/data/node{0,1,2}` (`dir` in `raft/config.toml`) |
 
 Both setups use what pg-raft forces on its PostgreSQL (`wal_sync_method = fsync`,
 `wal_recycle = off`), data checksums, and the shared settings in `raft/config.toml`'s
-`[pg_config]` and `std/postgresql.std.conf` (keep the two the same). Every result records the
+`[pg_config]`, `std/postgresql.std.conf` and `solo/postgresql.solo.conf` (keep them the same). Every result records the
 settings actually in effect.
 
 ## Setup
@@ -35,6 +35,7 @@ Edit before the first run:
   machine reaches, e.g. an NFS mount), the `[[server]]` hostnames and ports, and `pg_hba` if the
   proxy runs on another machine.
 - `std/cluster.sh`: `HOSTS` / `PORTS` (node 0 is the primary), and `PG_HBA` for other machines.
+- `solo/cluster.sh`: `HOST` / `PORT`, and `PG_HBA` for the client machine.
 
 ## A run on one machine
 
@@ -53,9 +54,16 @@ One setup at a time, on a fresh cluster each time:
 ./std/init.sh                  # primary + 2 standbys from base backups, started; waits for quorum
 ./std/bench.sh
 ./std/stop.sh
+
+# one PostgreSQL, no HA: the baseline
+./solo/prepare.sh              # deletes the old data
+./solo/init.sh                 # initdb, configure, start
+./solo/bench.sh
+./solo/stop.sh
 ```
 
-(`raft/reset.sh --yes` and `std/reset.sh --yes` also delete a cluster without rebuilding.)
+(`raft/reset.sh --yes`, `std/reset.sh --yes` and `solo/reset.sh --yes` also delete a cluster
+without rebuilding.)
 
 ## A run on several machines
 
@@ -81,6 +89,9 @@ Streaming replication:
 | node *i*'s machine (1, 2) | `./std/init_standby.sh i` |
 | client | `./std/wait.sh`, `./std/bench.sh` |
 | every node machine | `./std/stop.sh` (`./std/start.sh` restarts the nodes that are there) |
+
+One PostgreSQL: `./solo/prepare.sh` and `./solo/init.sh` on the database machine, `./solo/bench.sh`
+on the client.
 
 Connections from other machines need `pg_hba` lines: in `raft/config.toml` (`pg_hba`, written by
 `init.sh`; the client's network, for the proxy) and `std/cluster.sh` (`PG_HBA`; the standbys'
@@ -130,6 +141,16 @@ per-statement latencies) and `summary.txt`.
 | `start.sh`, `stop.sh` | the nodes whose data is on this machine |
 | `bench.sh [--no-init]` | pgbench against the primary, after checking the quorum |
 | `reset.sh --yes` | one machine: `prepare.sh` |
+
+| `solo/` | |
+|---|---|
+| `cluster.sh` | `HOST`, `PORT`, `DATA_ROOT`, `PG_HBA` |
+| `postgresql.solo.conf` | appended to its `postgresql.conf` |
+| `prepare.sh` | stop it and delete its data |
+| `init.sh` | initdb, configure and start it |
+| `start.sh`, `stop.sh` | start / stop it |
+| `bench.sh [--no-init]` | pgbench against it |
+| `reset.sh --yes` | `prepare.sh` |
 
 ## Results
 
@@ -189,6 +210,27 @@ pg-raft is at 54% of streaming replication. On one machine loopback bandwidth wa
 so the 14x less traffic gave +14%; across machines it matters more (at these rates, about
 200 MB/s per follower before, 15 MB/s now). What is left: the commit's raft round through FUSE
 (0.37 ms vs 0.15 ms), and the proxy hop on every statement (the proxy used over two cores).
+
+### 2026-11-13: the baseline without HA, and fewer allocations in pg-raft
+
+Same machine and settings. `solo/` is one PostgreSQL without standbys: the ceiling for both HA
+setups. pg-raft: `log_seq_number()` no longer allocates (it built three `stringstream`s per FUSE
+operation), raft keeps its last WAL segments open (each use cost a `stat`, allocations and a lock),
+and archives skip the codecvt facet.
+
+| Setup | tps | % of solo | latency avg | latency stddev | `END` (commit) |
+|---|---|---|---|---|---|
+| solo (one PostgreSQL, no HA) | **55,093** | 100% | 0.288 ms | 0.099 ms | 0.066 ms |
+| streaming replication, quorum sync | 37,623 | 68% | 0.423 ms | 0.223 ms | 0.150 ms |
+| pg-raft, through the proxy | **20,839** | 38% | 0.766 ms | — | 0.356 ms |
+
+Profile of pg-raft under this load (`perf`, DWARF call graphs; CPU in % of one core):
+`pg_raft_proxy` 236%, the leader node 201%, a follower 104%, pgbench 64%. In the nodes, about 40%
+of the time is in system calls and wake-ups (thread hand-offs: FUSE thread, raft lock, I/O threads),
+`xxhash32` is 5.6% of the leader and 9.9% of a follower (LMDB's page checksums on each commit, plus
+the network frames), and `std::locale` construction still 5% of the leader: Boost's binary archive
+builds a locale in its constructor whatever the flags, once per entry read from or written to LMDB
+and once per message.
 
 ## pg-raft notes
 
