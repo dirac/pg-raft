@@ -131,6 +131,40 @@ per-statement latencies) and `summary.txt`.
 | `bench.sh [--no-init]` | pgbench against the primary, after checking the quorum |
 | `reset.sh --yes` | one machine: `prepare.sh` |
 
+## Results
+
+### 2026-11-13: one machine, scale 100
+
+All six PostgreSQL instances (and the proxy and pgbench) on one EC2 `m9gd.4xlarge`: 16 vCPUs
+(aarch64), 61 GB, data on the local NVMe instance store, Amazon Linux 2023 (kernel 6.18).
+PostgreSQL 17.9; pg-raft at `65f4762` (release build, gcc 14), the default `config.toml`: no disk
+syncs on the commit path. Each setup on a fresh cluster: `pgbench -i -s 100`, 16 clients,
+4 threads, the TPC-B-like default script, a 60 s warm-up, then 300 s measured.
+
+| Setup | tps | latency avg | latency stddev | 10 s intervals |
+|---|---|---|---|---|
+| streaming replication, quorum sync (`ANY 1 (s1, s2)`) | **37,623** | 0.423 ms | 0.223 ms | 37,100–38,100 |
+| pg-raft, through the proxy | **17,853** | 0.895 ms | 0.657 ms | 17,500–18,000 |
+
+pg-raft reaches 47% of streaming replication's throughput. pgbench's per-statement latencies
+show where the time goes:
+
+| Statement (ms) | std | pg-raft |
+|---|---|---|
+| `BEGIN` | 0.025 | 0.047 |
+| `UPDATE pgbench_accounts` | 0.056 | 0.092 |
+| `SELECT abalance` | 0.049 | 0.070 |
+| `UPDATE pgbench_tellers` | 0.048 | 0.076 |
+| `UPDATE pgbench_branches` | 0.054 | 0.102 |
+| `INSERT INTO pgbench_history` | 0.039 | 0.066 |
+| `END` (the commit) | 0.150 | 0.442 |
+
+The commit is ~0.3 ms slower: PostgreSQL's WAL fsync goes through FUSE and waits for a raft round
+(the `FlushOp` committed by a majority) instead of a standby's flush acknowledgement. Every other
+statement is ~0.02–0.05 ms slower, mostly the extra hop through the proxy. Without a warm-up
+(the first run), pg-raft averaged 17,141 tps: it ramps from ~6,000 tps in its first 10 s to its
+steady rate in about a minute; streaming replication reaches its rate within 20 s.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
