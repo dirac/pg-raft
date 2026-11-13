@@ -1,6 +1,7 @@
 #include "src/node/node.h"
 
 #include <fstream>
+#include <future>
 
 #include "src/backup/dir_backup_store.h"
 #include "src/base/io_threads.h"
@@ -747,8 +748,20 @@ void Node::shutdown() {
   // PostgreSQL first, cleanly: on the primary its shutdown checkpoint still commits through raft
   // (the node still leads), and a clean stop releases its System V shared memory and semaphores,
   // which a kill leaves behind (only a postmaster in the same data directory reclaims them).
-  if (pg_ && pg_->is_running())
-    pg_->stop(PgInstance::StopMode::Fast);
+  //
+  // A leader without a quorum (the last node of a cluster shutting down) never commits that
+  // checkpoint: its fsync blocks in FUSE, and on Linux a process waiting on a FUSE request the
+  // daemon has read cannot be killed, so the checkpointer holds PostgreSQL's output pipes and
+  // stop() never returns. Shutting raft down fails the pending fsyncs (close() completes the
+  // handlers with kNotLeader); the checkpointer then exits and the stop finishes.
+  if (pg_ && pg_->is_running()) {
+    auto stopped = std::async(std::launch::async, [this] { pg_->stop(PgInstance::StopMode::Fast); });
+    if (stopped.wait_for(std::chrono::seconds(12)) != std::future_status::ready && raft_) {
+      log(WARN, "Node {}: PostgreSQL did not stop; shutting raft down to release its fsyncs", id_);
+      raft_->shutdown();
+    }
+    stopped.get();
+  }
 
   // Then raft hands the leadership over (stepped_down finds nothing left to kill).
   if (raft_)
