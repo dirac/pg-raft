@@ -16,6 +16,7 @@ lib base
     wal_segment.cc
     error_code.cc
     xxhash.cc
+    archive.cc
     deps
   ;
 
@@ -49,6 +50,12 @@ unit-test xxhash_test
 
 unit-test base_test
   : base_test.cc
+    libs
+    testing
+  ;
+
+unit-test archive_test
+  : archive_test.cc
     libs
     testing
   ;

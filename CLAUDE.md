@@ -42,6 +42,7 @@ The code builds on macOS (Apple clang 17, toolset `clang-darwin-17`) and Linux (
 /opt/pg_raft/bin/b2 src/base//semaphore_lock_test
 /opt/pg_raft/bin/b2 src/base//xxhash_test
 /opt/pg_raft/bin/b2 src/base//base_test
+/opt/pg_raft/bin/b2 src/base//archive_test
 /opt/pg_raft/bin/b2 src/process//process_test
 /opt/pg_raft/bin/b2 src/process//pg_instance_test
 /opt/pg_raft/bin/b2 src/wal_sender//wal_sender_test
@@ -127,6 +128,7 @@ Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, etc.) are installed under `/opt/
 - **`xxhash.h`** — `xxhash32(buffer | vector<const_buffer> | ptr+size | Bytes, seed)`. The hash of a buffer vector equals the hash of their concatenation. Used as the frame checksum in `net`.
 - **`WalSegment`** (`wal_segment.h/cc`) — Shared, ref-counted mmap wrapper for a WAL segment file on disk: `WalSegment(shared_ptr<WalSegmentCache>, dir, lsn)`. `open()` mmap's the file `PROT_READ|PROT_WRITE|MAP_SHARED` and registers it in the `WalSegmentCache` (`mutex` + `map<LogSeqNumber, Mapping>`) so that openers sharing a cache share the mapping; if `X` doesn't exist it opens `.X` (see `WalFuseOps::op_unlink`). `mapping()` returns the base pointer; `write(buf, off, size)` copies into it; `const_buffer(off, size)` is a zero-copy view; `fsync(off, size)` page-aligns and `msync`s. GC on every `open`/destructor evicts unreferenced mappings idle for ≥ 5 s, and all unreferenced ones when more than 5 remain. Used by `wal_fuse` and `raft`.
 - **`WalTracker`** (`wal_segment.h`) — Receiver of WAL events, with default implementations: `async_publish(segment, offset, size)` (no-op) is called for WAL bytes as the FUSE parser walks over them; `async_fsync(segment, offset, size, completion)` is called on fsync and must call `completion(Result<void>)` once the range is durable (default: local `msync`); `async_timeline(timeline, content)` (no-op) is called when PostgreSQL installs a timeline history file. The raft layer is meant to implement it. `wal_segment.h` also has the history-file helpers `history_timeline(path)`, `history_filename(tli)`, `write_history_file(dir, tli, content)` (atomic) and `read_history_file(dir, tli)`.
+- **`archive.h`** — `RawOArchive` / `RawIArchive`: binary Boost.Serialization archives without a `std::locale` (Boost's `binary_[io]archive` build one per archive, ~5% of a node's CPU). Boost's structure layer, primitives written directly; byte-identical to `binary_oarchive` with `no_header`. Output to a `streambuf` or a `std::string`, input from a `streambuf` or a memory range (LMDB values in place). Used by `net` (`to_data`/`from_data`) and the raft log.
 - **`testing.h`** — Test utilities: `TmpDir` (RAII temp directory, auto-deleted), `test_config()` (loads `config.toml`), `top_dir()`. Every test file must `#define BOOST_TEST_MODULE <name>` before including this header (enforced by a `#error`).
 - **`SemaphoreLock`** (`semaphore_lock.h`) — RAII guard for `std::binary_semaphore`, analogous to `std::unique_lock`. Constructor does a non-blocking `try_acquire`; call `acquire()` to block if needed. `owns()` / `operator bool()` test ownership. Explicit `release()` available before destruction.
 
@@ -264,6 +266,7 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 
 - **`semaphore_lock_test`** — unit tests for `SemaphoreLock`. No PostgreSQL needed.
 - **`xxhash_test`** — known xxHash32 vectors and multi-buffer equivalence.
+- **`archive_test`** — `RawOArchive` / `RawIArchive` (`src/base/archive.h`) write the bytes of `binary_oarchive` with `no_header`, round-trip from memory and from a streambuf, and throw on truncated input.
 - **`base_test`** — `log_seq_number()`: round trips with `filename()`, lower-case hex, the leading `/`, and the names it must reject.
 - **`data_test`** — `Data` text/binary round-trips. Takes ~50 s (60 s limit), so it times out under ASAN.
 - **`connection_test`** — `Connection` messages (with one and two attached buffers), status, background heartbeats, files, the read-silence timeout and `timeout_and_times`. Passes under ASAN and TSAN.

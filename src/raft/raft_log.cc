@@ -1,5 +1,6 @@
 #include "src/raft/raft_log.h"
 
+#include "src/base/archive.h"
 #include "src/base/error_code.h"
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
@@ -39,22 +40,21 @@ struct Cleanup {
   std::function<void()> f_;
 };
 
+// The values: binary_oarchive's bytes (RawOArchive, no std::locale per entry), decoded in place
+// from LMDB's memory.
 template <typename T>
 string to_encoded_string(T const& t) {
-  std::ostringstream              stream;
-  boost::archive::binary_oarchive oa(stream,
-                                     boost::archive::no_header | boost::archive::no_codecvt);
+  string      out;
+  RawOArchive oa(out);
   oa << t;
-  return stream.str();
+  return out;
 }
 
 template <typename T>
 Result<T> from_encoded_string(string_view str) {
   try {
-    T                               t;
-    std::istringstream              stream{string{str}};
-    boost::archive::binary_iarchive ia(stream,
-                                       boost::archive::no_header | boost::archive::no_codecvt);
+    T           t;
+    RawIArchive ia(str.data(), str.size());
     ia >> t;
     return t;
   } catch (std::exception const&) {

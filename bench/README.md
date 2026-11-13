@@ -232,6 +232,24 @@ the network frames), and `std::locale` construction still 5% of the leader: Boos
 builds a locale in its constructor whatever the flags, once per entry read from or written to LMDB
 and once per message.
 
+### 2026-11-13: archives without a locale
+
+Boost's binary archives build a `std::locale` in their constructor, flags or not, once per message
+and per raft log entry. pg-raft now uses its own archives (`src/base/archive.h`): Boost's structure
+layer with the primitive writes done directly, the same bytes as `binary_oarchive` (`no_header`),
+log entries decoded in place from LMDB's memory. Locale construction is gone from the profile
+(it was 5% of the leader).
+
+| Setup | tps | % of solo | latency avg | `END` (commit) | 10 s intervals |
+|---|---|---|---|---|---|
+| solo | 55,093 | 100% | 0.288 ms | 0.066 ms | |
+| streaming replication | 37,623 | 68% | 0.423 ms | 0.150 ms | |
+| pg-raft, through the proxy | **21,716** | 39% | 0.735 ms | 0.329 ms | 21,350–21,940 |
+
+What remains in the profile: about 40% of each node in system calls and thread wake-ups,
+`xxhash32` 6% of the leader and 11% of a follower (LMDB's page checksums, plus the frames), `malloc`
+and `free` about 5%, and the proxy at 237% CPU.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all

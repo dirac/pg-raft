@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/base/archive.h"
 #include "src/base/base.h"
 
 constexpr unsigned kPageSize = 4096 * 2;
@@ -70,9 +71,8 @@ Data to_data(T const& t, bool binary) {
   auto str = std::basic_ostream{&msg};
 
   if (binary) {
-    // no_codecvt: no locale per archive (it cost ~5% of a node's CPU); the bytes are the same.
-    auto oa = boost::archive::binary_oarchive{
-        str, boost::archive::no_header | boost::archive::no_codecvt};
+    // RawOArchive: binary_oarchive's bytes (no_header), without building a std::locale per message.
+    auto oa = RawOArchive{msg};
     oa << t;
   } else {
     auto oa = boost::archive::text_oarchive{str};
@@ -97,8 +97,7 @@ Result<T> from_data(Data const& msg) {
     T t;
     switch (str.get()) {
       case 'b': {
-        boost::archive::binary_iarchive ia(str,
-                                           boost::archive::no_header | boost::archive::no_codecvt);
+        RawIArchive ia(*str.rdbuf());
         ia >> t;
       } break;
 
