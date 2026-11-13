@@ -47,6 +47,12 @@ unit-test xxhash_test
     testing
   ;
 
+unit-test base_test
+  : base_test.cc
+    libs
+    testing
+  ;
+
 unit-test config_test
   : config_test.cc
     libs

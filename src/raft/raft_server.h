@@ -405,6 +405,13 @@ class RaftServer : public ClientConnectionApi,
   std::filesystem::path const       wal_dir_;
   shared_ptr<WalSegmentCache> const cache_;
 
+  // The segments used last, kept open: segment() is called for every published write and every
+  // block sent or received, and opening one costs a stat, allocations and the mapping cache's lock.
+  // wal_gc drops the ones it deletes.
+  static constexpr size_t                           kOpenSegments = 4;
+  mutable std::mutex                                open_segments_mtx_;
+  mutable map<LogSeqNumber, shared_ptr<WalSegment>> open_segments_;
+
   // Persistent state.
   RaftLog log_;
 

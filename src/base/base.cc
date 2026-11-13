@@ -43,47 +43,44 @@ uint64_t gcounter(std::optional<uint64_t> g) {
 }
 
 std::optional<LogSeqNumber> log_seq_number(char const* path) {
+  // On every FUSE operation: no allocation, no locale.
   if (*path == '/')
     ++path;
 
-  for (auto i = 0; i < 24; ++i) {
-    char c = path[i];
-    if (c >= '0' && c <= '9')
-      continue;
-    if (c >= 'A' && c <= 'F')
-      continue;
-    if (c >= 'a' && c <= 'f')
-      continue;
-
-    return std::nullopt;
-  }
-  if (path[24] != '\0')
-    return std::nullopt;
-
-  // Zero-allocation slicing using std::string_view
-  auto timeline_sv = std::string_view{path, 8};
-  auto logid_sv    = std::string_view{path + 8, 8};
-  auto logseg_sv   = std::string_view{path + 16, 8};
-
-  auto hex_to_int = [](std::string_view hex_sv) -> uint32_t {
-    uint32_t          value = 0;
-    std::stringstream ss;
-    ss << std::hex << hex_sv;
-    ss >> value;
-    return value;
+  // 24 hex digits: timeline, log id, segment in the log id (8 each), and nothing after.
+  auto hex8 = [](char const* p) -> std::optional<uint32_t> {
+    uint32_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+      char const c = p[i];
+      uint32_t   d = 0;
+      if (c >= '0' && c <= '9')
+        d = static_cast<uint32_t>(c - '0');
+      else if (c >= 'A' && c <= 'F')
+        d = static_cast<uint32_t>(c - 'A' + 10);
+      else if (c >= 'a' && c <= 'f')
+        d = static_cast<uint32_t>(c - 'a' + 10);
+      else
+        return std::nullopt;  // also a name shorter than 24: its '\0'
+      v = (v << 4U) | d;
+    }
+    return v;
   };
+  auto const timeline = hex8(path);
+  if (!timeline)
+    return std::nullopt;
+  auto const logid = hex8(path + 8);
+  if (!logid)
+    return std::nullopt;
+  auto const logseg = hex8(path + 16);
+  if (!logseg || path[24] != '\0')
+    return std::nullopt;
 
-  // Convert hex segments to integers
-  uint32_t timeline = hex_to_int(timeline_sv);
-  uint32_t logid    = hex_to_int(logid_sv);
-  uint32_t logseg   = hex_to_int(logseg_sv);
-
-  // Reconstruct the 64-bit LSN value
-  // Internal formula: LSN = (logid * 0x100000000) + (logseg * WAL_SEGMENT_SIZE)
-  uint64_t lsn =
-      (static_cast<uint64_t>(logid) << 32) + (static_cast<uint64_t>(logseg) * kWalSegmentSize);
-
-  return LogSeqNumber{.timeline = timeline, .lsn = lsn};
+  // LSN = log id * 2^32 + segment * segment size.
+  return LogSeqNumber{
+      .timeline = *timeline,
+      .lsn      = (static_cast<uint64_t>(*logid) << 32U) +
+             (static_cast<uint64_t>(*logseg) * kWalSegmentSize),
+  };
 }
 
 std::filesystem::path tmp_dir(std::optional<std::filesystem::path> t) {

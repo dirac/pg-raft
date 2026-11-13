@@ -57,9 +57,7 @@ struct Data : public std::basic_streambuf<char>, public vector<std::array<char, 
  private:
   size_t capacity_{0};
 
-  void add_block() {
-    emplace_back(reinterpret_cast<chunk_t*>(MemoryPool<kPageSize>::malloc()));
-  }
+  void add_block() { emplace_back(reinterpret_cast<chunk_t*>(MemoryPool<kPageSize>::malloc())); }
   void del_block(auto iter) {
     MemoryPool<kPageSize>::free(*iter);
     erase(iter);
@@ -72,7 +70,9 @@ Data to_data(T const& t, bool binary) {
   auto str = std::basic_ostream{&msg};
 
   if (binary) {
-    auto oa = boost::archive::binary_oarchive{str, boost::archive::no_header};
+    // no_codecvt: no locale per archive (it cost ~5% of a node's CPU); the bytes are the same.
+    auto oa = boost::archive::binary_oarchive{
+        str, boost::archive::no_header | boost::archive::no_codecvt};
     oa << t;
   } else {
     auto oa = boost::archive::text_oarchive{str};
@@ -97,7 +97,8 @@ Result<T> from_data(Data const& msg) {
     T t;
     switch (str.get()) {
       case 'b': {
-        boost::archive::binary_iarchive ia(str, boost::archive::no_header);
+        boost::archive::binary_iarchive ia(str,
+                                           boost::archive::no_header | boost::archive::no_codecvt);
         ia >> t;
       } break;
 

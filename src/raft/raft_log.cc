@@ -42,7 +42,8 @@ struct Cleanup {
 template <typename T>
 string to_encoded_string(T const& t) {
   std::ostringstream              stream;
-  boost::archive::binary_oarchive oa(stream, boost::archive::no_header);
+  boost::archive::binary_oarchive oa(stream,
+                                     boost::archive::no_header | boost::archive::no_codecvt);
   oa << t;
   return stream.str();
 }
@@ -52,7 +53,8 @@ Result<T> from_encoded_string(string_view str) {
   try {
     T                               t;
     std::istringstream              stream{string{str}};
-    boost::archive::binary_iarchive ia(stream, boost::archive::no_header);
+    boost::archive::binary_iarchive ia(stream,
+                                       boost::archive::no_header | boost::archive::no_codecvt);
     ia >> t;
     return t;
   } catch (std::exception const&) {

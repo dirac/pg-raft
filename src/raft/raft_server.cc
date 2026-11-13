@@ -318,6 +318,12 @@ std::optional<TimelineOp> RaftServer::latest_timeline() const {
 }
 
 Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) const {
+  {
+    auto lk = std::unique_lock{open_segments_mtx_};
+    if (auto pos = open_segments_.find(lsn); pos != open_segments_.end())
+      return pos->second;
+  }
+
   auto name = filename(lsn);
   auto file = wal_dir_ / name;
 
@@ -338,6 +344,12 @@ Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) cons
   auto seg = make_shared<WalSegment>(cache_, wal_dir_, lsn);
   if (auto r = seg->open(); !r)
     return r.error();
+
+  // Keep it open; the oldest goes when there are too many (the WAL moves forward).
+  auto lk = std::unique_lock{open_segments_mtx_};
+  open_segments_.try_emplace(lsn, seg);
+  while (open_segments_.size() > kOpenSegments)
+    open_segments_.erase(open_segments_.begin());
   return seg;
 }
 
@@ -1173,6 +1185,12 @@ void RaftServer::wal_gc() {
       auto seg = log_seq_number(entry.path().filename().string().c_str());
       if (seg && seg->lsn + kWalSegmentSize <= first.lsn)
         old.push_back(entry.path());
+    }
+    {
+      auto lk = std::unique_lock{open_segments_mtx_};
+      std::erase_if(open_segments_, [&first](auto const& kv) {
+        return kv.first.lsn + kWalSegmentSize <= first.lsn;
+      });
     }
     for (auto const& p : old) {
       std::filesystem::remove(p, ec);

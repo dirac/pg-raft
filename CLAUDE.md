@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **Networking** (`net`), **process control** (`process`) and a **PostgreSQL client** (`status`).
 4. **Raft** (`raft`) — consensus over the WAL stream, the **node** process (`node`), and the client **proxy** (`proxy`).
 
-Benchmark scripts (pg-raft vs PostgreSQL quorum sync replication, pgbench) are in `bench/` (see `bench/README.md`). Per-component design documents are in `docs/` (one per module, including `base.md`, plus `README.md` and `pg_notes.md`); the modules have no README of their own. Open items across modules are collected in `docs/todo.md`.
+Benchmark scripts (pg-raft vs PostgreSQL quorum sync replication, and a single PostgreSQL without HA as the baseline; pgbench) are in `bench/` (see `bench/README.md`). Per-component design documents are in `docs/` (one per module, including `base.md`, plus `README.md` and `pg_notes.md`); the modules have no README of their own. Open items across modules are collected in `docs/todo.md`.
 
 ## Build system
 
@@ -41,6 +41,7 @@ The code builds on macOS (Apple clang 17, toolset `clang-darwin-17`) and Linux (
 # Build + run a specific unit-test target (auto-runs after build)
 /opt/pg_raft/bin/b2 src/base//semaphore_lock_test
 /opt/pg_raft/bin/b2 src/base//xxhash_test
+/opt/pg_raft/bin/b2 src/base//base_test
 /opt/pg_raft/bin/b2 src/process//process_test
 /opt/pg_raft/bin/b2 src/process//pg_instance_test
 /opt/pg_raft/bin/b2 src/wal_sender//wal_sender_test
@@ -263,6 +264,7 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 
 - **`semaphore_lock_test`** — unit tests for `SemaphoreLock`. No PostgreSQL needed.
 - **`xxhash_test`** — known xxHash32 vectors and multi-buffer equivalence.
+- **`base_test`** — `log_seq_number()`: round trips with `filename()`, lower-case hex, the leading `/`, and the names it must reject.
 - **`data_test`** — `Data` text/binary round-trips. Takes ~50 s (60 s limit), so it times out under ASAN.
 - **`connection_test`** — `Connection` messages (with one and two attached buffers), status, background heartbeats, files, the read-silence timeout and `timeout_and_times`. Passes under ASAN and TSAN.
 - **`async_connect_test`** — connect and handshake.
