@@ -222,7 +222,23 @@ Result<void> Proxy::start() {
       });
 
   auto const address = asio::ip::make_address(options_.listen_address);
-  for (size_t i = 0; i <= config_.servers.size(); ++i) {
+  if (options_.engine != ProxyOptions::Engine::kAsio) {
+#ifdef __linux__
+    auto primary = [w = weak_from_this()]() -> std::optional<unsigned> {
+      if (auto self = w.lock())
+        return self->tracker_->primary();
+      return std::nullopt;
+    };
+    relay_ = options_.engine == ProxyOptions::Engine::kUring
+                 ? make_uring_relay(config_, options_, std::move(primary))
+                 : make_epoll_relay(config_, options_, std::move(primary));
+    if (auto r = relay_->start(); !r)
+      return r;
+#else
+    return elog(system_error_code(ENOTSUP), "Proxy: the epoll / uring engines are Linux only");
+#endif
+  }
+  for (size_t i = 0; relay_ == nullptr && i <= config_.servers.size(); ++i) {
     auto const port = static_cast<uint16_t>(config_.proxy_pg_port + i);
     auto       a    = make_unique<tcp::acceptor>(io_);
     error_code ec;
@@ -266,6 +282,8 @@ void Proxy::stop() {
     admin_->stop();
   if (tracker_)
     tracker_->stop();
+  if (relay_)
+    relay_->stop();
   auto lk = std::unique_lock{bridges_mtx_};
   for (auto& w : bridges_)
     if (auto b = w.lock())
@@ -403,7 +421,11 @@ boost::json::object Proxy::status() const {
   // The open bridges, per port.
   uint64_t              on_primary = 0;
   std::vector<uint64_t> on_server(config_.servers.size(), 0);
-  {
+  if (relay_) {
+    auto c     = relay_->counts();
+    on_primary = c.primary;
+    on_server  = c.servers;
+  } else {
     auto lk = std::unique_lock{bridges_mtx_};
     for (auto const& w : bridges_)
       if (auto b = w.lock()) {
@@ -426,6 +448,8 @@ boost::json::object Proxy::status() const {
 
 void Proxy::on_primary_change(std::optional<unsigned> primary) {
   // The old primary's clients are cut: they reconnect and reach the new one.
+  if (relay_)
+    return relay_->primary_changed(primary);
   auto lk = std::unique_lock{bridges_mtx_};
   for (auto const& w : bridges_)
     if (auto b = w.lock(); b && b->primary() && std::optional<unsigned>{b->node()} != primary)

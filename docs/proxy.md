@@ -70,6 +70,32 @@ Implementation notes:
 - Track the live bridges per target (a weak list), so they can be closed when the primary
   changes (§4).
 
+### 3.1 Engines (`relay.h`)
+
+The forwarding above is the **`asio`** engine. The data path is behind a `Relay` interface, with
+two Linux engines besides (`ProxyOptions::engine`, `pg_raft_proxy --engine`); the control plane
+(leader tracking, the admin interface) is Asio in all of them.
+
+- **`epoll`** (`epoll_relay.cc`, the default on Linux): one thread per core (`--threads N`), each
+  with its own level-triggered epoll loop and its own `SO_REUSEPORT` listener on every port (the
+  kernel spreads the connections), owning each connection from accept to close: no locks, no
+  shared queues, no reference counts on the data path. A message costs one `recv` and one `send`;
+  when the receiver can't take it, the pair stops reading the sender until `EPOLLOUT`. A primary
+  change reaches the loops through an `eventfd`.
+- **`uring`** (`uring_relay.cc`, liburing): the same structure on io_uring. Multishot accept; one
+  receive in flight per direction, whose completion queues the send, whose completion queues the
+  next receive; a batch's submissions go with the wait for the next one in one `io_uring_enter`.
+  Rings are single-issuer with deferred task work (created disabled, enabled by their thread). A
+  closing pair cancels its requests and is freed once their completions arrived.
+- `--spin-us N` (both): busy-poll that long before sleeping.
+
+Measured (one machine, pgbench 16 clients, 2026-11-13): every engine and setting gives the same
+throughput, about 23,000 tps against 29,900 without the proxy. The proxy's ~190% CPU is the
+kernel's: on loopback a `send` runs the receiving side's TCP and wakes it, so the extra hop costs
+the same whatever the event loop. A user-space relay can't do much better; `sockmap` (an eBPF
+program forwarding between the two sockets in the kernel) would be the next step. Clients that
+can should connect to the primary directly (libpq `host=a,b,c target_session_attrs=read-write`).
+
 ## 4. Following the primary
 
 The primary port routes each **new** connection to whichever server is primary at accept time.

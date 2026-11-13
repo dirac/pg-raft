@@ -250,6 +250,27 @@ What remains in the profile: about 40% of each node in system calls and thread w
 `xxhash32` 6% of the leader and 11% of a follower (LMDB's page checksums, plus the frames), `malloc`
 and `free` about 5%, and the proxy at 237% CPU.
 
+### 2026-11-13: the proxy's cost, and proxy engines
+
+One cluster, loaded and warmed once, then 60 s runs through each proxy configuration
+(`PROXY_ARGS` for `raft/start_proxy.sh`):
+
+| Configuration | tps | latency avg | proxy CPU |
+|---|---|---|---|
+| direct to the primary (`bench.sh --direct`) | **29,891** | 0.535 ms | |
+| proxy, `asio` | 22,800 | 0.702 ms | 180% |
+| proxy, `epoll`, 4 threads | 22,756 | 0.703 ms | 190% |
+| proxy, `uring`, 4 threads | 22,862 | 0.700 ms | 189% |
+| proxy, `uring`, 2 threads | 23,047 | 0.694 ms | 188% |
+| proxy, `epoll`, 4 threads, `--spin-us 20` | 23,016 | 0.695 ms | 187% |
+| proxy, `uring`, 4 threads, `--spin-us 20` | 23,007 | 0.695 ms | 193% |
+
+The full benchmark without the proxy (fresh cluster, 60 s warm-up, 300 s): **30,139 tps**, 55% of
+solo and 80% of streaming replication, commits 0.294 ms. The proxy costs about a quarter of the
+throughput on one machine, whatever its engine: its CPU is kernel time (on loopback a send runs
+the receiving side's TCP and wakes it), so the extra hop costs the same with epoll, io_uring or
+busy-polling.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
@@ -262,6 +283,8 @@ and `free` about 5%, and the proxy at 237% CPU.
 - Stopping takes ~20 s: once the others are gone, the last node can't commit PostgreSQL's shutdown
   checkpoint (no quorum), so after 12 s it fails the fsync and PostgreSQL PANICs, as intended.
   `start_node.sh` disables core dumps for that reason.
+- The proxy's engine: `PROXY_ARGS="--engine uring --threads 2" ./raft/start_proxy.sh` (or
+  `start.sh`); `epoll` is the default on Linux, `asio` the portable one.
 - Backups: `config.toml` pushes the periodic backups out (1 day or 1 TiB of WAL) so that none
   starts in the middle of a run. Lower `backup_interval_secs` / `backup_wal_size` to include them.
 - The proxy's admin page: http://<proxy machine>:8080/status.html.

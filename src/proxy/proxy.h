@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/base/config.h"
+#include "src/proxy/relay.h"
 #include "src/raft/raft_server_connection.h"
 
 // The client entry point (docs/proxy.md): a plain TCP proxy on Boost.Asio that forwards
@@ -16,6 +17,16 @@
 // lost anyway); the per-server ports' bridges are not touched.
 
 struct ProxyOptions {
+  /// The data path (relay.h): epoll on Linux, Asio elsewhere.
+  enum class Engine { kAsio, kEpoll, kUring };
+#ifdef __linux__
+  Engine engine = Engine::kEpoll;
+#else
+  Engine engine = Engine::kAsio;
+#endif
+  unsigned threads = 0;  // epoll / uring: 0 is one per core
+  unsigned spin_us = 0;  // epoll / uring: busy-poll this long before sleeping (0: never)
+
   std::chrono::milliseconds failover_window{30000};  // hold a primary-port client this long
   std::chrono::milliseconds connect_timeout{5000};   // upstream connect
   std::chrono::milliseconds status_timeout{1000};    // raft connections: heartbeats every 100 ms
@@ -99,6 +110,7 @@ class Proxy : public std::enable_shared_from_this<Proxy> {
   vector<unique_ptr<asio::ip::tcp::acceptor>> acceptors_;  // [0]: primary, [1 + i]: servers[i]
 
   shared_ptr<AdminServer> admin_;
+  unique_ptr<Relay>       relay_;  // the epoll / uring data path; the Bridges below for asio
 
   mutable std::mutex       bridges_mtx_;
   vector<weak_ptr<Bridge>> bridges_;

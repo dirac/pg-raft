@@ -4,10 +4,18 @@ alias deps
     ../raft//libs
   ;
 
+# liburing: only a shared library is installed (liburing-devel).
+lib uring : : <name>uring <link>shared ;
+
 lib proxy
   : proxy.cc
     admin.cc
     deps
+  : <target-os>linux:<source>epoll_relay.cc
+    <target-os>linux:<source>uring_relay.cc
+    <target-os>linux:<library>uring
+  : :
+    <target-os>linux:<library>uring
   ;
 
 alias libs

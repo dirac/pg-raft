@@ -106,7 +106,8 @@ bool wait_for(std::chrono::seconds timeout, std::function<bool()> const& pred) {
 
 }  // namespace
 
-BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) {
+// Every engine of the data path must behave the same.
+void routing_and_failover(ProxyOptions::Engine engine) {
   auto io = boost::asio::io_context{};
   auto th = IoThreads{io, 8};
 
@@ -126,6 +127,8 @@ BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) 
   service.wait_for_leader();
 
   auto opts            = ProxyOptions{};
+  opts.engine          = engine;
+  opts.threads         = 4;
   opts.failover_window = 3s;
   opts.listen_address  = "127.0.0.1";
   auto proxy           = Proxy::create(io, cfg, opts);
@@ -259,3 +262,17 @@ BOOST_AUTO_TEST_CASE(routing_and_failover, *boost::unit_test::timeout(timeout)) 
   service.shutdown();
   io.stop();
 }
+
+BOOST_AUTO_TEST_CASE(routing_and_failover_asio, *boost::unit_test::timeout(timeout)) {
+  routing_and_failover(ProxyOptions::Engine::kAsio);
+}
+
+#ifdef __linux__
+BOOST_AUTO_TEST_CASE(routing_and_failover_epoll, *boost::unit_test::timeout(timeout)) {
+  routing_and_failover(ProxyOptions::Engine::kEpoll);
+}
+
+BOOST_AUTO_TEST_CASE(routing_and_failover_uring, *boost::unit_test::timeout(timeout)) {
+  routing_and_failover(ProxyOptions::Engine::kUring);
+}
+#endif
