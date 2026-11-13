@@ -20,7 +20,7 @@ std::mutex& g_mu() {
 }  // namespace
 
 Level level(std::optional<Level> l) {
-  static std::atomic<Level> lvl;
+  static std::atomic<Level> lvl{Level::Info};  // the documented default
 
   if (l) [[unlikely]]
     lvl.store(*l, std::memory_order_relaxed);
