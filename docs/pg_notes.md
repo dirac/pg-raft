@@ -997,7 +997,7 @@ length.
 
 ## 12. Action items for pg-raft
 
-Status as of 2026-11 (open ones are also in [`todo.md`](../todo.md)):
+Status as of 2026-11 (open ones are also in [`todo.md`](todo.md)):
 
 1. **Done.** `PgInstance::promote()` creates `data_dir/promote` before SIGUSR1. `role_` is still
    set before the promotion finishes ([process.md](process.md#5-open-items) item 1); the node waits

@@ -19,7 +19,7 @@ way, and the known gaps.
 
 [pg_notes.md](pg_notes.md) collects PostgreSQL internals (WAL format, replication protocol,
 promotion) that the modules rely on. The open items of every module are gathered in
-[`todo.md`](../todo.md) at the repository root.
+[`todo.md`](todo.md).
 
 ## System picture
 

@@ -125,10 +125,9 @@ connects, so there is no network exposure and no authentication to set up.
 There is no control loop. Raft knows exactly when the role changes, so it tells the node through
 hooks, and the node reacts.
 
-### 3.1 Hooks and the node strand
+### 3.1 Hooks and the transition thread
 
-`RaftApplier` is renamed `RaftObserver`, since it is no longer only about applied entries, and
-gains two hooks (implemented):
+`RaftObserver` has four hooks:
 
 ```cpp
 struct RaftObserver {
@@ -149,12 +148,13 @@ Where they fire in `RaftServer`:
   falls back to follower is not an event: its PostgreSQL never stopped being a standby.
 
 Both hooks run **with the server lock held**, so they must not block. A hook only records the
-new role and posts a transition to a single **node strand**, which runs transitions one at a time.
-If the role flips again while a transition runs (leader → follower → leader), the strand acts
-only on the latest role when it gets to it. A stale transition is skipped, not queued.
+new role (under `role_mtx_`) and wakes the node's **transition thread** (`Node::transitions`),
+which runs transitions one at a time. If the role flips again while a transition runs (leader →
+follower → leader), the thread acts only on the latest role when it gets to it. A stale
+transition is skipped, not queued.
 
 Two things happen **inside** `stepped_down` itself, because they are cheap, must not wait, and
-must not be delayed by the strand:
+must not be delayed by the transition thread:
 
 - **The tracker is fenced** (`NodeWalTracker::Mode::kFenced`): nothing PostgreSQL writes after
   this point is published, and every fsync fails with `kNoConsensus`. Follower mode would not do:
@@ -168,7 +168,7 @@ must not be delayed by the strand:
 
 ### 3.2 Promotion (`became_leader`)
 
-On the node strand:
+On the transition thread:
 
 The standby replays **all** the WAL the node has, to the end. `flushed_lsn` is not used here: it
 is a polled value and always stale, so it can stop short of WAL the old primary had already
@@ -208,7 +208,7 @@ once, in the hook (§3.1): `make_follower()` has already failed every pending `e
 with `kNotLeader`, the tracker is fenced, and every PostgreSQL process is SIGKILLed. No client of
 the old primary is served after this point.
 
-On the node strand:
+On the transition thread:
 
 1. `set_serving(false)`.
 2. Reap the killed postmaster (`PgInstance::stop`), which also releases the System V shared
@@ -253,10 +253,11 @@ Two cases are not raft events, so no hook fires for them:
 - **Startup.** The node restores a backup if it has no usable data directory (§4.2), then starts
   PostgreSQL as a standby by itself. If raft later reaches full leadership, `became_leader`
   promotes it.
-- **PostgreSQL exits on its own**, without a role change: after the PANIC in §3.3, an OOM kill, a
-  crash. A watcher on the `Process` (`wait()`) posts a restart to the node strand, which restarts
-  PostgreSQL in the node's current role: as a standby on a follower; on the leader, as a standby
-  that is then promoted again (§3.2).
+- **PostgreSQL exits on its own**, without a role change (an OOM kill, a postmaster crash).
+  **Not handled yet** (see §10): nothing watches the postmaster. The intended design: a watcher on
+  the `Process` (`wait()`) wakes the transition thread, which restarts PostgreSQL in the node's
+  current role: as a standby on a follower; on the leader, it steps down (or restarts as a standby
+  and promotes again, §3.2).
 
 ## 4. Bootstrap, joining and backups
 
@@ -441,3 +442,7 @@ The tests need PostgreSQL and FUSE, and skip if either is absent. They run nodes
 2. A killed test run can leak PostgreSQL's System V shared memory (macOS allows 32 segments);
    `ipcs -m` shows them, `ipcrm` removes them.
 3. Joining a node that is not in `servers` (membership changes) is not supported.
+4. No watcher on the postmaster (§3.4); a promotion that fails after the catch-up step doesn't
+   step down; a backup holds `PgInstance::mu_` and delays a promotion; a failed rebuild or restore
+   leaves `fuse_` null; `rebuild_pg_wal` deletes compacted segments a demoted primary may still
+   need. Details in [`todo.md`](todo.md).
