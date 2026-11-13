@@ -155,14 +155,18 @@ Result<void> Node::start() {
   // Raft first: it knows whether the node needs a backup (an InstallSnapshot replaced its log).
   auto endpoint =
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);
-  raft_    = Server::create<RaftServer>(id_,
+  // The disk syncs on the commit path (config.h): off unless the config (or the caller) asks.
+  auto raft_options          = options_.raft;
+  raft_options.follower_sync = raft_options.follower_sync || config_.follower_sync;
+  raft_options.sync_commits  = raft_options.sync_commits || config_.log_sync;
+  raft_                      = Server::create<RaftServer>(id_,
                                      asio::ip::tcp::acceptor(io_context(), endpoint),
                                      config_,
                                      raft_dir_,
                                      raft_wal_dir_,
-                                     options_.raft,
+                                     raft_options,
                                      make_shared<Observer>(weak_from_this()));
-  tracker_ = make_shared<NodeWalTracker>(raft_);
+  tracker_ = make_shared<NodeWalTracker>(raft_, config_.leader_sync, config_.follower_sync);
 
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
     raft_->set_needs_backup(true);  // no elections until there is something to promote
@@ -755,7 +759,8 @@ void Node::shutdown() {
   // stop() never returns. Shutting raft down fails the pending fsyncs (close() completes the
   // handlers with kNotLeader); the checkpointer then exits and the stop finishes.
   if (pg_ && pg_->is_running()) {
-    auto stopped = std::async(std::launch::async, [this] { pg_->stop(PgInstance::StopMode::Fast); });
+    auto stopped =
+        std::async(std::launch::async, [this] { pg_->stop(PgInstance::StopMode::Fast); });
     if (stopped.wait_for(std::chrono::seconds(12)) != std::future_status::ready && raft_) {
       log(WARN, "Node {}: PostgreSQL did not stop; shutting raft down to release its fsyncs", id_);
       raft_->shutdown();

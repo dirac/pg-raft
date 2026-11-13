@@ -346,7 +346,8 @@ void RaftServer::write_blocks(inplace_vector<MemBlock, 2> const& blocks, Bytes c
   for (auto const& b : blocks) {
     auto seg = value(segment(b.lsn));
     seg->write(data, b.offset, b.size);
-    value(seg->fsync(b.offset, b.size));
+    if (options_.follower_sync)
+      value(seg->fsync(b.offset, b.size));
     data += b.size;
   }
 }

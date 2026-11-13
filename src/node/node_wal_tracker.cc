@@ -50,19 +50,24 @@ void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
   if (mode() == Mode::kFenced)
     return completion(system_error_code(WalSegment::kNoConsensus));
 
-  // Local durability first, in pg_wal.
-  if (auto r = segment->fsync(offset, size); !r)
-    return completion(r);
+  // With leader_sync / follower_sync, local durability first, in pg_wal. Without it the bytes are
+  // in the page cache (written through the mmap) and a commit is durable by replication.
+  bool const leader = mode() == Mode::kLeader;
+  if (leader ? leader_sync_ : follower_sync_)
+    if (auto r = segment->fsync(offset, size); !r)
+      return completion(r);
 
-  if (mode() != Mode::kLeader)
+  if (!leader)
     return completion(ok());
 
   // The leader's own copy counts towards the quorum.
-  auto copy = raft_->segment(segment->lsn());
-  if (!copy)
-    return completion(copy.error());
-  if (auto r = copy.value()->fsync(offset, size); !r)
-    return completion(r);
+  if (leader_sync_) {
+    auto copy = raft_->segment(segment->lsn());
+    if (!copy)
+      return completion(copy.error());
+    if (auto r = copy.value()->fsync(offset, size); !r)
+      return completion(r);
+  }
 
   // The handler runs with the server lock held: it only completes PostgreSQL's fsync.
   raft_->exec(

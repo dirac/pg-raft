@@ -41,6 +41,13 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 | `backup_pending_timeout_secs` | how long a backup lease counts without a refresh | `120` |
 | `socket_dir` | the WAL sender's Unix socket directory (macOS limits socket paths to 104 bytes) | `/tmp` |
 | `proxy_pg_port`, `proxy_http_port` | the proxy's primary port and admin port ([proxy.md](proxy.md)) | `5432`, `8080` |
+| `leader_sync` | the leader msyncs its WAL (PostgreSQL's `pg_wal` and raft's copy) before appending the `FlushOp` | `false` |
+| `follower_sync` | a follower msyncs the WAL blocks it receives before acknowledging them (raft `Options::follower_sync`), and its standby's fsync msyncs | `false` |
+| `log_sync` | the raft log (LMDB) is synced on every commit (raft `Options::sync_commits`); off, it is `MDB_NOSYNC` and synced in the background within a second | `false` |
+
+With the three syncs off (the default), a commit is durable once a majority has the WAL in its
+page cache, written through the mmap: durability comes from replication, and the kernel writes
+the pages back on its own. Only a power loss of a majority at once loses acknowledged commits.
 
 ## 4. Utilities
 

@@ -41,6 +41,21 @@ struct Config {
   /// bytes.
   string socket_dir = "/tmp";
 
+  /// Disk syncs on the commit path. All off by default: a commit is durable once a majority has
+  /// the WAL in its page cache (written through the mmap), so durability comes from replication;
+  /// the kernel writes the pages back on its own. Only a power loss of a majority at once loses
+  /// acknowledged commits. Turn them on to measure, or to survive that.
+  ///
+  /// leader_sync: the leader msyncs PostgreSQL's pg_wal segment and raft's copy before appending
+  /// the FlushOp that completes PostgreSQL's fsync.
+  bool leader_sync = false;
+  /// follower_sync: a follower msyncs the WAL blocks it receives before acknowledging them, and
+  /// its standby's own fsync (through FUSE) msyncs too.
+  bool follower_sync = false;
+  /// log_sync: every commit of the raft log (LMDB) is synced. Off: MDB_NOSYNC, and a background
+  /// thread syncs the log within a second.
+  bool log_sync = false;
+
   /// Proxy configuration
   uint16_t proxy_pg_port   = 5432;  // For client connections, that will be forwarded to the leader.
   uint16_t proxy_http_port = 8080;  // Proxy listens to a few admin commands on http port.

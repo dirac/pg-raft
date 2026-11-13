@@ -27,7 +27,12 @@ class NodeWalTracker : public WalTracker {
  public:
   enum class Mode { kFollower, kLeader, kFenced };
 
-  explicit NodeWalTracker(shared_ptr<RaftServer> raft) : raft_(std::move(raft)) {}
+  /// |leader_sync|: msync before the FlushOp in leader mode; |follower_sync|: msync PostgreSQL's
+  /// fsync in follower mode (Config::leader_sync / follower_sync).
+  explicit NodeWalTracker(shared_ptr<RaftServer> raft,
+                          bool                   leader_sync   = false,
+                          bool                   follower_sync = false)
+      : raft_(std::move(raft)), leader_sync_(leader_sync), follower_sync_(follower_sync) {}
 
   void set_mode(Mode mode);
   Mode mode() const { return mode_.load(); }
@@ -46,6 +51,8 @@ class NodeWalTracker : public WalTracker {
   LogSeqNumber flushed_lsn() const;
 
   shared_ptr<RaftServer> raft_;
+  bool const             leader_sync_;
+  bool const             follower_sync_;
   std::atomic<Mode>      mode_{Mode::kFollower};
 
   mutable std::mutex flushed_mtx_;

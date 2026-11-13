@@ -24,6 +24,12 @@ void parse_node(T& data, Config& config) {
     config.backup_pending_timeout_secs = toml::find<unsigned>(data, "backup_pending_timeout_secs");
   if (data.contains("socket_dir"))
     config.socket_dir = toml::find<string>(data, "socket_dir");
+  if (data.contains("leader_sync"))
+    config.leader_sync = toml::find<bool>(data, "leader_sync");
+  if (data.contains("follower_sync"))
+    config.follower_sync = toml::find<bool>(data, "follower_sync");
+  if (data.contains("log_sync"))
+    config.log_sync = toml::find<bool>(data, "log_sync");
   if (data.contains("proxy_pg_port"))
     config.proxy_pg_port = toml::find<uint16_t>(data, "proxy_pg_port");
   if (data.contains("proxy_http_port"))

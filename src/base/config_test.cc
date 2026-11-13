@@ -17,6 +17,9 @@ backup_interval_secs = 18000
 backup_wal_size = 5368709120
 backup_pending_timeout_secs = 60
 socket_dir = "/tmp/pgr"
+leader_sync = true
+follower_sync = true
+log_sync = true
 proxy_pg_port = 6432
 proxy_http_port = 6480
 
@@ -41,6 +44,9 @@ max_connections = 100
   BOOST_TEST(c.backup_wal_size == 5368709120ULL);
   BOOST_TEST(c.backup_pending_timeout_secs == 60U);
   BOOST_TEST(c.socket_dir == "/tmp/pgr");
+  BOOST_TEST(c.leader_sync);
+  BOOST_TEST(c.follower_sync);
+  BOOST_TEST(c.log_sync);
   BOOST_TEST(c.proxy_pg_port == 6432);
   BOOST_TEST(c.proxy_http_port == 6480);
   BOOST_REQUIRE(c.servers.size() == 2U);
@@ -60,6 +66,10 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   BOOST_TEST(c.backup_wal_size == uint64_t{4} << 30U);
   BOOST_TEST(c.backup_pending_timeout_secs == 120U);
   BOOST_TEST(c.socket_dir == "/tmp");
+  // No disk syncs on the commit path unless asked: durability by replication.
+  BOOST_TEST(!c.leader_sync);
+  BOOST_TEST(!c.follower_sync);
+  BOOST_TEST(!c.log_sync);
   BOOST_TEST(c.proxy_pg_port == 5432);
   BOOST_TEST(c.proxy_http_port == 8080);
 }
