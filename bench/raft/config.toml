@@ -36,6 +36,10 @@ log_sync      = false
 # fsync), or as an entry of its own once this many bytes of a segment are pending.
 write_op_bytes = 65536
 
+# xxhash32 of every network frame raft sends (TCP checksums the segments already). The raft log's
+# page checksums, which matter after a crash, are always on.
+frame_checksums = false
+
 # Lines for pg_hba.conf, written by init.sh ahead of pg-raft's defaults (the loopback is trusted,
 # any other address asked for a scram-sha-256 password). With the proxy and pgbench on another
 # machine, trust its network (the nodes replicate through raft, not PostgreSQL connections):

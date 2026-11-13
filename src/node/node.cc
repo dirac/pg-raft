@@ -152,6 +152,9 @@ Result<void> Node::start() {
   (void)store_->abort(id_);  // a lease (and a partial copy) this node left before a restart
   pg_ = make_unique<PgInstance>(pg_bin(config_), data_dir_, pg_port());
 
+  // The network frames' checksums (process-wide; TCP checksums the segments already).
+  Connection::set_frame_checksums(config_.frame_checksums);
+
   // Raft first: it knows whether the node needs a backup (an InstallSnapshot replaced its log).
   auto endpoint =
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);

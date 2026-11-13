@@ -3,6 +3,18 @@
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
+namespace {
+std::atomic_bool g_frame_checksums{false};
+}  // namespace
+
+void Connection::set_frame_checksums(bool on) {
+  g_frame_checksums.store(on, std::memory_order_relaxed);
+}
+
+bool Connection::frame_checksums() {
+  return g_frame_checksums.load(std::memory_order_relaxed);
+}
+
 using ::boost::system::error_code;
 
 namespace {
@@ -271,14 +283,15 @@ void Connection::do_read_data(uint32_t data_size,
         assert(length == (data.capacity() + buff.size()));
         (void)length;
 
-        if (auto v = xxhash32(data.const_buffer()); v != data_chk) {
+        // A checksum of 0: the sender didn't compute it (frame_checksums() off there).
+        if (auto v = data_chk ? xxhash32(data.const_buffer()) : 0U; v != data_chk) {
           auto ec = system_error_code(EBADMSG);
           log(ERROR, "{}Data checksum did not match {} vs {}", log_prefix(), data_chk, v);
           enqueue<ReadData>(ec, read_data_q_);
           return shutdown(ec);
         }
 
-        if (auto v = xxhash32(buff); v != buff_chk) {
+        if (auto v = buff_chk ? xxhash32(buff) : 0U; v != buff_chk) {
           auto ec = system_error_code(EBADMSG);
           log(ERROR, "{}Buffer checksum did not match {} vs {}", log_prefix(), buff_chk, v);
           enqueue<ReadData>(ec, read_data_q_);
@@ -595,8 +608,10 @@ void Connection::do_write(std::unique_lock<std::mutex> lk) {
 
       write_header_[2] = hton(h);
       write_header_[3] = hton(u4(buff_size));
-      write_header_[4] = hton(xxhash32(data.const_buffer()));
-      write_header_[5] = hton(xxhash32(extra));
+      if (frame_checksums()) {
+        write_header_[4] = hton(xxhash32(data.const_buffer()));
+        write_header_[5] = hton(xxhash32(extra));
+      }
 
       std::vector<::boost::asio::const_buffer> buffers = data.const_buffer();
       buffers.emplace(buffers.begin(),

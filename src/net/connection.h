@@ -12,6 +12,8 @@
 //
 //   data:    w2 = data size (< 2^31)   w3 = attached buffer size
 //            w4 = xxhash32(data)       w5 = xxhash32(attached buffer)
+//            (0 when not computed: frame checksums are off by default, set_frame_checksums(); a
+//            receiver checks a non-zero one only)
 //            followed by the data and then the attached buffer.
 //   file:    w2 = 0x80000000 | size >> 32, w3 = size & 0xFFFFFFFF
 //            followed by chunks of [xxhash32 of the chunk][up to 64 KiB of content].
@@ -26,6 +28,13 @@ class Connection : public std::enable_shared_from_this<Connection> {
       : Connection(std::move(peer), std::move(socket), std::chrono::milliseconds(0)) {}
 
   virtual ~Connection();
+
+  /// Whether this process computes the frames' checksums (xxhash32 of the data and of the
+  /// attached buffer). Off by default: TCP checksums the segments already. A receiver verifies a
+  /// frame whose checksum is not 0, so peers with different settings interoperate. File transfers
+  /// are always checksummed.
+  static void set_frame_checksums(bool on);
+  static bool frame_checksums();
 
   template <class ConnectionType, typename... Args>
   static shared_ptr<ConnectionType> create(Args&&... args) {
@@ -76,7 +85,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
     write_data_internal(std::move(data), std::move(buff), std::move(handler));
   }
 
-  void write_data(Data data, std::function<void(Result<void>)> handler = [](Result<void>) {}) {
+  void write_data(
+      Data                              data,
+      std::function<void(Result<void>)> handler = [](Result<void>) {}) {
     assert(handler);
     write_data_internal(std::move(data), {}, std::move(handler));
   }

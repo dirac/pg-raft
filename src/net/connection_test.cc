@@ -67,7 +67,7 @@ struct T {
 
   template <class Archive>
   void serialize(Archive& ar, unsigned int const /*version*/) {
-    ar & elements;
+    ar& elements;
   }
 
   static T instance(unsigned e) {
@@ -152,11 +152,14 @@ struct TestSetup {
   shared_ptr<TestConnection> client;
 };
 
-BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::timeout(60)) {
-  auto conn = connect();
+namespace {
+
+/// Messages with an attached buffer, both ways (frame checksums as set).
+void messages_with_buffer_test(TestSetup& s) {
+  auto conn = s.connect();
 
   BOOST_REQUIRE(conn);
-  BOOST_REQUIRE(client);
+  BOOST_REQUIRE(s.client);
 
   auto t1 = T::instance(3 * kPageSize);
   auto t2 = T::instance(5 * kPageSize);
@@ -176,7 +179,7 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::tim
   unsigned k;
   unsigned p = 0;
   for (k = 0; k < 2; ++k) {
-    std::swap(conn, client);
+    std::swap(conn, s.client);
 
     p++;
     for (unsigned i = 0; i < 2; ++i) {
@@ -191,12 +194,12 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::tim
 
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-      client->self()->read_data_and_buff([&t1, &c, &b1](Result<std::tuple<Data, Bytes>> r) {
+      s.client->self()->read_data_and_buff([&t1, &c, &b1](Result<std::tuple<Data, Bytes>> r) {
         BOOST_TEST((t1 == from_data<T>(std::get<Data>(r.value())).value()));
         BOOST_TEST(b1 == std::get<Bytes>(r.value()));
         c.fetch_add(1);
       });
-      client->self()->read_data_and_buff([&t2, &c, &b2](Result<std::tuple<Data, Bytes>> r) {
+      s.client->self()->read_data_and_buff([&t2, &c, &b2](Result<std::tuple<Data, Bytes>> r) {
         BOOST_TEST((t2 == from_data<T>(std::get<Data>(r.value())).value()));
         BOOST_TEST(b2 == std::get<Bytes>(r.value()));
         c.fetch_add(1);
@@ -212,7 +215,26 @@ BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, * boost::unit_test::tim
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(messages, TestSetup, * boost::unit_test::timeout(60)) {
+/// Frame checksums on for the test (off is the default).
+struct ChecksumSetup : TestSetup {
+  ChecksumSetup() { Connection::set_frame_checksums(true); }
+  ~ChecksumSetup() { Connection::set_frame_checksums(false); }
+};
+
+}  // namespace
+
+BOOST_FIXTURE_TEST_CASE(messages_with_buffer, TestSetup, *boost::unit_test::timeout(60)) {
+  BOOST_TEST(!Connection::frame_checksums());  // the default
+  messages_with_buffer_test(*this);
+}
+
+BOOST_FIXTURE_TEST_CASE(messages_with_buffer_checksummed,
+                        ChecksumSetup,
+                        *boost::unit_test::timeout(60)) {
+  messages_with_buffer_test(*this);
+}
+
+BOOST_FIXTURE_TEST_CASE(messages, TestSetup, *boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_REQUIRE(conn);
@@ -324,7 +346,7 @@ BOOST_FIXTURE_TEST_CASE(messages, TestSetup, * boost::unit_test::timeout(60)) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(status, TestSetup, * boost::unit_test::timeout(60)) {
+BOOST_FIXTURE_TEST_CASE(status, TestSetup, *boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_TEST(conn);
@@ -342,7 +364,7 @@ BOOST_FIXTURE_TEST_CASE(status, TestSetup, * boost::unit_test::timeout(60)) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup, * boost::unit_test::timeout(60)) {
+BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup, *boost::unit_test::timeout(60)) {
   auto conn = connect(std::chrono::milliseconds(1000));
 
   BOOST_TEST(conn);
@@ -360,7 +382,7 @@ BOOST_FIXTURE_TEST_CASE(bg_status, TestSetup, * boost::unit_test::timeout(60)) {
   conn->shutdown();
 }
 
-BOOST_FIXTURE_TEST_CASE(files, TestSetup, * boost::unit_test::timeout(60)) {
+BOOST_FIXTURE_TEST_CASE(files, TestSetup, *boost::unit_test::timeout(60)) {
   auto conn = connect();
 
   BOOST_TEST(conn);

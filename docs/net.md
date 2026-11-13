@@ -82,11 +82,15 @@ call.
 
 | Kind (`w2 >> 30`) | Header | Body |
 |---|---|---|
-| `0b0x` **data** | `w2` = data size (< 2³¹), `w3` = attached size, `w4` = xxhash32(data), `w5` = xxhash32(attached) | data bytes, then the attached bytes |
+| `0b0x` **data** | `w2` = data size (< 2³¹), `w3` = attached size, `w4` = xxhash32(data), `w5` = xxhash32(attached), or 0 when not computed | data bytes, then the attached bytes |
 | `0b10` **file** | `w2` = `0x80000000 \| size>>32`, `w3` = `size & 0xFFFFFFFF` | chunks of `[xxhash32 of the chunk][up to 64 KiB]` |
 | `0b11` **status** | `w2 & 0xFF` = 0 for a request, or `s+1` for a response carrying peer status `s` (0–254) | none |
 
-The receiver drops the connection with `EBADMSG` on a checksum mismatch. On a bad magic number
+Data frames are checksummed only when `Connection::set_frame_checksums(true)` (config
+`frame_checksums`, off by default: TCP checksums the segments already, and xxhash32 of every frame
+was a noticeable part of a commit); a sender with them off writes 0, and a receiver verifies a
+non-zero checksum only, so peers with different settings interoperate. File chunks are always
+checksummed. The receiver drops the connection with `EBADMSG` on a checksum mismatch. On a bad magic number
 or frame counter it **stops reading**, because the sizes in that header can't be trusted, and
 shuts down.
 

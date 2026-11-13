@@ -45,6 +45,7 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 | `leader_sync` | the leader msyncs its WAL (PostgreSQL's `pg_wal` and raft's copy) before appending the `FlushOp` | `false` |
 | `follower_sync` | a follower msyncs the WAL blocks it receives before acknowledging them (raft `Options::follower_sync`), and its standby's fsync msyncs | `false` |
 | `write_op_bytes` | on the leader, the WAL written since the last flush goes with the next flush (one raft entry per fsync), or as a `WriteOp` of its own as soon as this many bytes of a segment are pending | `65536` |
+| `frame_checksums` | xxhash32 of every network frame raft sends; TCP checksums the segments already (LMDB's page checksums, for crash recovery, are always on) | `false` |
 | `log_sync` | the raft log (LMDB) is synced on every commit (raft `Options::sync_commits`); off, it is `MDB_NOSYNC` and synced in the background within a second | `false` |
 
 With the three syncs off (the default), a commit is durable once a majority has the WAL in its

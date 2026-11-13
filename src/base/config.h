@@ -61,6 +61,9 @@ struct Config {
   /// flush (one raft entry per fsync), or as soon as this much of a segment is pending (a WriteOp
   /// of its own), so that a large transaction streams its WAL before its commit.
   uint64_t write_op_bytes = 64 * 1024;
+  /// frame_checksums: xxhash32 of every network frame raft sends (TCP checksums the segments
+  /// already; LMDB's page checksums, for crash recovery, are always on).
+  bool frame_checksums = false;
   /// log_sync: every commit of the raft log (LMDB) is synced. Off: MDB_NOSYNC, and a background
   /// thread syncs the log within a second.
   bool log_sync = false;
