@@ -95,9 +95,11 @@ struct Writer {
         std::this_thread::sleep_for(10ms);  // No leader, or a new one: try again shortly.
       }
 
-      // Now and then an fsync, the durability barrier.
+      // Now and then an fsync, the durability barrier. The WriteOps carried the bytes: an empty
+      // FlushOp, as NodeWalTracker sends with nothing pending (a FlushOp carries its range's bytes,
+      // so one from offset 0 would resend the segment so far).
       if ((++n % 16U) == 0) {
-        auto const flush = FlushOp{.offset = 0, .size = static_cast<size_t>(op.offset) + size};
+        auto const flush = FlushOp{.offset = op.offset + static_cast<off_t>(size), .size = 0};
         (void)exec(s, WalCommand{.flushed_lsn = flushed, .segment = lsn, .command = flush});
       }
 

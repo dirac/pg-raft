@@ -269,7 +269,7 @@ Integration tests use PostgreSQL at `/opt/pg_raft/postgresql/17/bin`. All auto-s
 - **`xxhash_test`** — known xxHash32 vectors and multi-buffer equivalence.
 - **`archive_test`** — `RawOArchive` / `RawIArchive` (`src/base/archive.h`) write the bytes of `binary_oarchive` with `no_header`, round-trip from memory and from a streambuf, and throw on truncated input.
 - **`base_test`** — `log_seq_number()`: round trips with `filename()`, lower-case hex, the leading `/`, and the names it must reject.
-- **`data_test`** — `Data` text/binary round-trips. Takes ~50 s (60 s limit), so it times out under ASAN.
+- **`data_test`** — `Data` text/binary round-trips (~10 s).
 - **`connection_test`** — `Connection` messages (with one and two attached buffers), status, background heartbeats, files, the read-silence timeout and `timeout_and_times`. Passes under ASAN and TSAN.
 - **`async_connect_test`** — connect and handshake.
 - **`process_test`** — unit tests for `Process`.

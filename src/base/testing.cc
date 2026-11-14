@@ -69,12 +69,14 @@ std::filesystem::path TestBasePath::construct_base() {
     stringstream ss;
     ss << std::put_time(&tm, "%y-%m-%d-%H%M%S");
 
-    auto p = std::filesystem::temp_directory_path() / "pg_raft" / ss.str();
+    auto const root = std::filesystem::temp_directory_path() / "pg_raft";
+    std::filesystem::create_directories(root);
+    auto p = root / ss.str();
 
-    if (!std::filesystem::exists(p)) {
-      std::filesystem::create_directories(p);
+    // Claimed atomically: test binaries started in the same second (b2 -j) must not share a base
+    // directory, since the first to exit removes it.
+    if (std::filesystem::create_directory(p))
       return p;
-    }
     std::this_thread::sleep_for(1000ms);
   }
 }

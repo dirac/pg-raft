@@ -112,6 +112,11 @@ bool WalSegment::Mapping::erase(unsigned t) const {
 }
 
 Result<void> WalSegment::fsync(off_t offset, size_t size) {
+  // Nothing to sync (WalFuseSegment::fsync asks even for an empty range); msync of 0 bytes fails
+  // with EINVAL on macOS.
+  if (size == 0)
+    return ok();
+
   off_t p_offset = (offset / getpagesize()) * getpagesize();
 
   size += u8(offset - p_offset);

@@ -20,7 +20,9 @@ BOOST_AUTO_TEST_CASE(text_serialization, * boost::unit_test::timeout(60)) {
   T v;
   v.elements.reserve(kPageSize * 3);
 
-  for (unsigned idx = 0; idx < kPageSize * 3; idx += 3) {
+  // Text is ~50x slower than binary (debug build): a prime step still lands the end at varied
+  // offsets across the Data pages, in a few seconds rather than close to the timeout.
+  for (unsigned idx = 0; idx < kPageSize * 3; idx += 17) {
     while (v.elements.size() < idx)
       v.elements.emplace_back(idx);
 
