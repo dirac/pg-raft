@@ -74,8 +74,8 @@ std::string boost_bytes(Outer const& o) {
 
 std::string hex(std::string const& s) {
   std::string r;
-  for (unsigned char c : s)
-    r += std::format("{:02x}", c);
+  for (char c : s)
+    r += std::format("{:02x}", static_cast<unsigned char>(c));
   return r;
 }
 
