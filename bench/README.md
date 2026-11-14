@@ -303,6 +303,25 @@ Every commit checksums (xxhash32) and writes each page it dirties, and the pages
 (`MDB_WRITEMAP`, which would save the `pwrite` of each dirty page, makes this LMDB, the 1.0
 branch, assert in `mdb_freelist_save` on large transactions; not used.)
 
+### 2026-11-13: checksums, and spinning on the commit
+
+Experiments (fresh cluster each, direct, 60 s warm-up, 300 s):
+
+| Run | tps | latency avg | `END` (commit) |
+|---|---|---|---|
+| baseline | 33,608 | 0.473 ms | 0.236 ms |
+| the FUSE thread spins 50 µs on the commit before sleeping | 33,336 | 0.477 ms | 0.232 ms |
+| spins 200 µs | 33,308 | 0.477 ms | 0.232 ms |
+| no checksums at all (frames and LMDB's pages) | 33,994 | 0.468 ms | 0.226 ms |
+| frame checksums off (`frame_checksums = false`, the default now) | 33,814 | 0.470 ms | 0.233 ms |
+| + a CRC-32C per log entry, LMDB's page checksums off (the default now) | **33,901** | 0.469 ms | 0.227 ms |
+| + a CRC-32C per log entry, and LMDB's page checksums | 33,223 | 0.479 ms | 0.237 ms |
+
+Spinning saves a wake-up but costs more CPU than it gains: not kept. The network frames' xxhash32
+is off by default (TCP checksums the segments). The raft log's values carry a CRC-32C of their key
+and object, computed while serializing and checked by `RaftLog::verify()` (with the log starting at
+its first index and no index missing), in place of LMDB's page checksums.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all

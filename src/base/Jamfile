@@ -17,6 +17,7 @@ lib base
     error_code.cc
     xxhash.cc
     archive.cc
+    crc32c.cc
     deps
   ;
 

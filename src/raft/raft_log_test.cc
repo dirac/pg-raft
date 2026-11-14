@@ -466,34 +466,99 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(mem, T, test_types) {
   }
 }
 
-// Every page of the log is checksummed (xxhash32): a page changed on disk is an error when read,
-// not wrong entries.
-BOOST_FIXTURE_TEST_CASE(corrupt_page_detected, Test) {
+// Every value of the log carries the CRC-32C of its key and object: verify() finds a value changed
+// on disk, though reads, which don't check it, still work.
+BOOST_FIXTURE_TEST_CASE(verify_finds_corrupt_value, Test) {
   BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 300, 1), false).value());
-  BOOST_REQUIRE(log.entries_from(RaftIndex(1), 300).value().value().size() == 300U);
+  BOOST_TEST(log.verify().has_value());
   log.close();
 
-  // Flip bytes in every page after the two meta pages.
+  // Entry 151's key (index, term) is in its leaf page, right before its value: flip a byte of the
+  // value, past its 4-byte CRC.
+  std::array<uint8_t, 16> key{};
+  auto const              idx  = ::to_mem<uint64_t>(151);
+  auto const              term = ::to_mem<uint64_t>(1);
+  std::memcpy(key.data(), idx.data(), 8);
+  std::memcpy(key.data() + 8, term.data(), 8);
+
   auto const file = log.logs_db();
-  auto const size = std::filesystem::file_size(file);
+  string     bytes;
+  {
+    std::ifstream in(file, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), {});
+  }
+  auto const at = bytes.find(string(reinterpret_cast<char const*>(key.data()), key.size()));
+  BOOST_REQUIRE(at != string::npos);
   {
     std::fstream f(file, std::ios::in | std::ios::out | std::ios::binary);
-    for (auto page = 2 * RaftLog::kLmdbPageSize; page < size; page += RaftLog::kLmdbPageSize)
-      for (auto off :
-           {page + 100, page + RaftLog::kLmdbPageSize / 2, page + RaftLog::kLmdbPageSize - 100}) {
-        f.seekg(static_cast<std::streamoff>(off));
-        char c = 0;
-        f.get(c);
-        f.seekp(static_cast<std::streamoff>(off));
-        f.put(static_cast<char>(c ^ 0x5A));
-      }
+    auto const   off = static_cast<std::streamoff>(at + key.size() + 4 + 6);
+    f.seekp(off);
+    f.put(static_cast<char>(bytes[static_cast<size_t>(off)] ^ 0x5A));
   }
 
-  // Reopening or reading fails: the corrupted pages are not trusted.
-  auto opened = log.open_logs_db();
-  if (opened.has_value()) {
-    auto r = log.entries_from(RaftIndex(1), 300);
-    BOOST_TEST((!r.has_value() || !r.value() || r.value()->size() != 300U ||
-                r.value()->at(150) != entry(151, 1, 150 * 8)));
+  BOOST_REQUIRE(log.open_logs_db().has_value());
+  BOOST_TEST(log.entries_from(RaftIndex(1), 300).has_value());  // reads don't check
+  auto r = log.verify();
+  BOOST_REQUIRE(!r.has_value());
+  BOOST_TEST(r.error() == system_error_code(EBADMSG));
+}
+
+// verify() of a sound log: the sentinel alone, entries across a term change, and a compacted log
+// (starting at its state's first_idx); and of a log that doesn't start where its state says.
+BOOST_FIXTURE_TEST_CASE(verify_of_a_good_log, Test) {
+  BOOST_TEST(log.verify().has_value());  // the (0, 0) sentinel only
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 50, 1), false).value());
+  BOOST_TEST(log.append_entries(RaftIndex(50), RaftTerm(1), entries(51, 50, 2), false).value());
+  BOOST_TEST(log.verify().has_value());
+
+  auto const bound = RaftState{.log_idx = RaftIndex(39), .timestamp = 39};
+  BOOST_TEST(
+      log.compact(RaftIndex(40),
+                  RaftState{.log_idx = RaftIndex(90), .timestamp = 90, .first_idx = RaftIndex(40)},
+                  bound)
+          .has_value());
+  BOOST_TEST(log.verify().has_value());
+
+  // Entries 40..49 deleted, but the state says the log starts at 45: entries are missing.
+  BOOST_TEST(
+      log.compact(RaftIndex(50),
+                  RaftState{.log_idx = RaftIndex(90), .timestamp = 90, .first_idx = RaftIndex(45)},
+                  bound)
+          .has_value());
+  auto r = log.verify();
+  BOOST_REQUIRE(!r.has_value());
+  BOOST_TEST(r.error() == system_error_code(EBADMSG));
+}
+
+// verify() finds a missing entry: the indexes must follow each other, without a gap.
+BOOST_FIXTURE_TEST_CASE(verify_finds_a_gap, Test) {
+  BOOST_TEST(log.append_entries(RaftIndex(0), RaftTerm(0), entries(1, 20, 1), false).value());
+  BOOST_TEST(log.verify().has_value());
+  log.close();
+
+  // Delete entry 10 behind the log's back.
+  {
+    MDB_env* env = nullptr;
+    BOOST_REQUIRE(mdb_env_create(&env) == 0);
+    BOOST_REQUIRE(mdb_env_set_maxdbs(env, 4) == 0);
+    BOOST_REQUIRE(mdb_env_open(env, log.logs_db().c_str(), MDB_NOSUBDIR, 0664) == 0);
+    MDB_txn* txn = nullptr;
+    BOOST_REQUIRE(mdb_txn_begin(env, nullptr, 0, &txn) == 0);
+    MDB_dbi dbi = 0;
+    BOOST_REQUIRE(mdb_dbi_open(txn, "logs_", 0, &dbi) == 0);
+    std::array<uint8_t, 16> key{};
+    auto const              idx  = ::to_mem<uint64_t>(10);
+    auto const              term = ::to_mem<uint64_t>(1);
+    std::memcpy(key.data(), idx.data(), 8);
+    std::memcpy(key.data() + 8, term.data(), 8);
+    MDB_val k{.mv_size = key.size(), .mv_data = key.data()};
+    BOOST_REQUIRE(mdb_del(txn, dbi, &k, nullptr) == 0);
+    BOOST_REQUIRE(mdb_txn_commit(txn) == 0);
+    mdb_env_close(env);
   }
+
+  BOOST_REQUIRE(log.open_logs_db().has_value());
+  auto r = log.verify();
+  BOOST_REQUIRE(!r.has_value());
+  BOOST_TEST(r.error() == system_error_code(EBADMSG));
 }

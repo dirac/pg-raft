@@ -1,6 +1,7 @@
 #include "src/raft/raft_log.h"
 
 #include "src/base/archive.h"
+#include "src/base/crc32c.h"
 #include "src/base/error_code.h"
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
@@ -40,18 +41,42 @@ struct Cleanup {
   std::function<void()> f_;
 };
 
-// The values: binary_oarchive's bytes (RawOArchive, no std::locale per entry), decoded in place
-// from LMDB's memory.
+// The values of the logs database: [CRC-32C, 4 bytes little-endian][the object, binary_oarchive's
+// bytes (RawOArchive)]. The CRC covers the key and the object; it is computed while serializing and
+// not checked when reading (RaftLog::verify() checks every value). LMDB's own page checksums are
+// off for this database.
+constexpr size_t kValueHeader = 4;
+
 template <typename T>
-string to_encoded_string(T const& t) {
-  string      out;
-  RawOArchive oa(out);
-  oa << t;
+string to_encoded_string(MDB_val const& key, T const& t) {
+  string out(kValueHeader, '\0');
+  auto   crc = crc32c(0, key.mv_data, key.mv_size);
+  {
+    RawOArchive oa(out, &crc);
+    oa << t;
+  }
+  crc = boost::endian::native_to_little(crc);
+  std::memcpy(out.data(), &crc, sizeof(crc));
   return out;
+}
+
+/// The CRC a value carries, and the one its key and object have.
+std::pair<uint32_t, uint32_t> value_crcs(MDB_val const& key, MDB_val const& val) {
+  if (val.mv_size < kValueHeader)
+    return {0U, 1U};
+  uint32_t stored = 0;
+  std::memcpy(&stored, val.mv_data, sizeof(stored));
+  auto crc = crc32c(0, key.mv_data, key.mv_size);
+  crc =
+      crc32c(crc, static_cast<char const*>(val.mv_data) + kValueHeader, val.mv_size - kValueHeader);
+  return {boost::endian::little_to_native(stored), crc};
 }
 
 template <typename T>
 Result<T> from_encoded_string(string_view str) {
+  if (str.size() < kValueHeader)
+    return system_error_code(EBADMSG);
+  str.remove_prefix(kValueHeader);  // the CRC: checked by verify() only
   try {
     T           t;
     RawIArchive ia(str.data(), str.size());
@@ -328,11 +353,8 @@ Result<void> RaftLog::open_logs_db(unsigned factor, std::filesystem::path const&
     return elog(
         system_error_code(rc), "env_set_pagesize to {0} failed : {1}", kLmdbPageSize, strerror(rc));
 
-  if (int rc = env_set_checksum(logs_env_, checksum_fn, sizeof(uint32_t)); rc != 0)
-    return elog(system_error_code(rc),
-                "env_set_checksum for file {0} failed : {1}",
-                logs_file,
-                strerror(rc));
+  // No LMDB page checksums here: every value carries a CRC-32C of its key and object, checked by
+  // verify(). (The term database has them.)
 
   // With sync_commits_ every commit syncs, otherwise the sync thread syncs the commits.
   // Not MDB_WRITEMAP: it would save the pwrite() of the dirty pages on each commit, but this LMDB
@@ -376,14 +398,14 @@ Result<void> RaftLog::open_logs_db(unsigned factor, std::filesystem::path const&
         empty = true;
 
         auto key_str = to_mem(RaftIndex{0}, RaftTerm{0});
-        auto val_str = to_encoded_string(Entry{
-            .time = 0,
-            .term = RaftTerm{0},
-            .cmd  = {},
-        });
-
-        key.mv_size = key_str.size();
-        key.mv_data = key_str.data();
+        key.mv_size  = key_str.size();
+        key.mv_data  = key_str.data();
+        auto val_str = to_encoded_string(key,
+                                         Entry{
+                                             .time = 0,
+                                             .term = RaftTerm{0},
+                                             .cmd  = {},
+                                         });
 
         val.mv_size = val_str.size();
         val.mv_data = val_str.data();
@@ -519,15 +541,15 @@ Result<RaftState> RaftLog::load_boundary() const {
 }
 
 int RaftLog::put_meta(MDB_txn* txn, RaftState const& state, RaftState const* boundary) {
-  auto    val_str = to_encoded_string(state);
   MDB_val key     = state_key();
+  auto    val_str = to_encoded_string(key, state);
   MDB_val val{.mv_size = val_str.size(), .mv_data = val_str.data()};
   if (auto rc = put(txn, meta_, &key, &val); rc != 0)
     return rc;
 
   if (boundary) {
-    auto    b_str = to_encoded_string(*boundary);
     MDB_val b_key = boundary_key();
+    auto    b_str = to_encoded_string(b_key, *boundary);
     MDB_val b_val{.mv_size = b_str.size(), .mv_data = b_str.data()};
     if (auto rc = put(txn, meta_, &b_key, &b_val); rc != 0)
       return rc;
@@ -786,10 +808,10 @@ Result<void> RaftLog::append_entries(RaftIndex const idx, vector<Entry> const& e
 
   size_t n = 0;
   for (Entry const& entry : entries) {
-    auto new_key_bytes  = to_mem(idx + (n++), entry.term);
-    auto new_val_string = to_encoded_string(entry);
-
+    auto    new_key_bytes = to_mem(idx + (n++), entry.term);
     MDB_val key{.mv_size = new_key_bytes.size(), .mv_data = new_key_bytes.data()};
+    auto    new_val_string = to_encoded_string(key, entry);
+
     MDB_val val{.mv_size = new_val_string.size(), .mv_data = new_val_string.data()};
 
     int rc = put(txn, logs_, &key, &val);
@@ -992,6 +1014,79 @@ Result<std::tuple<RaftTerm, RaftIndex>> RaftLog::last_entry() const {
 Result<std::tuple<RaftTerm, RaftIndex>> RaftLog::first_entry() const {
   ScopedHandleCheck const check;
   return entry(MDB_FIRST);
+}
+
+Result<void> RaftLog::verify() const {
+  ScopedHandleCheck const check;
+  auto                    lk = std::shared_lock<std::shared_mutex>{rmtx_};
+
+  MDB_txn* txn;
+  if (int rc = txn_rbegin(logs_env_, &txn); rc != 0)
+    return elog(system_error_code(rc), "txn_begin failed : {}", strerror(rc));
+  Cleanup abort{[this, txn] { txn_abort(txn); }};
+
+  auto bad = [](string const& what) {
+    return elog(system_error_code(EBADMSG), "verify: {}", what);
+  };
+
+  // The log starts at the state's first_idx (saved with the deletion of the entries before it, by
+  // compact() or install_snapshot()), or at the (0, 0) sentinel if it was never compacted: with the
+  // indexes following each other, no entry is missing up to the last one. (The last one has no such
+  // record: one written with every entry would be rolled back with it.)
+  RaftIndex first{0};
+  {
+    MDB_val key = state_key();
+    MDB_val val;
+    if (int rc = get(txn, meta_, &key, &val); rc == 0) {
+      auto state = from_encoded_string<RaftState>(
+          string_view{static_cast<char const*>(val.mv_data), val.mv_size});
+      if (!state)
+        return bad("the state does not decode");
+      first = state->first_idx;
+    } else if (rc != MDB_NOTFOUND) {
+      return elog(system_error_code(rc), "verify: get(state) failed : {}", strerror(rc));
+    }
+  }
+
+  for (MDB_dbi dbi : {logs_, meta_}) {
+    MDB_cursor* cursor;
+    if (int rc = cursor_open(txn, dbi, &cursor); rc != 0)
+      return elog(system_error_code(rc), "cursor_open failed : {}", strerror(rc));
+    Cleanup close{[this, cursor] { cursor_close(cursor); }};
+
+    std::optional<std::tuple<RaftIndex, RaftTerm>> prev;
+    MDB_val                                        key;
+    MDB_val                                        val;
+    int                                            rc = cursor_get(cursor, &key, &val, MDB_FIRST);
+    for (; rc == 0; rc = cursor_get(cursor, &key, &val, MDB_NEXT)) {
+      if (auto [stored, computed] = value_crcs(key, val); stored != computed)
+        return bad(std::format("{} value of {} bytes: CRC {:08x}, stored {:08x}",
+                               dbi == logs_ ? "an entry" : "a state",
+                               val.mv_size,
+                               computed,
+                               stored));
+      if (dbi != logs_)
+        continue;
+      if (key.mv_size != 16)
+        return bad(std::format("an entry key of {} bytes", key.mv_size));
+      auto const cur = from_mem<RaftIndex, RaftTerm>(static_cast<uint8_t const*>(key.mv_data));
+      if (!prev && std::get<RaftIndex>(cur) != first)
+        return bad(std::format("the log starts at {}, the state's first entry is {}",
+                               std::get<RaftIndex>(cur),
+                               first));
+      if (prev && (std::get<RaftIndex>(cur) != std::get<RaftIndex>(*prev) + 1U ||
+                   std::get<RaftTerm>(cur) < std::get<RaftTerm>(*prev)))
+        return bad(std::format("entry {} (term {}) after {} (term {})",
+                               std::get<RaftIndex>(cur),
+                               std::get<RaftTerm>(cur),
+                               std::get<RaftIndex>(*prev),
+                               std::get<RaftTerm>(*prev)));
+      prev = cur;
+    }
+    if (rc != MDB_NOTFOUND)
+      return elog(system_error_code(rc), "verify: cursor_get failed : {}", strerror(rc));
+  }
+  return ok();
 }
 
 Result<std::optional<vector<Entry>>> RaftLog::entries_from(RaftIndex const idx,

@@ -53,6 +53,12 @@ class RaftLog {
   /// The term of the entry at the index.
   Result<std::optional<RaftTerm>> get_term(RaftIndex idx) const;
 
+  /// The sanity check of the logs database (after a crash, or on demand): every value's CRC-32C
+  /// (of its key and object; computed when written, not checked by the reads), the log starting at
+  /// the saved state's first_idx (0 if never compacted), the entries' indexes consecutive, their
+  /// terms never decreasing. EBADMSG, logged, on the first problem.
+  Result<void> verify() const;
+
   /// Save the state and truncate the logs before state.log_idx - log_size.
   Result<void> save_snapshot(RaftState const& state, unsigned log_size = 4096);
 

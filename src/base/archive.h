@@ -25,12 +25,19 @@
 #include <streambuf>
 #include <string>
 
+#include "src/base/crc32c.h"
+
 class RawOArchive : public boost::archive::basic_binary_oarchive<RawOArchive> {
  public:
   explicit RawOArchive(std::streambuf& sb)
       : boost::archive::basic_binary_oarchive<RawOArchive>(boost::archive::no_header), sb_(&sb) {}
   explicit RawOArchive(std::string& out)
       : boost::archive::basic_binary_oarchive<RawOArchive>(boost::archive::no_header), str_(&out) {}
+  /// Also updates *crc (crc32c()) with every byte written, while writing them.
+  RawOArchive(std::string& out, uint32_t* crc)
+      : boost::archive::basic_binary_oarchive<RawOArchive>(boost::archive::no_header),
+        str_(&out),
+        crc_(crc) {}
 
   // The primitive layer (what basic_binary_oprimitive does).
   template <class T>
@@ -50,6 +57,8 @@ class RawOArchive : public boost::archive::basic_binary_oarchive<RawOArchive> {
   }
 
   void save_binary(void const* address, std::size_t count) {
+    if (crc_)
+      *crc_ = crc32c(*crc_, address, count);
     if (str_) {
       str_->append(static_cast<char const*>(address), count);
       return;
@@ -79,6 +88,7 @@ class RawOArchive : public boost::archive::basic_binary_oarchive<RawOArchive> {
  private:
   std::streambuf* sb_  = nullptr;
   std::string*    str_ = nullptr;
+  uint32_t*       crc_ = nullptr;
 };
 
 class RawIArchive : public boost::archive::basic_binary_iarchive<RawIArchive> {

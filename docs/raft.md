@@ -109,7 +109,11 @@ replicates (`raft_ensemble_needs_backup_test`).
 
 `RaftLog` keeps:
 
-- Page checksums (xxhash32) and 16 KiB pages.
+- 4 KiB pages. No LMDB page checksums on the logs database: every value is
+  `[CRC-32C of its key and object][the object]`, the CRC computed while serializing (`RawOArchive`)
+  and not checked by the reads; `RaftLog::verify()` checks every value, that the log starts at the
+  saved state's `first_idx` (or the `(0, 0)` sentinel) and that no index is missing after it, and
+  that the terms never decrease. The term database (term, vote) has LMDB's page checksums (xxhash32).
 - The thread-local check that no transaction or cursor leaks.
 - A background sync thread, unless `sync_commits` is set (`no_sync` is for tests only).
 

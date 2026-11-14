@@ -1,6 +1,7 @@
 #define BOOST_TEST_MODULE base
 #include "src/base/base.h"
 
+#include "src/base/crc32c.h"
 #include "src/base/testing.h"
 
 // log_seq_number(): a WAL segment's file name to its timeline and start LSN.
@@ -38,4 +39,28 @@ BOOST_AUTO_TEST_CASE(log_seq_number_rejects) {
                            "00000001 000000000000003",
                            "xlogtemp.123"})
     BOOST_TEST(!log_seq_number(name).has_value(), name);
+}
+
+// crc32c(): the standard check value, and incremental use.
+
+BOOST_AUTO_TEST_CASE(crc32c_values) {
+  BOOST_TEST(crc32c(0, "123456789", 9) == 0xE3069283U);
+  BOOST_TEST(crc32c_portable(0, "123456789", 9) == 0xE3069283U);
+  BOOST_TEST(crc32c(0, "", 0) == 0U);
+
+  auto rd   = std::mt19937{42};
+  auto data = std::vector<unsigned char>(1000);
+  for (auto& c : data)
+    c = static_cast<unsigned char>(rd());
+  auto const whole = crc32c(0, data.data(), data.size());
+  // In pieces of every alignment (the hardware path takes 8 bytes at a time).
+  for (size_t cut :
+       {size_t{0}, size_t{1}, size_t{7}, size_t{8}, size_t{13}, size_t{500}, size_t{999}}) {
+    BOOST_TEST(crc32c(crc32c(0, data.data(), cut), data.data() + cut, data.size() - cut) == whole,
+               cut);
+    BOOST_TEST(
+        crc32c_portable(
+            crc32c_portable(0, data.data(), cut), data.data() + cut, data.size() - cut) == whole,
+        cut);
+  }
 }
