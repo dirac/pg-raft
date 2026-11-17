@@ -93,6 +93,18 @@ Streaming replication:
 One PostgreSQL: `./solo/prepare.sh` and `./solo/init.sh` on the database machine, `./solo/bench.sh`
 on the client.
 
+`multi/` does all of this from the client machine over ssh, for one client, one proxy machine and
+five node machines (3- or 5-node clusters). The machines are listed in `~/machines.txt`: the proxy
+first, then the nodes; the machine running the scripts is the client. Each machine has its local
+files in `/data/bench`, and the binaries, backups and results are in `~/shared/pg_raft`, a directory
+every machine mounts:
+
+```bash
+./multi/deploy.sh                    # configs, a release build, bench/ copied to every machine
+./multi/run.sh raft 3                # one setup on a fresh cluster: a sweep over client counts
+SWEEP="10 25 50 100 125 150" ./multi/all.sh    # solo, std 3, std 5, raft 3, raft 5, then summary.sh
+```
+
 Connections from other machines need `pg_hba` lines: in `raft/config.toml` (`pg_hba`, written by
 `init.sh`; the client's network, for the proxy) and `std/cluster.sh` (`PG_HBA`; the standbys'
 `replication` and the client's network). Without them only 127.0.0.1 is trusted, and pg-raft asks
@@ -151,6 +163,15 @@ per-statement latencies) and `summary.txt`.
 | `start.sh`, `stop.sh` | start / stop it |
 | `bench.sh [--no-init]` | pgbench against it |
 | `reset.sh --yes` | `prepare.sh` |
+
+| `multi/` | |
+|---|---|
+| `lib.sh` | the roles (from `~/machines.txt`), `/data/bench`, `~/shared/pg_raft`, `on HOST CMD` |
+| `gen.sh` | the configs for 3 and 5 nodes and for solo, in `multi/gen/` |
+| `deploy.sh [--no-build]` | `gen.sh`, a release build into `~/shared/pg_raft/bin`, bench/ copied to every machine, the binaries installed |
+| `run.sh solo \| std N \| raft N \| stop` | one setup on a fresh cluster, pgbench at each client count in `SWEEP` (pg-raft: through the proxy and direct), then stop it and copy the results to `~/shared/pg_raft/results` |
+| `all.sh [setups]` | every setup in turn, then `summary.sh` |
+| `summary.sh [dir]` | one table (`summary.md`, `summary.csv`) from the results' `run.log`s |
 
 ## Results
 
@@ -321,6 +342,63 @@ Spinning saves a wake-up but costs more CPU than it gains: not kept. The network
 is off by default (TCP checksums the segments). The raft log's values carry a CRC-32C of their key
 and object, computed while serializing and checked by `RaftLog::verify()` (with the log starting at
 its first index and no index missing), in place of LMDB's page checksums.
+
+### 2026-11-17: seven machines, 3 and 5 nodes, 10 to 150 clients
+
+Seven EC2 `m9gd.4xlarge` machines (16 vCPUs, aarch64, 61 GB, local NVMe) in one availability zone:
+pgbench on one machine, the pg-raft proxy on another, and the PostgreSQL nodes on up to five
+others, one node per machine (`multi/`). PostgreSQL 17.9, `max_connections = 200`. pg-raft was at
+`d5e7a0a` (release build, `variant=release`, gcc 14) with no disk syncs on the commit path. Streaming replication used
+quorum sync: `ANY 1 (s1, s2)` with 3 nodes and `ANY 2 (s1, s2, s3, s4)` with 5. Solo is one
+PostgreSQL on a node machine.
+
+Each run used scale 100 and the TPC-B-like script, with `min(clients, 8)` pgbench threads, a 30 s
+warm-up and 120 s measured. Each setup ran on a fresh cluster for 10, 25, 50 and 100 clients, one
+point after another on the same tables. A second series ran 125 and 150 clients, again on a fresh
+cluster per setup. pg-raft ran each point both through the proxy and directly to the primary.
+
+tps:
+
+| Setup | Nodes | 10 | 25 | 50 | 100 | 125 | 150 |
+|---|---|---|---|---|---|---|---|
+| solo | 1 | 9,199 | 17,585 | 32,838 | 49,488 | **52,156** | 50,902 |
+| streaming replication | 3 | 7,324 | 14,404 | 25,897 | 42,292 | **43,462** | 41,606 |
+| streaming replication | 5 | 6,447 | 13,981 | 25,036 | 40,895 | 44,066 | **45,793** |
+| pg-raft, direct | 3 | 7,090 | 14,297 | 22,921 | 37,995 | **43,001** | 42,924 |
+| pg-raft, direct | 5 | 7,371 | 14,304 | 22,654 | 37,965 | 42,027 | **43,381** |
+| pg-raft, through the proxy | 3 | 4,904 | 8,538 | 15,348 | 27,954 | 33,722 | **37,315** |
+| pg-raft, through the proxy | 5 | 4,392 | 8,941 | 15,342 | 27,823 | 33,259 | **36,623** |
+
+At 150 clients:
+
+| Setup | Nodes | tps | % of solo | % of streaming replication | latency avg | latency stddev | `END` (commit) |
+|---|---|---|---|---|---|---|---|
+| solo | 1 | 50,902 | 100% | | 2.941 ms | 1.035 ms | 0.551 ms |
+| streaming replication | 3 | 41,606 | 82% | 100% | 3.599 ms | 1.581 ms | 0.909 ms |
+| pg-raft, direct | 3 | 42,924 | 84% | **103%** | 3.489 ms | 2.547 ms | 0.950 ms |
+| pg-raft, through the proxy | 3 | 37,315 | 73% | 90% | 4.013 ms | 2.585 ms | 0.908 ms |
+| streaming replication | 5 | 45,793 | 90% | 100% | 3.270 ms | 1.372 ms | 0.829 ms |
+| pg-raft, direct | 5 | 43,381 | 85% | **95%** | 3.452 ms | 2.552 ms | 0.958 ms |
+| pg-raft, through the proxy | 5 | 36,623 | 72% | 80% | 4.090 ms | 2.448 ms | 0.937 ms |
+
+- **Most setups stop scaling at about 125 clients.** Solo peaks at about 52k tps. Streaming
+  replication and pg-raft direct peak at about 43k with 3 nodes, and 43–46k with 5.
+- **At its peak, pg-raft direct matches streaming replication.** With 3 nodes it reaches 99% of
+  streaming replication at 125 clients and 103% at 150. With 5 nodes it reaches 95% at both. It
+  trails more in the middle of the range, at 88–93% from 50 to 100 clients. On one machine it was at
+  89% with 16 clients.
+- **5 nodes cost pg-raft almost nothing.** A commit waits for a majority, 3 of 5, and the followers
+  acknowledge in parallel. Its direct throughput is within 2% of 3 nodes' at every point.
+- **The proxy's cost shrinks as clients are added.** Through the proxy, pg-raft gets 60–69% of its
+  direct throughput at 10 clients, 73–74% at 100 and 84–87% at 150, and it was still rising at 150.
+  The extra hop adds latency to every statement but costs little throughput once the primary is
+  the limit.
+- **pg-raft's latency varies more.** Its stddev is 2–3 times streaming replication's up to 125
+  clients, and about 2.5 ms against 1.4–1.6 ms at 150.
+- **Some differences at 125 and 150 clients are noise.** Those points ran on fresh tables, while the
+  points up to 100 ran one after another on the same tables. That may explain part of the jump from
+  100 to 125 clients, and why 5-node streaming replication overtakes 3-node there after trailing it
+  up to 100. Treat differences of a few percent between those points as noise.
 
 ## pg-raft notes
 
