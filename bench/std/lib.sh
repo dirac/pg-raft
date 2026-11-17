@@ -10,6 +10,13 @@ NODE_COUNT=${#PORTS[@]}
 
 node_dir() { echo "$DATA_ROOT/pg$1"; }
 
+# 'ANY k (s1, ..., s<N-1>)' with k = N/2 standbys: with the primary, a majority of the N nodes.
+sync_standby_names() {
+  local names="" id
+  for ((id = 1; id < NODE_COUNT; id++)); do names+="${names:+, }s$id"; done
+  echo "ANY $((NODE_COUNT / 2)) ($names)"
+}
+
 # Whether node ID's data directory is on this machine.
 local_node() { [[ -f "$(node_dir "$1")/PG_VERSION" ]]; }
 
@@ -29,8 +36,8 @@ stop_pg() {  # stop_pg ID
   "$PG_BIN/pg_ctl" -D "$(node_dir "$id")" -m fast -w -t 120 stop > /dev/null && log "pg$id stopped"
 }
 
-# wait_quorum TIMEOUT_SECS: until the primary accepts connections and both standbys stream as
-# quorum members. Works from any machine that pg_hba lets in.
+# wait_quorum TIMEOUT_SECS: until the primary accepts connections and every standby streams as a
+# quorum member. Works from any machine that pg_hba lets in.
 wait_quorum() {
   local timeout=$1 host=${HOSTS[0]} port=${PORTS[0]} i n=0
   wait_ready "$host" "$port" "$timeout" || { echo "the primary ($host:$port) is not ready" >&2; return 1; }

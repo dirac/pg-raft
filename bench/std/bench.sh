@@ -15,6 +15,6 @@ for a in "$@"; do
   esac
 done
 
-# Both standbys must be quorum members: otherwise commits block, or aren't replicated.
+# Every standby must be a quorum member: otherwise commits block, or aren't replicated.
 wait_quorum 30 || die "the cluster is not ready (./std/wait.sh)"
 run_pgbench std "${HOSTS[0]}" "${PORTS[0]}" "$skip_init"

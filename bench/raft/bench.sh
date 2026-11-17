@@ -34,7 +34,7 @@ if (( libpq )); then
 elif (( direct )); then
   host="$(server_field "$id" hostname)" port="$(server_field "$id" pg_port)" setup=raft-direct
 else
-  host=127.0.0.1 port="$PROXY_PG_PORT" setup=raft-proxy
+  host="$PROXY_HOST" port="$PROXY_PG_PORT" setup=raft-proxy
 fi
 log "primary is server $id; benchmarking $host:$port"
 run_pgbench "$setup" "$host" "$port" "$skip_init"

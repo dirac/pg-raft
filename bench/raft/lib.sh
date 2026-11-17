@@ -15,6 +15,8 @@ BACKUP_STORE="$(cfg backup_store)"
 PROXY_PG_PORT="$(cfg proxy_pg_port)"
 PROXY_HTTP_PORT="$(cfg proxy_http_port)"
 NODE_COUNT="$(grep -c '^\[\[server\]\]' "$CONFIG")"
+# Where the proxy runs (pgbench, wait.sh and stop.sh reach it there): this machine by default.
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 
 # server_field ID FIELD: hostname / pg_port / ha_port of server ID.
 server_field() {
@@ -27,7 +29,7 @@ server_field() {
 pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
 # primary_json: the proxy's view of the primary ({"server": N, ...} or {"server": null}).
-primary_json() { curl -s --max-time 2 "http://127.0.0.1:$PROXY_HTTP_PORT/primary.json"; }
+primary_json() { curl -s --max-time 2 "http://$PROXY_HOST:$PROXY_HTTP_PORT/primary.json"; }
 
 # primary_id: the serving primary's server index, or nothing.
 primary_id() {
@@ -65,7 +67,7 @@ wait_primary() {
   local timeout=$1 i id
   for ((i = 0; i < timeout * 2; i++)); do
     id="$(primary_id)"
-    if [[ -n "$id" ]] && "$PG_BIN/pg_isready" -q -h 127.0.0.1 -p "$PROXY_PG_PORT" -d postgres; then
+    if [[ -n "$id" ]] && "$PG_BIN/pg_isready" -q -h "$PROXY_HOST" -p "$PROXY_PG_PORT" -d postgres; then
       echo "$id"
       return 0
     fi

@@ -54,11 +54,12 @@ psql_val() {
 # run_pgbench SETUP HOST PORT: initialize, then run; results in $RESULTS_DIR/<setup>-<time>/.
 run_pgbench() {
   local setup=$1 host=$2 port=$3 skip_init=$4
-  local out="$RESULTS_DIR/$setup-$(date +%Y%m%d-%H%M%S)"
+  # RESULT_TAG (e.g. n3-c50) goes into the directory name.
+  local out="$RESULTS_DIR/$setup${RESULT_TAG:+-$RESULT_TAG}-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$out"
 
   {
-    echo "setup=$setup host=$host port=$port"
+    echo "setup=$setup host=$host port=$port tag=${RESULT_TAG:-}"
     echo "scale=$SCALE clients=$CLIENTS threads=$THREADS warmup=$WARMUP duration=$DURATION args=$PGBENCH_ARGS"
     echo "date=$(date -Is) host=$(hostname) nproc=$(nproc)"
     for s in $COMPARED_SETTINGS; do
