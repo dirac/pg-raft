@@ -8,8 +8,10 @@
 #
 # Settings (env): SWEEP (client counts, "10 25 50 100"), MAX_THREADS (pgbench -j = min(clients,
 # this), 8), WARMUP (30 s per point), DURATION (120 s per point), SCALE (100), RAFT_MODES
-# ("proxy direct"), PGBENCH_ARGS. The tables are loaded once, at the sweep's first point.
-# Results: $REMOTE_DIR/results/<setup>-n<N>-c<clients>-<time>/ here, copied to $SHARED/results.
+# ("proxy direct"), PGBENCH_ARGS, VARIANT (a name for the configuration, e.g. sync, put in the
+# results' names). The tables are loaded once, at the sweep's first point.
+# Results: $REMOTE_DIR/results/<setup>[-<variant>]-n<N>-c<clients>-<time>/ here, copied to
+# $SHARED/results.
 set -euo pipefail
 : "${WARMUP:=30}" "${DURATION:=120}"
 source "$(dirname "$0")/lib.sh"
@@ -40,7 +42,7 @@ sweep() {
       (( first )) || args+=" --no-init"
       first=0
       log "== $dir n=$n clients=$c ${mode:+($mode)}"
-      on "$CLIENT_HOST" "$env RESULT_TAG=n$n-c$c CLIENTS=$c THREADS=$(( c < MAX_THREADS ? c : MAX_THREADS )) \
+      on "$CLIENT_HOST" "$env RESULT_TAG=${VARIANT:+$VARIANT-}n$n-c$c CLIENTS=$c THREADS=$(( c < MAX_THREADS ? c : MAX_THREADS )) \
         SCALE=$SCALE WARMUP=$WARMUP DURATION=$DURATION PGBENCH_ARGS='$PGBENCH_ARGS' ./$dir/bench.sh $args"
     done
   done
@@ -121,6 +123,6 @@ case "${1:-}" in
   std)  [[ "${2:-}" =~ ^[35]$ ]] || die "usage: run.sh std 3|5"; run_std "$2" ;;
   raft) [[ "${2:-}" =~ ^[35]$ ]] || die "usage: run.sh raft 3|5"; run_raft "$2" ;;
   stop) stop_all ;;
-  *) sed -n '2,14p' "$0"; exit 1 ;;
+  *) sed -n '2,16p' "$0"; exit 1 ;;
 esac
 log "done: $*"
