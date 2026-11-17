@@ -15,6 +15,10 @@ class Fuse {
   Fuse(Fuse const&)            = delete;
   Fuse& operator=(Fuse const&) = delete;
 
+  // Before start(): run libfuse's multithreaded loop (fuse_loop_mt), one request per thread, instead
+  // of the single-threaded fuse_loop (the default), which handles one request at a time.
+  void set_multithreaded(bool mt) { multithreaded_ = mt; }
+
   bool start(int timeout_ms = 5000);
   void stop();
   bool is_mounted() const { return mounted_.load(); }
@@ -33,4 +37,5 @@ class Fuse {
 
   std::thread       loop_thread_;
   std::atomic<bool> mounted_{false};
+  bool              multithreaded_ = false;
 };

@@ -66,5 +66,8 @@ void Fuse::stop() {
 }
 
 void Fuse::run_loop() {
-  fuse_loop(fuse_);
+  if (multithreaded_)
+    fuse_loop_mt(fuse_);
+  else
+    fuse_loop(fuse_);
 }

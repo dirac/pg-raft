@@ -53,3 +53,8 @@ exe wal_fuse_bench
   : wal_fuse_bench.cc
     libs
   ;
+
+exe wal_fuse_concurrency
+  : wal_fuse_concurrency.cc
+    libs
+  ;
