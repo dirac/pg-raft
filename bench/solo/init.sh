@@ -14,6 +14,8 @@ log "initdb"
   echo
   cat "$SOLO_DIR/postgresql.solo.conf"
   echo "port = $PORT"
+  # PG_CONF (cluster file, optional): more settings, e.g. "fsync = off".
+  for line in ${PG_CONF[@]+"${PG_CONF[@]}"}; do echo "$line"; done
 } >> "$PGDATA_DIR/postgresql.conf"
 for line in "${PG_HBA[@]}"; do echo "$line"; done >> "$PGDATA_DIR/pg_hba.conf"
 start_pg

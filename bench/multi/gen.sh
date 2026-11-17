@@ -4,11 +4,14 @@
 #   std-3.sh, std-5.sh         HOSTS / PORTS / PG_HBA for std/ (STD_CLUSTER)
 #   solo.sh                    solo/ on node 0's machine (SOLO_CLUSTER)
 # RAFT_SYNC=1: leader_sync, follower_sync and log_sync all true in the raft configs (disk syncs on
-# the commit path, like std's and solo's fsync = on).
+# the commit path, like std's and solo's fsync = on). PG_FSYNC=off: fsync = off for std and solo
+# (PG_CONF in their cluster files), like pg-raft's syncs off.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 mkdir -p "$GEN_DIR"
+pg_conf=""
+[[ "${PG_FSYNC:-on}" == off ]] && pg_conf='PG_CONF=("fsync = off")'
 src="$MULTI_DIR/../raft/config.toml"
 
 for n in 3 5; do
@@ -43,6 +46,7 @@ PG_HBA=(
   "host replication all $NETWORK trust"
   "host all         all $NETWORK trust"
 )
+$pg_conf
 EOF
 done
 
@@ -54,5 +58,6 @@ DATA_ROOT="\${DATA_ROOT:-\$SOLO_DIR/data}"
 PG_HBA=(
   "host all all $NETWORK trust"
 )
+$pg_conf
 EOF
 log "configs in $GEN_DIR: $(cd "$GEN_DIR" && echo *)"
