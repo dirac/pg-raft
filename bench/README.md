@@ -167,9 +167,9 @@ per-statement latencies) and `summary.txt`.
 | `multi/` | |
 |---|---|
 | `lib.sh` | the roles (from `~/machines.txt`), `/data/bench`, `~/shared/pg_raft`, `on HOST CMD` |
-| `gen.sh` | the configs for 3 and 5 nodes and for solo, in `multi/gen/` |
+| `gen.sh` | the configs for 3 and 5 nodes and for solo, in `multi/gen/`; `RAFT_SYNC=1` turns pg-raft's commit-path syncs on, `PG_FSYNC=off` runs std and solo with `fsync = off` (both also read by `deploy.sh`) |
 | `deploy.sh [--no-build]` | `gen.sh`, a release build into `~/shared/pg_raft/bin`, bench/ copied to every machine, the binaries installed |
-| `run.sh solo \| std N \| raft N \| stop` | one setup on a fresh cluster, pgbench at each client count in `SWEEP` (pg-raft: through the proxy and direct), then stop it and copy the results to `~/shared/pg_raft/results` |
+| `run.sh solo \| std N \| raft N \| stop` | one setup on a fresh cluster, pgbench at each client count in `SWEEP` (pg-raft: through the proxy and direct), then stop it and copy the results to `~/shared/pg_raft/results`; `VARIANT=name` tags the results (`raft-direct-sync-n3-c10-…`) |
 | `all.sh [setups]` | every setup in turn, then `summary.sh` |
 | `summary.sh [dir]` | one table (`summary.md`, `summary.csv`) from the results' `run.log`s |
 
@@ -386,7 +386,10 @@ At 150 clients:
 - **At its peak, pg-raft direct matches streaming replication.** With 3 nodes it reaches 99% of
   streaming replication at 125 clients and 103% at 150. With 5 nodes it reaches 95% at both. It
   trails more in the middle of the range, at 88–93% from 50 to 100 clients. On one machine it was at
-  89% with 16 clients.
+  89% with 16 clients. But these runs don't match disk syncs: streaming replication fsyncs the WAL
+  on the primary and on its standbys, while pg-raft syncs nothing on the commit path. With the syncs
+  matched, pg-raft direct reaches 72–90% of streaming replication at 100 clients and above (next
+  section).
 - **5 nodes cost pg-raft almost nothing.** A commit waits for a majority, 3 of 5, and the followers
   acknowledge in parallel. Its direct throughput is within 2% of 3 nodes' at every point.
 - **The proxy's cost shrinks as clients are added.** Through the proxy, pg-raft gets 60–69% of its
@@ -399,6 +402,125 @@ At 150 clients:
   points up to 100 ran one after another on the same tables. That may explain part of the jump from
   100 to 125 clients, and why 5-node streaming replication overtakes 3-node there after trailing it
   up to 100. Treat differences of a few percent between those points as noise.
+
+### 2026-11-17: the same, with the disk syncs matched
+
+The runs above compare unequal durability. Streaming replication and solo run with `fsync = on`: a
+commit waits for the WAL fsync on the primary and, for streaming replication, on a quorum of
+standbys. pg-raft runs with its commit-path syncs off: a commit is durable once a majority has the
+WAL in its page cache. So two more series were run on the same machines, with the same method,
+binaries and sweep:
+
+- **pg-raft with every sync on**: `leader_sync`, `follower_sync` and `log_sync` all `true`
+  (`RAFT_SYNC=1 ./multi/deploy.sh`, results tagged `sync`). The leader msyncs its WAL (PostgreSQL's
+  `pg_wal` and raft's copy) before the commit round. Each follower msyncs the WAL it receives and
+  syncs the raft log (LMDB) before acknowledging.
+- **Streaming replication and solo with `fsync = off`** (`PG_FSYNC=off ./multi/deploy.sh`, results
+  tagged `nosync`), on the primary and the standbys. This also skips the data files' fsyncs at
+  checkpoints, but no checkpoint runs in a 2.5-minute run (`checkpoint_timeout = 15min`).
+
+tps, direct to the primary for pg-raft:
+
+| Setup | Disk syncs | 10 | 25 | 50 | 100 | 125 | 150 |
+|---|---|---|---|---|---|---|---|
+| solo | on | 9,199 | 17,585 | 32,838 | 49,488 | 52,156 | 50,902 |
+| solo | off | 9,747 | 22,113 | 33,628 | 52,693 | 55,610 | 57,482 |
+| streaming replication, 3 nodes | on | 7,324 | 14,404 | 25,897 | 42,292 | 43,462 | 41,606 |
+| streaming replication, 3 nodes | off | 6,322 | 14,764 | 26,187 | 45,041 | 47,711 | 50,611 |
+| pg-raft, 3 nodes | on | 5,933 | 11,508 | 19,345 | 30,900 | 34,810 | 34,894 |
+| pg-raft, 3 nodes | off | 7,090 | 14,297 | 22,921 | 37,995 | 43,001 | 42,924 |
+| streaming replication, 5 nodes | on | 6,447 | 13,981 | 25,036 | 40,895 | 44,066 | 45,793 |
+| streaming replication, 5 nodes | off | 7,329 | 14,374 | 26,351 | 42,353 | 46,953 | 49,481 |
+| pg-raft, 5 nodes | on | 5,625 | 11,311 | 19,024 | 30,918 | 33,328 | 33,048 |
+| pg-raft, 5 nodes | off | 7,371 | 14,304 | 22,654 | 37,965 | 42,027 | 43,381 |
+
+pg-raft as a percentage of streaming replication with the same syncs:
+
+| pg-raft direct vs streaming replication | 10 | 25 | 50 | 100 | 125 | 150 |
+|---|---|---|---|---|---|---|
+| 3 nodes, syncs on | 81% | 80% | 75% | 73% | 80% | 84% |
+| 3 nodes, syncs off | 112% | 97% | 88% | 84% | 90% | 85% |
+| 5 nodes, syncs on | 87% | 81% | 76% | 76% | 76% | 72% |
+| 5 nodes, syncs off | 101% | 100% | 86% | 90% | 90% | 88% |
+
+Commit (`END`) latency in ms, 3 nodes:
+
+| Setup | Disk syncs | 10 clients | 100 | 150 |
+|---|---|---|---|---|
+| solo | on / off | 0.174 / 0.139 | 0.340 / 0.251 | 0.551 / 0.354 |
+| streaming replication | on / off | 0.388 / 0.387 | 0.603 / 0.510 | 0.909 / 0.657 |
+| pg-raft direct | on / off | 0.648 / 0.410 | 1.167 / 0.770 | 1.418 / 0.950 |
+
+Through the proxy, pg-raft with syncs on reaches 30,888 tps with 3 nodes and 29,326 with 5 at 150
+clients, against 37,315 and 36,623 with syncs off.
+
+- **Matched, pg-raft direct reaches 73–88% of streaming replication at the peak.** With syncs off,
+  pg-raft peaks at 43.0k tps against 50.6k for streaming replication with 3 nodes (85%), and 43.4k
+  against 49.5k with 5 (88%); streaming replication was still rising at 150 clients. With syncs on,
+  pg-raft peaks at 34.9k against 43.5k with 3 nodes (80%), and 33.3k against 45.8k with 5 (73%).
+  At 10–25 clients, with syncs off, the two are level.
+- **The syncs cost pg-raft far more than they cost streaming replication.** Turning them on costs
+  pg-raft 16–24% at every client count. They cost streaming replication 1–9% at most points (12% with
+  5 nodes at 10 clients, 18% with 3 nodes at 150), and solo 2–11% (20% at 25 clients). At 10 clients the commit
+  takes 0.24 ms longer in pg-raft with syncs on, and no longer at all in streaming replication.
+  Some points are noisy: 3-node streaming replication at 10 clients was faster with fsync on.
+- **The syncs are expensive because of how pg-raft makes them, not because of the disk** (below):
+  the WAL is written through mmaps, and an msync of pages dirtied through a mapping costs 60–70 µs
+  in the node, against 17–47 µs for a `pwrite` and `fdatasync` of the same bytes. Each round makes
+  three syncs on the leader (two msyncs, then the raft log's `fdatasync`), and two on each
+  follower, one after the other and with the raft lock held.
+
+#### Where the sync time goes
+
+Raw costs on these machines (`m9gd.4xlarge`, xfs on the instance's NVMe):
+
+| Operation | Latency |
+|---|---|
+| TCP round trip between two node machines, 64 B–8 KB request | 107–136 µs |
+| `pwrite` + `fdatasync`, 1–64 KB | 17–47 µs |
+| `pwrite` + `msync` of the range | 17–56 µs |
+| a write through an mmap + `msync` (or `fdatasync`, or `sync_file_range`), in a tight loop | 1.0–1.8 ms |
+
+Profile of pg-raft with syncs on, 3 nodes, 100 clients, direct (`perf trace -s` for 20 s and
+`perf record` for 15 s, about 29.5k tps):
+
+- About 1,400 raft rounds a second, about 21 commits each. Per round, the leader makes 2 msyncs
+  (62 µs average) and 1 `fdatasync` (40 µs), and each follower 1 msync (66–71 µs) and 1
+  `fdatasync` (30 µs).
+- The follower's largest cost is the msync in `RaftServer::write_blocks`: `ptep_clear_flush` (12%
+  of its CPU) under `msync` → `xfs_file_fsync` → `iomap_writepages` → `folio_mkclean`. Each sync
+  write-protects the mapped pages and flushes the TLB, and the next write to them faults (another
+  ~7%: `__ptep_set_access_flags`, `contpte_convert`).
+- The commit path, then: the leader's two msyncs (~125 µs) before the round starts, a network round
+  trip (~110 µs), and the follower's msync and `fdatasync` (~100 µs). That accounts for the
+  0.24 ms the syncs add per commit.
+
+So writing the raft log and the WAL to one file with `pwrite` and syncing it once with
+`fdatasync`, and nothing written through an mmap, would replace three syncs on the leader and two
+on each follower with one each.
+
+#### Does PostgreSQL write and fsync the WAL concurrently?
+
+`src/wal_fuse//wal_fuse_concurrency` runs one PostgreSQL with `pg_wal` on `WalFuseOps` (no raft) and
+pgbench, 50 clients, 8 threads, scale 100, 60 s, and counts the WAL writes and fsyncs in flight when
+each enters. The node's FUSE loop is single-threaded (`fuse_loop`), so nothing can overlap there;
+`--mt` runs `fuse_loop_mt` to show what PostgreSQL issues. `--fsync-delay-us 300` completes each
+fsync 300 µs later, standing in for a raft round.
+
+| FUSE loop | fsync completes | tps | commits per fsync | avg write | max WAL calls in flight |
+|---|---|---|---|---|---|
+| single-threaded | at once (msync) | 55,488 | 5.8 | 10.7 KB | 1 |
+| multithreaded | at once | 55,005 | 5.9 | 10.7 KB | 1 |
+| single-threaded | after 300 µs | 43,024 | 17.3 | 15.8 KB | 1 |
+| multithreaded | after 300 µs | 42,673 | 17.5 | 15.9 KB | 1 |
+
+No WAL write or fsync ever entered while another was in flight, even with the multithreaded loop
+(which did run more threads). Nearly all of them come from backends at `COMMIT`, a write and then an
+fsync, under PostgreSQL's `WALWriteLock`; the other backends wait and find their commit flushed
+(group commit). A slower fsync makes larger batches, not concurrent ones. So the WAL reaches
+pg-raft as one stream, one batch per fsync, and a multithreaded FUSE loop gains nothing. What
+matters is the latency of each fsync round: a 300 µs fsync alone caps one PostgreSQL here at
+about 43k tps.
 
 ## pg-raft notes
 
