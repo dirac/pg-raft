@@ -15,11 +15,11 @@ Benchmark scripts (pg-raft vs PostgreSQL quorum sync replication, and a single P
 
 ## Build system
 
-This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/pg_raft/bin/b2`. All external dependencies (Boost, OpenSSL, lmdb, fuse) are installed under `/opt/pg_raft/` and `/usr/local/` (see `Jamroot.jam` for exact search paths).
+This project uses [Boost.Build (b2)](https://www.boost.org/build/) — not CMake or Make. The `b2` binary is at `/opt/pg_raft/bin/b2`. External dependencies (Boost, OpenSSL, lmdb, PostgreSQL) are installed under `/opt/pg_raft/`; on Linux, libfuse and liburing come from system packages (see Environment setup and `Jamroot.jam` for exact search paths).
 
 All `b2` commands must be run from the repo root (the directory containing `Jamroot.jam`).
 
-The code builds on macOS (Apple clang 17, toolset `clang-darwin-17`) and Linux (gcc 14, toolset `gcc-14`). On Linux, `~/user-config.jam` selects the compiler (`using gcc : 14 : gcc14-g++ ;`); the default gcc may be too old. Platform differences are behind `#ifdef __APPLE__` (macFUSE's xattr signatures and `-onoappledouble` mount option; libproc vs `/proc`; `ENOATTR` vs `ENODATA`).
+The code builds on macOS (Apple clang 17, toolset `clang-darwin-17`) and Linux (gcc 14, toolset `gcc-14`). On Linux, `~/user-config.jam` selects the compiler (`using gcc : 14 : gcc14-g++ ;`); create it on a new machine, since without it b2 uses the system default gcc 11, which is too old. Platform differences are behind `#ifdef __APPLE__` (macFUSE's xattr signatures and `-onoappledouble` mount option; libproc vs `/proc`; `ENOATTR` vs `ENODATA`).
 
 ```bash
 # Build everything
@@ -95,7 +95,7 @@ Include paths: the repo root (`.`) is on the include path, so headers are includ
 
 ## Environment setup
 
-Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, etc.) are installed under `/opt/pg_raft/`; FUSE is macFUSE on macOS and libfuse 2 (`fuse-devel`, `libfuse.so` in `/usr/local/lib`) on Linux. To build or rebuild them from source, run the scripts in `external/`:
+Dependencies (Boost, OpenSSL, LMDB, PostgreSQL, etc.) are installed under `/opt/pg_raft/`; FUSE is macFUSE on macOS and libfuse 2 on Linux. On Linux (Amazon Linux 2023) libfuse and liburing (the proxy's `uring` engine) come from system packages, not `external/`: `sudo dnf install -y fuse-devel liburing-devel` (headers in `/usr/include`, `libfuse.so` in `/usr/lib64`; `Jamroot.jam` also searches `/usr/local/lib`, and the linker finds `/usr/lib64` by default). To build or rebuild them from source, run the scripts in `external/`:
 
 ```bash
 ./external/install.sh          # install all dependencies
