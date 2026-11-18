@@ -113,6 +113,15 @@ Consumers call:
 - `read_data(handler)` for messages that have no attached bytes.
 - `read_file(handler)`.
 
+**Reader thread** (`threaded_reader()`, TCP only; raft's leader-to-follower connections): instead of
+the asio loop, a thread of the connection's own reads frames from a dup of the socket (`recvmsg`
+with `MSG_DONTWAIT`, data and status frames; a file frame closes the connection) and hands each to
+its handler on that thread. When a reply is due (`spin_window()`, steady-clock ns) it busy-polls the
+socket instead of sleeping in `ppoll`: it sleeps until the window opens (timer slack 1 ns), and a
+sender's `wake_reader()` (an eventfd, written only while the reader sleeps) makes it recompute the
+window. It also sets `SO_BUSY_POLL` (the kernel then polls the NIC queue in each `recvmsg`; it
+needs `CAP_NET_ADMIN` to exceed `net.core.busy_read`). Writes stay on the io_context.
+
 Each call takes a queued item or parks the handler until one arrives. Handlers are **posted**,
 never invoked inline, so a handler can safely call `read_*` again. The queue elements are wrapped
 in non-template structs, which avoids a libc++ `std::expected` recursion under C++26.

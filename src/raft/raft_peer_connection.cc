@@ -2,6 +2,28 @@
 
 #include "src/base/logger.h"
 
+namespace {
+
+uint64_t steady_ns() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count());
+}
+
+}  // namespace
+
+Connection::SpinWindow RaftPeerConnection::spin_window() const {
+  if (append_entries() <= 0)
+    return {};
+  auto const sent = ae_sent_ns_.load(std::memory_order_relaxed);
+  if (sent == 0)
+    return {};
+  auto const rtt    = rtt_ns_.load(std::memory_order_relaxed);
+  auto const margin = uint64_t{options_.spin_margin_usecs} * 1000U;
+  auto const from   = rtt > margin ? sent + rtt - margin : sent;
+  return {.from = from, .until = from + uint64_t{options_.spin_max_usecs} * 1000U};
+}
+
 void RaftPeerConnection::send_ping(RaftTerm current_term) {
   std::unique_lock<std::mutex> lk{mtx_};
   return send_request(std::move(lk),
@@ -80,18 +102,20 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
   }
   append_entries.n = (*batch)->count();
   next_idx_        = next_idx_ + append_entries.n;
+  ae_sent_ns_.store(steady_ns(), std::memory_order_relaxed);
 
   // The records, as the ledger files hold them (at most two buffers: one per file).
   auto attached = make_shared<vector<Bytes>>();
   for (auto& buf : (*batch)->buffers)
     attached->push_back(std::move(buf));
 
-  return send_request(std::move(lk),
-                      RaftRequest{
-                          .term    = leadership_term,
-                          .request = std::move(append_entries),
-                      },
-                      attached);
+  send_request(std::move(lk),
+               RaftRequest{
+                   .term    = leadership_term,
+                   .request = std::move(append_entries),
+               },
+               attached);
+  wake_reader();  // its reply is due in a round trip: the reader spins from just before
 }
 
 void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
@@ -187,6 +211,15 @@ void RaftPeerConnection::response_handler(Result<Data> msg) {
 
   if (r.value().info.log)
     log(INFO, "{}{}", log_prefix(), r.value());
+
+  // A round trip to the follower: from the latest AppendEntries' send (with several in flight, a
+  // little short, which only starts the spin earlier).
+  if (std::holds_alternative<AppendEntriesResponse>(r.value().response))
+    if (auto const sent = ae_sent_ns_.load(std::memory_order_relaxed); sent != 0) {
+      auto const sample = steady_ns() - sent;
+      auto const avg    = rtt_ns_.load(std::memory_order_relaxed);
+      rtt_ns_.store(avg == 0 ? sample : (avg * 7U + sample) / 8U, std::memory_order_relaxed);
+    }
 
   std::visit(
       [this, request_term, current_term](auto&& v) {

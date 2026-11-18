@@ -133,6 +133,13 @@ class RaftPeerConnection : public Connection {
   RaftNodeId self_id() const { return self_id_; }
   RaftNodeId peer_id() const { return peer_id_; }
 
+  /// The moving average of the AppendEntries round trips to this follower (ns; 0 before one).
+  uint64_t round_trip_ns() const { return rtt_ns_.load(std::memory_order_relaxed); }
+
+ protected:
+  bool       threaded_reader() const override { return options_.peer_reader_threads; }
+  SpinWindow spin_window() const override;
+
 
  private:
   static constexpr unsigned kSeqBits = 32;
@@ -247,6 +254,11 @@ class RaftPeerConnection : public Connection {
 
   // The diff between LSB and MSB is the number of outstanding calls of each kind.
   std::array<std::atomic_uint64_t, 5> sequence_{};
+
+  // The latest AppendEntries' send (steady_clock ns), and the moving average of the round trips
+  // (from that send to a reply): when the reader thread spins (spin_window()).
+  std::atomic<uint64_t> ae_sent_ns_{0};
+  std::atomic<uint64_t> rtt_ns_{0};
 
   Options const options_;
 };

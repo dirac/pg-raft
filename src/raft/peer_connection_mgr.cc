@@ -146,7 +146,17 @@ void PeerConnectionMgr::reconnect(weak_ptr<PeerConnectionApi> const&            
 
 unsigned PeerConnectionMgr::run(std::function<void(shared_ptr<RaftPeerConnection>)> const& func) {
   unsigned closed = 0;
-  for (auto& conn : get_connections()) {
+  // The nearest follower first (the moving average of its round trips; unmeasured ones last):
+  // a commit needs the first replies, and each send delays the next by its copy into the socket.
+  // The reader threads update the round trips meanwhile: each is read once, then sorted on (a
+  // key that changes during the sort breaks it).
+  vector<std::pair<uint64_t, shared_ptr<RaftPeerConnection>>> order;
+  for (auto& c : get_connections()) {
+    auto const ns = c ? c->round_trip_ns() : 0U;
+    order.emplace_back(ns == 0 ? std::numeric_limits<uint64_t>::max() : ns, std::move(c));
+  }
+  std::ranges::stable_sort(order, {}, &std::pair<uint64_t, shared_ptr<RaftPeerConnection>>::first);
+  for (auto& [_, conn] : order) {
     if (conn && !conn->closed())
       func(conn);
     else

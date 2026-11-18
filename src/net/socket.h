@@ -65,6 +65,14 @@ struct tcp_socket : private boost::asio::ip::tcp::socket {  // NOLINT(readabilit
 
   auto counter() const { return counter_.load(std::memory_order_relaxed); }
 
+  /// A read done outside asio (Connection's reader thread), for the silence timeout.
+  void count_read() { counter_.fetch_add(1U, std::memory_order_relaxed); }
+
+  int native_fd() {
+    auto lk = lock();
+    return boost::asio::ip::tcp::socket::native_handle();
+  }
+
  private:
   std::unique_lock<std::mutex> lock() const { return std::unique_lock{mtx_}; }
 

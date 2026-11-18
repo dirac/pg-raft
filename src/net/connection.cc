@@ -1,5 +1,10 @@
 #include "src/net/connection.h"
 
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
@@ -64,6 +69,8 @@ Connection::Connection(string peer, socket_type socket, std::chrono::millisecond
 }
 
 Connection::~Connection() {
+  if (wake_fd_ != -1)
+    ::close(wake_fd_);
   if (test_and_set(closed_))
     return;
 
@@ -86,7 +93,18 @@ void Connection::start() {
   [[maybe_unused]] auto const started = test_and_set(started_);
   assert(!started);
 
-  do_read_header();
+  int fd = -1;
+  if (threaded_reader() && socket_.index() == 0) {
+    fd       = ::dup(std::get<0>(socket_).native_fd());
+    wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  }
+  if (fd != -1 && wake_fd_ != -1)
+    std::thread([this, s = self(), fd] {
+      read_loop(fd);
+      ::close(fd);
+    }).detach();
+  else
+    do_read_header();
   if (timeout_.count() > 0 && times_ > 0) {
     request_peer_status();
     enqueue_timeout_check();
@@ -249,6 +267,185 @@ void Connection::do_read_header() {
   };
   async_read(boost::asio::mutable_buffer(read_header_.data(), sizeof(read_header_)),
              std::move(handler));
+}
+
+// ── the reader thread ─────────────────────────────────────────────────────────
+
+namespace {
+
+uint64_t steady_ns() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count());
+}
+
+}  // namespace
+
+void Connection::read_loop(int fd) {
+  // The sleep until a spin window opens must end on time: a thread's timers may expire up to
+  // 50 us late by default (timer slack), and a reply that lands while it sleeps costs a wake-up.
+  ::prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+
+  // The kernel polls the NIC's queue in the reader's recv()s too (it needs CAP_NET_ADMIN to raise
+  // it above net.core.busy_read); without it the spin is on the socket only.
+  static std::once_flag logged;
+  int                   usecs = 50;
+  if (::setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usecs, sizeof(usecs)) != 0)
+    std::call_once(logged, [] {
+      log(INFO, "SO_BUSY_POLL not set ({}): the reader threads spin on their sockets only",
+          strerror(errno));
+    });
+
+  std::array<uint32_t, kHeaderWords> header{};
+  while (!closed()) {
+    std::array const hb{boost::asio::mutable_buffer(header.data(), sizeof(header))};
+    if (!read_full(fd, hb))
+      return;
+
+    if (header[0] != hton(0xDEADBEEF)) [[unlikely]]
+      return breakpoint("Invalid start of the packet");
+    if (++recv_packet_ != ntoh(header[1])) [[unlikely]]
+      return breakpoint("Invalid counter");
+
+    uint32_t const h    = ntoh(header[2]);
+    auto const     ctrl = h >> 30U;
+    if (ctrl == 0x3) {
+      if ((h & 0xFFU) != 0) {
+        clear(outstanding_status_request_);
+        set_peer_status(u1(h & 0xFFU) - u1(1U));
+      } else {
+        async_write_status(false);
+      }
+      continue;
+    }
+    if (ctrl == 0x2) [[unlikely]]
+      return breakpoint("A file on a connection read by its own thread");
+
+    uint32_t const data_size = ntoh(header[2]);
+    uint32_t const buff_size = ntoh(header[3]);
+    uint32_t const data_chk  = ntoh(header[4]);
+    uint32_t const buff_chk  = ntoh(header[5]);
+
+    Data  data{data_size};
+    Bytes buff(buff_size);
+    auto  buffs = data.mutable_buffer();
+    if (buff_size != 0U)
+      buffs.emplace_back(buff.data(), buff.size());
+    if (!read_full(fd, buffs))
+      return;
+
+    if (auto v = data_chk ? xxhash32(data.const_buffer()) : 0U; v != data_chk) {
+      auto ec = system_error_code(EBADMSG);
+      log(ERROR, "{}Data checksum did not match {} vs {}", log_prefix(), data_chk, v);
+      enqueue<ReadData>(ec, read_data_q_);
+      return shutdown(ec);
+    }
+    if (auto v = buff_chk ? xxhash32(buff) : 0U; v != buff_chk) {
+      auto ec = system_error_code(EBADMSG);
+      log(ERROR, "{}Buffer checksum did not match {} vs {}", log_prefix(), buff_chk, v);
+      enqueue<ReadData>(ec, read_data_q_);
+      return shutdown(ec);
+    }
+    enqueue<ReadData>(std::make_tuple(std::move(data), std::move(buff)), read_data_q_);
+  }
+}
+
+bool Connection::read_full(int fd, std::span<boost::asio::mutable_buffer const> buffs) {
+  std::vector<iovec> iov;
+  iov.reserve(buffs.size());
+  for (auto const& b : buffs)
+    if (b.size() != 0)
+      iov.push_back(iovec{.iov_base = b.data(), .iov_len = b.size()});
+  size_t first = 0;
+  while (first < iov.size()) {
+    msghdr msg{};
+    msg.msg_iov    = iov.data() + first;
+    msg.msg_iovlen = iov.size() - first;
+    auto n         = ::recvmsg(fd, &msg, MSG_DONTWAIT);
+    if (n > 0) {
+      std::get<0>(socket_).count_read();
+      auto left = static_cast<size_t>(n);
+      while (left > 0 && first < iov.size()) {
+        auto& v = iov.at(first);
+        if (left >= v.iov_len) {
+          left -= v.iov_len;
+          ++first;
+        } else {
+          v.iov_base = static_cast<char*>(v.iov_base) + left;
+          v.iov_len -= left;
+          left = 0;
+        }
+      }
+      continue;
+    }
+    if (n == 0) {
+      error_code ec = boost::asio::error::eof;
+      enqueue<ReadData>(ec, read_data_q_);
+      shutdown(ec);
+      return false;
+    }
+    if (errno == EINTR)
+      continue;
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      error_code ec(errno, boost::system::system_category());
+      enqueue<ReadData>(ec, read_data_q_);
+      shutdown(ec);
+      return false;
+    }
+    if (!wait_readable(fd))
+      return false;
+  }
+  return true;
+}
+
+void Connection::wake_reader() {
+  if (wake_fd_ == -1)
+    return;
+  // Pairs with the reader's fence: either it sees the send's state, or this sees it asleep.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  if (reader_sleeping_.load(std::memory_order_relaxed)) {
+    uint64_t one = 1;
+    [[maybe_unused]] auto n = ::write(wake_fd_, &one, sizeof(one));
+  }
+}
+
+bool Connection::wait_readable(int fd) {
+  // Asleep at most this long (the closing of the connection is noticed then).
+  static constexpr uint64_t kMaxSleepNs = 100'000'000;
+  while (!closed()) {
+    auto window = [this] {
+      auto const now = steady_ns();
+      auto const w   = spin_window();
+      return std::tuple{now, w, w.from != 0 && now >= w.from && now < w.until};
+    };
+    auto [now, w, spin] = window();
+    if (spin)
+      return true;  // spinning: the caller reads again at once
+
+    reader_sleeping_.store(true, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    std::tie(now, w, spin) = window();  // a send just before the flag was set
+    if (spin) {
+      reader_sleeping_.store(false, std::memory_order_relaxed);
+      return true;
+    }
+    uint64_t sleep = kMaxSleepNs;
+    if (w.from > now)
+      sleep = std::min(sleep, w.from - now);
+    timespec ts{.tv_sec  = static_cast<time_t>(sleep / 1'000'000'000U),
+                .tv_nsec = static_cast<long>(sleep % 1'000'000'000U)};
+    std::array p{pollfd{.fd = fd, .events = POLLIN, .revents = 0},
+                 pollfd{.fd = wake_fd_, .events = POLLIN, .revents = 0}};
+    auto const n = ::ppoll(p.data(), p.size(), &ts, nullptr);
+    reader_sleeping_.store(false, std::memory_order_relaxed);
+    if (n > 0 && (p[1].revents & POLLIN)) {
+      uint64_t v = 0;
+      [[maybe_unused]] auto r = ::read(wake_fd_, &v, sizeof(v));
+    }
+    if (n > 0 && p[0].revents != 0)
+      return true;
+  }
+  return false;
 }
 
 void Connection::breakpoint(char const* data) {
