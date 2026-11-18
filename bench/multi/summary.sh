@@ -9,7 +9,7 @@ import csv, os, re, sys
 root = sys.argv[1]
 rows = []
 for d in sorted(os.listdir(root)):
-    m = re.match(r"(solo|std|raft-proxy|raft-direct|raft-libpq)(?:-([a-z]\w*))?-n(\d+)-c(\d+)-(\d{8}-\d{6})$", d)
+    m = re.match(r"(solo|std|raft-proxy|raft-direct|raft-libpq)(?:-([a-z][\w@.\-]*?))?-n(\d+)-c(\d+)-(\d{8}-\d{6})$", d)
     if not m:
         continue
     run = os.path.join(root, d, "run.log")

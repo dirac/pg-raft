@@ -589,6 +589,98 @@ None moves throughput. What the measurements show:
   raise tps; what PostgreSQL's backends do in those gaps (group commit, `WALWriteLock`) is the next
   thing to measure.
 
+### 2026-11-18: three availability zones
+
+Four EC2 `i4i.8xlarge` machines (32 vCPUs, x86_64, 256 GB, local NVMe), Amazon Linux 2023,
+PostgreSQL 17.9: the three nodes in `us-west-2b`, `2c` and `2d`, pgbench on a fourth machine in `2a`
+(`multi/` with three addresses in `machines.txt`: 3-node clusters, the proxy on the client). Round
+trips: client to the primary ~0.49 ms, primary to the standbys ~0.51–0.53 ms (TCP). Scale 100,
+TPC-B-like, pgbench threads `min(clients, 30)`, 30 s warm-up, 120 s measured, a fresh cluster per setup
+and syncs setting, pg-raft direct to the primary (no proxy). Every transaction crosses AZs 7 times, so
+throughput is far below the one-AZ runs and still rises linearly at 100 clients.
+
+**A stall at every WAL segment switch.** The first runs (`7bc1f89`, 50 clients) had pg-raft at 88–89%
+of streaming replication with a latency stddev of ~4 ms against ~1 ms. pgbench's per-transaction log
+showed it: 99% of transactions under 8.5 ms, and every 0.8–3.5 s all 50 clients stalled together for
+83–93 ms, each stall ending within 3 ms of the leader opening a new WAL segment. With
+`wal_recycle = off` (which pg-raft forces) every segment switch creates a file, and with
+`wal_init_zero = on` (PostgreSQL's default) it is zero-filled, 16 MiB through FUSE (~2,000 writes),
+under `WALWriteLock`. pg-raft now forces `wal_init_zero = off` (`a89dffa`):
+
+| pg-raft, syncs off, 50 clients | `wal_init_zero = on` | `off` |
+|---|---|---|
+| tps | 9,163 | 9,608 |
+| latency stddev | 4.706 ms | 0.814 ms |
+| p99 / p99.9 | 8.5 / 88.3 ms | 8.2 / 11.2 ms |
+| transactions over 20 ms | 1,758 | 7 |
+
+Running past 4 GiB of WAL for the first time also stopped the standbys at `0/FFFFF970`: the WAL sender
+named segments from the segment number's high and low 32 bits (`60cf5e4`). Since then each setup has
+the WAL settings that suit it (`9355077`, `e731d97`): `wal_sync_method = fdatasync` for all three
+(for pg-raft `fdatasync` reaches FUSE as an fsync with `datasync` set), `wal_recycle` and
+`wal_init_zero` `off` for pg-raft and PostgreSQL's defaults (`on`) for std and solo.
+
+**Where a commit's time goes.** PostgreSQL holds `WALWriteLock` across the WAL fsync, so its flushes
+are serial (see "Does PostgreSQL write and fsync the WAL concurrently?" above), and in pg-raft each
+fsync is a raft round: across AZs, one flush per round trip, ~1,500 a second, ~6 commits each.
+Streaming replication releases the lock after the local flush and waits for the standby in
+`SyncRepWaitForLSN`, so its rounds overlap. That is the price of pg-raft's commit inside the fsync:
+nothing is visible before a quorum has it, where a cancelled wait in synchronous replication makes a
+commit visible locally first. One round on the leader, timed with bpftrace (syncs off, 50 clients):
+
+| Step of a round | `e731d97` | `c24deef` |
+|---|---|---|
+| `op_fsync` → AppendEntries into `tcp_sendmsg` | 28.8 µs | 17.1 µs |
+| → the first reply in the leader's TCP stack (network ~475 µs + the follower's ~33 µs) | 508 µs | 493 µs |
+| reply → `handle_response` | 33.4 µs | 14.3 µs |
+| `handle_response` → `op_fsync` returns | 22.9 µs | 21.8 µs |
+
+`9650577`: the leader sends its latest records from the ledger's window (`append()` keeps their
+bytes) instead of seeking and reading the file. `c24deef`: a thread per follower reads its replies,
+busy-polling the socket from just before one is due; sends go to the nearest follower first (the
+first reply decides the commit: 2c answered first 97% of the time, 2b's replies came ~28 µs later,
+~18 µs of it from being sent second). Turning off the NIC's receive interrupt moderation
+(`ethtool -C ens5 adaptive-rx off rx-usecs 0`, a machine setting, left at the default) gained 1.3%.
+
+**25 to 100 clients** (`c5d890c`), tps and `END` (the commit):
+
+| Setup | Syncs | 25 | 50 | 75 | 100 |
+|---|---|---|---|---|---|
+| solo | on | 6,450 | 12,033 | 17,391 | 22,154 |
+| streaming replication | on | 5,333 (1.183 ms) | 10,206 (1.199 ms) | 14,644 (1.225 ms) | 18,684 (1.246 ms) |
+| pg-raft | on | 5,037 (1.505 ms) | 9,672 (1.523 ms) | 13,453 (1.588 ms) | 16,980 (1.617 ms) |
+| solo | off | 6,567 | 12,307 | 17,820 | 22,863 |
+| streaming replication | off | 5,590 (1.053 ms) | 10,743 (1.066 ms) | 15,437 (1.082 ms) | 19,640 (1.097 ms) |
+| pg-raft | off | 5,231 (1.400 ms) | 9,639 (1.478 ms) | 13,751 (1.513 ms) | 17,272 (1.561 ms) |
+
+pg-raft against streaming replication with the same syncs:
+
+| | 25 | 50 | 75 | 100 |
+|---|---|---|---|---|
+| syncs on | 94% | 95% | 92% | 91% |
+| syncs off | 94% | 90% | 89% | 88% |
+
+- **Syncs cost pg-raft 0–4% and streaming replication ~5%**: pg-raft's leader syncs its ledger during
+  the round and a follower writes with `RWF_DSYNC` (~30 µs on this NVMe); streaming replication
+  fdatasyncs on the primary before the standby's round. Solo: 2–3%.
+- **The gap grows with the clients**: pg-raft's commit takes 0.11–0.16 ms longer from 25 to 100
+  clients, streaming replication's 0.04–0.06 ms. A commit waits for the round in flight, then its
+  own, and the rounds carry more as the clients grow.
+- **Latency stddev is now like streaming replication's**: 0.6–1.8 ms against 0.5–1.4 ms.
+
+**Without spinning** (`360da07`): both ends of each leader-to-follower connection read on a thread of
+their own (the follower's requests too), sleeping until data arrives instead of spinning, and the
+node runs 2 io threads instead of 8. tps against `c5d890c`:
+
+| Syncs | 25 | 50 | 75 | 100 |
+|---|---|---|---|---|
+| on | 4,976 (−1.2%) | 9,666 (−0.1%) | 13,382 (−0.5%) | 16,794 (−1.1%) |
+| off | 5,171 (−1.1%) | 9,648 (+0.1%) | 13,721 (−0.2%) | 16,825 (−2.6%) |
+
+At 100 clients, syncs off, two runs each with `io_threads` 8 and 2: 17,370 and 17,018 against
+16,985 and 17,001 tps (the two runs of the same setting differ by up to 2%). The simpler code costs
+nothing measurable, and 2 io threads are enough.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync` and `follower_sync`, both `false`:
