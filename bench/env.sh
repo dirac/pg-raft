@@ -22,6 +22,8 @@ DURATION="${DURATION:-300}"    # seconds, measured
 # The cluster is already serving (wait.sh): elections and promotion are before it.
 WARMUP="${WARMUP:-60}"         # seconds
 PGBENCH_ARGS="${PGBENCH_ARGS:-}"  # extra arguments for the run, e.g. "-N" or "-S"
+PGBENCH_INIT_ARGS="${PGBENCH_INIT_ARGS:-}"  # extra arguments for the load, e.g. "-I dtGvp" (rows
+                                            # generated on the server: much faster at scale 1000)
 
 RESULTS_DIR="${RESULTS_DIR:-$TESTING_DIR/results}"
 
@@ -68,8 +70,10 @@ run_pgbench() {
   } > "$out/settings.txt"
 
   if [[ "$skip_init" != 1 ]]; then
-    log "pgbench -i -s $SCALE (log: $out/init.log)"
-    "$PG_BIN/pgbench" -h "$host" -p "$port" -i -s "$SCALE" -q postgres > "$out/init.log" 2>&1 \
+    log "pgbench -i -s $SCALE $PGBENCH_INIT_ARGS (log: $out/init.log)"
+    # shellcheck disable=SC2086
+    "$PG_BIN/pgbench" -h "$host" -p "$port" -i -s "$SCALE" -q $PGBENCH_INIT_ARGS postgres \
+      > "$out/init.log" 2>&1 \
       || { cat "$out/init.log"; die "pgbench -i failed"; }
     # A checkpoint, so that the run doesn't start with the load's dirty pages.
     psql_val "$host" "$port" "CHECKPOINT" > /dev/null

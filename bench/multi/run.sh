@@ -8,7 +8,8 @@
 #
 # Settings (env): SWEEP (client counts, "10 25 50 100"), MAX_THREADS (pgbench -j = min(clients,
 # this), 8), WARMUP (30 s per point), DURATION (120 s per point), SCALE (100), RAFT_MODES
-# ("proxy direct"), PGBENCH_ARGS, VARIANT (a name for the configuration, e.g. sync, put in the
+# ("proxy direct"), PGBENCH_ARGS, PGBENCH_INIT_ARGS (e.g. "-I dtGvp": the load generated on the
+# server), VARIANT (a name for the configuration, e.g. sync, put in the
 # results' names). The tables are loaded once, at the sweep's first point.
 # Results: $REMOTE_DIR/results/<setup>[-<variant>]-n<N>-c<clients>-<time>/ here, copied to
 # $SHARED/results.
@@ -44,7 +45,7 @@ sweep() {
       first=0
       log "== $dir n=$n clients=$c ${mode:+($mode)}"
       on "$CLIENT_HOST" "$env RESULT_TAG=${VARIANT:+$VARIANT-}n$n-c$c CLIENTS=$c THREADS=$(( c < MAX_THREADS ? c : MAX_THREADS )) \
-        SCALE=$SCALE WARMUP=$WARMUP DURATION=$DURATION PGBENCH_ARGS='$PGBENCH_ARGS' ./$dir/bench.sh $args"
+        SCALE=$SCALE WARMUP=$WARMUP DURATION=$DURATION PGBENCH_ARGS='$PGBENCH_ARGS' PGBENCH_INIT_ARGS='$PGBENCH_INIT_ARGS' ./$dir/bench.sh $args"
     done
   done
 }
