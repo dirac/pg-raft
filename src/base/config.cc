@@ -30,6 +30,12 @@ void parse_node(T& data, Config& config) {
     config.write_op_bytes = toml::find<uint64_t>(data, "write_op_bytes");
   if (data.contains("io_threads"))
     config.io_threads = toml::find<unsigned>(data, "io_threads");
+  if (data.contains("commit_wait")) {
+    config.commit_wait = toml::find<string>(data, "commit_wait");
+    if (config.commit_wait != "fsync" && config.commit_wait != "sync_rep")
+      throw std::invalid_argument(
+          std::format("commit_wait = \"{}\": \"fsync\" or \"sync_rep\"", config.commit_wait));
+  }
   if (data.contains("frame_checksums"))
     config.frame_checksums = toml::find<bool>(data, "frame_checksums");
   if (data.contains("leader_sync"))

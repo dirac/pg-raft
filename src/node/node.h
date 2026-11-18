@@ -3,6 +3,7 @@
 #include "src/backup/backup_store.h"
 #include "src/base/config.h"
 #include "src/node/node_wal_tracker.h"
+#include "src/node/sync_acker.h"
 #include "src/process/pg_instance.h"
 #include "src/raft/raft_server.h"
 #include "src/wal_fuse/fuse.h"
@@ -135,6 +136,11 @@ class Node : public std::enable_shared_from_this<Node> {
   unique_ptr<Fuse>            fuse_;
   unique_ptr<PgInstance>      pg_;
   shared_ptr<WalSenderServer> wal_sender_server_;
+
+  // commit_wait = "sync_rep": the leader's synchronous-standby connection to its PostgreSQL
+  // (SyncAcker), from promotion to step-down; on_applied() hands it the committed WAL end.
+  bool                              sync_rep_ = false;
+  std::atomic<shared_ptr<SyncAcker>> acker_;
 
   std::mutex                  senders_mtx_;
   vector<weak_ptr<WalSender>> senders_;

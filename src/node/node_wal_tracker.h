@@ -39,8 +39,13 @@ class NodeWalTracker : public WalTracker {
 
   /// |write_op_bytes|: the pending writes of a segment are sent as a WriteOp once they reach it
   /// (Config::write_op_bytes).
-  explicit NodeWalTracker(shared_ptr<RaftServer> raft, size_t write_op_bytes = 64 * 1024)
-      : raft_(std::move(raft)), write_op_bytes_(write_op_bytes) {}
+  /// |wait_commit|: a leader's fsync completes when its FlushOp is committed (commit_wait =
+  /// "fsync"); otherwise once it is appended to the leader's ledger, and the commit waits for the
+  /// quorum in PostgreSQL's synchronous replication (commit_wait = "sync_rep", SyncAcker).
+  explicit NodeWalTracker(shared_ptr<RaftServer> raft,
+                          size_t                 write_op_bytes = 64 * 1024,
+                          bool                   wait_commit    = true)
+      : raft_(std::move(raft)), write_op_bytes_(write_op_bytes), wait_commit_(wait_commit) {}
 
   void set_mode(Mode mode);
   Mode mode() const { return mode_.load(); }
@@ -61,6 +66,7 @@ class NodeWalTracker : public WalTracker {
 
   shared_ptr<RaftServer> raft_;
   size_t const           write_op_bytes_;
+  bool const             wait_commit_;
   std::atomic<Mode>      mode_{Mode::kFollower};
 
   // flushed_lsn_: PostgreSQL's flush LSN, polled (not the end of the published bytes: the FUSE

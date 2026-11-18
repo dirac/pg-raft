@@ -40,6 +40,12 @@ ledger_file_size = 1073741824   # 1 GiB
 # fsync), or as an entry of its own once this many bytes of a segment are pending.
 write_op_bytes = 65536
 
+# What a commit waits for the quorum in: "fsync" (PostgreSQL's WAL fsync through FUSE returns when
+# raft commits: nothing visible before a quorum has it; the rounds are serial) or "sync_rep" (the
+# node is PostgreSQL's synchronous standby: rounds overlap, but a commit whose wait is cancelled is
+# visible before a quorum has it). COMMIT_WAIT=sync_rep with multi/ sets it.
+commit_wait = "fsync"
+
 # The node's io_context threads. Raft's leader-to-follower connections read on threads of their
 # own on both ends; the rest (write completions, timers, the client channel) shares these.
 io_threads = 2

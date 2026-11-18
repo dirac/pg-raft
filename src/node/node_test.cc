@@ -85,6 +85,11 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
                            .pg_port  = static_cast<uint16_t>(kPgPort + i),
                            .ha_port  = static_cast<uint16_t>(kHaPort + i)});
 
+  // PG_RAFT_COMMIT_WAIT=sync_rep runs the test with the commit waiting in synchronous replication.
+  if (auto const* w = std::getenv("PG_RAFT_COMMIT_WAIT"); w)
+    cfg.commit_wait = w;
+  BOOST_TEST_MESSAGE("commit_wait = " << cfg.commit_wait);
+
   cfg.proxy_pg_port   = kProxyPort;
   cfg.proxy_http_port = 0;  // the admin interface on an ephemeral port
 

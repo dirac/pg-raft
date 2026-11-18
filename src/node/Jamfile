@@ -13,6 +13,7 @@ lib node
   : init.cc
     node.cc
     node_wal_tracker.cc
+    sync_acker.cc
     wal_rebuild.cc
     deps
   ;
