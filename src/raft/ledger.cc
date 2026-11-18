@@ -1,5 +1,7 @@
 #include "src/raft/ledger.h"
 
+#include <sys/uio.h>
+
 #include <charconv>
 
 #include "src/base/archive.h"
@@ -489,6 +491,18 @@ ssize_t Ledger::do_pwrite(int fd, void const* data, size_t size, off_t offset) {
   return ::pwrite(fd, data, size, offset);
 }
 
+ssize_t Ledger::do_pwrite_dsync(int fd, void const* data, size_t size, off_t offset) {
+#ifdef __APPLE__
+  auto n = ::pwrite(fd, data, size, offset);
+  if (n > 0 && ::fsync(fd) != 0)
+    return -1;
+  return n;
+#else
+  iovec iov{.iov_base = const_cast<void*>(data), .iov_len = size};
+  return ::pwritev2(fd, &iov, 1, offset, RWF_DSYNC);
+#endif
+}
+
 int Ledger::do_datasync(int fd) {
   return datasync(fd);
 }
@@ -527,6 +541,7 @@ Result<void> Ledger::open(RaftIndex first_idx, std::optional<RaftIndex> installi
       return r;
     released_ = last_locked();
     durable_.store(released_);
+    synced_.store(released_);
   }
 
   {
@@ -701,10 +716,10 @@ Result<void> Ledger::fail(std::error_code ec) {
   return ec;
 }
 
-Result<void> Ledger::pwrite_all(int fd, void const* data, size_t size, off_t offset) {
+Result<void> Ledger::pwrite_all(int fd, void const* data, size_t size, off_t offset, bool dsync) {
   auto const* p = static_cast<uint8_t const*>(data);
   while (size > 0) {
-    auto n = do_pwrite(fd, p, size, offset);
+    auto n = dsync ? do_pwrite_dsync(fd, p, size, offset) : do_pwrite(fd, p, size, offset);
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -816,9 +831,12 @@ Result<void> Ledger::rotate(RaftIndex idx) {
   return ok();
 }
 
-Result<void> Ledger::write_records(vector<Pending> const& records) {
+Result<void> Ledger::write_records(vector<Pending> const& records, bool dsync) {
   if (auto r = check_writable(); !r)
     return r;
+  dsync = dsync && !options_.no_sync;
+  // Synced through the last entry before these records: then they extend synced_.
+  bool const contiguous = synced_.load() >= last_locked();
 
   size_t i = 0;
   while (i < records.size()) {
@@ -837,16 +855,24 @@ Result<void> Ledger::write_records(vector<Pending> const& records) {
     while (j < records.size() && f->end + total + records.at(j).bytes.size() <= options_.file_size)
       total += records.at(j++).bytes.size();
 
+    // A file's first records: its header (written by create_file, not synced) is synced with
+    // them, so the whole file is synced after the write rather than the write's range.
+    bool const first_records = f->end == f->start;
+    bool const range_dsync   = dsync && !first_records;
+
     Result<void> w = ok();
     if (j == i + 1) {
-      w = pwrite_all(f->fd, records.at(i).bytes.data(), total, static_cast<off_t>(f->end));
+      w = pwrite_all(
+          f->fd, records.at(i).bytes.data(), total, static_cast<off_t>(f->end), range_dsync);
     } else {
       Bytes buf;
       buf.reserve(total);
       for (auto k = i; k < j; ++k)
         buf.insert(buf.end(), records.at(k).bytes.begin(), records.at(k).bytes.end());
-      w = pwrite_all(f->fd, buf.data(), total, static_cast<off_t>(f->end));
+      w = pwrite_all(f->fd, buf.data(), total, static_cast<off_t>(f->end), range_dsync);
     }
+    if (w && dsync && first_records && do_datasync(f->fd) != 0)
+      w = system_error_code(errno);
     if (!w)
       return fail(elog(w.error(), "Unable to write {}", f->path));
 
@@ -869,8 +895,15 @@ Result<void> Ledger::write_records(vector<Pending> const& records) {
     i = j;
   }
 
+  // With dsync the records are on disk already (a file rotated in between was synced by rotate()).
+  if (dsync && contiguous)
+    synced_.store(last_locked());
   if (options_.no_sync || !options_.sync) {
     durable_.store(last_locked());
+  } else if (dsync) {
+    // No sync thread round: what isn't synced yet the caller syncs (sync()).
+    if (durable_.load() < synced_.load())
+      durable_.store(synced_.load());
   } else {
     {
       auto lk    = std::unique_lock{sync_mtx_};
@@ -926,7 +959,8 @@ Result<std::optional<RaftIndex>> Ledger::append_records(RaftIndex               
 
 Result<std::optional<Appended>> Ledger::append_records(RaftIndex                    prev_idx,
                                                        RaftTerm                     prev_term,
-                                                       vector<DecodedRecord> const& decoded) {
+                                                       vector<DecodedRecord> const& decoded,
+                                                       bool                         sync) {
   if (!decoded.empty() && decoded.front().header.idx != prev_idx + 1U)
     return elog(system_error_code(EBADMSG),
                 "ledger {}: records from index {} after index {}",
@@ -998,7 +1032,7 @@ Result<std::optional<Appended>> Ledger::append_records(RaftIndex                
                              .crc   = rec.header.crc}});
   }
   if (!pending.empty())
-    if (auto r = write_records(pending); !r)
+    if (auto r = write_records(pending, sync); !r)
       return r.error();
   return std::optional<Appended>{Appended{.last = last_idx, .first_new = first_new}};
 }
@@ -1068,6 +1102,8 @@ Result<void> Ledger::truncate_locked(RaftIndex idx) {
     window_.pop_back();
   if (durable_.load() > idx)
     durable_.store(idx);
+  if (synced_.load() > idx)
+    synced_.store(idx);
 
   // The state at idx: from the last file's header, with its records applied.
   if (files_.empty()) {
@@ -1121,6 +1157,8 @@ Result<void> Ledger::sync_once() {
   auto lk = std::unique_lock{mtx_};
   if (gen == generation_ && durable_.load() < last)
     durable_.store(last);
+  if (gen == generation_ && synced_.load() < last)
+    synced_.store(last);
   return ok();
 }
 
@@ -1734,6 +1772,7 @@ Result<void> Ledger::finish_install(RaftIndex first) {
     return fail(r.error());
   released_ = last_locked();
   durable_.store(released_);
+  synced_.store(released_);
   log(INFO, "ledger {}: installed {} … {}", dir_, base_idx_ + 1U, released_);
   return ok();
 }

@@ -186,10 +186,13 @@ class Ledger {
                                                   RaftTerm                 prev_term,
                                                   std::span<uint8_t const> records);
 
-  /// The same, with the records decoded (decode_records()).
+  /// The same, with the records decoded (decode_records()). With |sync| (follower_sync), the
+  /// records it writes go to disk in the write itself (RWF_DSYNC: no separate fdatasync, and the
+  /// sync thread isn't woken); synced_idx() then covers them if it covered everything before.
   Result<std::optional<Appended>> append_records(RaftIndex                    prev_idx,
                                                  RaftTerm                     prev_term,
-                                                 vector<DecodedRecord> const& records);
+                                                 vector<DecodedRecord> const& records,
+                                                 bool                         sync = false);
 
   /// Deletes every entry after |idx| (idx >= the first index - 1).
   ///
@@ -203,6 +206,10 @@ class Ledger {
 
   /// The highest index known to be on disk (with sync off: the last appended).
   RaftIndex durable_idx() const { return durable_.load(); }
+
+  /// The highest index a sync has put on disk, whatever the options: by sync(), the sync thread,
+  /// or an append_records() with |sync|. (On open and after an install: the last entry.)
+  RaftIndex synced_idx() const { return synced_.load(); }
 
   /// Called by the sync thread (without the ledger's locks) after each sync, with durable_idx().
   void set_durable_callback(std::function<void(RaftIndex)> cb);
@@ -283,6 +290,8 @@ class Ledger {
  protected:
   // The system calls that write, for fault injection.
   virtual ssize_t do_pwrite(int fd, void const* data, size_t size, off_t offset);
+  /// A pwrite whose bytes are on disk when it returns (Linux: pwritev2 with RWF_DSYNC).
+  virtual ssize_t do_pwrite_dsync(int fd, void const* data, size_t size, off_t offset);
   virtual int     do_datasync(int fd);
   virtual int     do_rename(char const* from, char const* to);
 
@@ -295,10 +304,10 @@ class Ledger {
 
   Result<void> load_files(RaftIndex first_idx);
 
-  Result<void> write_records(vector<Pending> const& records);
+  Result<void> write_records(vector<Pending> const& records, bool dsync = false);
   Result<void> rotate(RaftIndex idx);
   Result<shared_ptr<File>> create_file(FileHeader const& header);
-  Result<void> pwrite_all(int fd, void const* data, size_t size, off_t offset);
+  Result<void> pwrite_all(int fd, void const* data, size_t size, off_t offset, bool dsync = false);
   Result<void> zero_range(int fd, size_t from, size_t to);
   Result<void> fsync_dir();
 
@@ -358,6 +367,7 @@ class Ledger {
   uint64_t                           generation_ = 0;  // bumped by every truncation
 
   std::atomic<RaftIndex> durable_{RaftIndex{0}};
+  std::atomic<RaftIndex> synced_{RaftIndex{0}};  // written under mtx_
 
   std::mutex                     sync_mtx_;
   std::condition_variable        sync_cv_;

@@ -828,9 +828,11 @@ namespace {
 struct FaultLedger : public Ledger {
   using Ledger::Ledger;
 
-  std::thread::id const owner = std::this_thread::get_id();
-  int                   fail_at;
-  int                   calls = 0;
+  std::thread::id const owner        = std::this_thread::get_id();
+  int                   fail_at      = -1;
+  int                   calls        = 0;
+  int                   dsync_writes = 0;
+  int                   datasyncs    = 0;
 
   bool fail() {
     if (std::this_thread::get_id() != owner)
@@ -844,7 +846,16 @@ struct FaultLedger : public Ledger {
     }
     return Ledger::do_pwrite(fd, data, size, offset);
   }
+  ssize_t do_pwrite_dsync(int fd, void const* data, size_t size, off_t offset) override {
+    ++dsync_writes;
+    if (fail()) {
+      errno = EIO;
+      return -1;
+    }
+    return Ledger::do_pwrite_dsync(fd, data, size, offset);
+  }
   int do_datasync(int fd) override {
+    ++datasyncs;
     if (fail()) {
       errno = EIO;
       return -1;
@@ -893,6 +904,124 @@ BOOST_AUTO_TEST_CASE(write_failures) {
     BOOST_TEST(std::get<1>(l.last_entry()) == RaftIndex{done.size()});
     if (!done.empty())
       check_entries(l, RaftIndex{1}, done);
+    if (!failed)
+      break;
+  }
+}
+
+namespace {
+
+/// The follower's append of |from|'s records after |prev| (batches of 7), with |sync|.
+RaftIndex replicate_synced(Ledger const& from, Ledger& to, RaftIndex prev, bool sync) {
+  for (;;) {
+    auto batch = from.records(prev + 1U, 7, 2000);
+    BOOST_REQUIRE(batch.has_value() && batch->has_value());
+    if ((*batch)->count() == 0)
+      return prev;
+    auto bytes   = concat(**batch);
+    auto decoded = decode_records(bytes);
+    BOOST_REQUIRE(decoded.has_value());
+    auto r = to.append_records(prev, *from.term(prev), *decoded, sync);
+    if (!r || !r->has_value())
+      return prev;
+    prev = (*batch)->last;
+  }
+}
+
+}  // namespace
+
+// follower_sync: the records are written with RWF_DSYNC, no separate datasync except for a file's
+// first records (its header); synced_idx() follows only what a sync covered.
+BOOST_AUTO_TEST_CASE(follower_sync_records) {
+  TmpDir base;
+  Dir    l_dir(base, "lead30");
+  Dir    f_dir(base, "foll31");
+  Dir    g_dir(base, "foll32");
+  Ledger leader(l_dir(), small(2048));
+  BOOST_REQUIRE(leader.open().has_value());
+  auto items = append_n(leader, 60, RaftTerm{1}, 1, 300);  // several 2 KiB files
+
+  auto o    = small(2048);
+  o.no_sync = false;
+  o.sync    = true;  // leader_sync on too: the follower's appends don't wake the sync thread
+  {
+    FaultLedger f(f_dir(), o);
+    BOOST_REQUIRE(f.open().has_value());
+    auto last = replicate_synced(leader, f, RaftIndex{0}, true);
+    BOOST_TEST(last == RaftIndex{60});
+    BOOST_TEST(f.synced_idx() == RaftIndex{60});
+    BOOST_TEST(f.durable_idx() == RaftIndex{60});
+    BOOST_TEST(f.dsync_writes > 0);
+    BOOST_TEST(f.file_count() > 2U);
+    // A datasync per new file (its header with its first records, and the old one on rotation),
+    // none per append.
+    BOOST_TEST(f.datasyncs <= 2 * static_cast<int>(f.file_count()));
+
+    // Records it has: skipped, synced_idx unchanged and still covering them.
+    auto again   = leader.records(RaftIndex{20}, 5);
+    auto decoded = decode_records(concat(**again));
+    BOOST_REQUIRE(decoded.has_value());
+    auto r = f.append_records(RaftIndex{19}, RaftTerm{1}, *decoded, true);
+    BOOST_REQUIRE(r.has_value() && r->has_value());
+    BOOST_TEST(f.synced_idx() >= (*r)->last);
+  }
+  {
+    Ledger f(f_dir(), o);
+    BOOST_REQUIRE(f.open().has_value());
+    check_entries(f, RaftIndex{1}, items);
+    BOOST_TEST(f.verify().has_value());
+  }
+
+  // Records appended without sync, then with: synced_idx() stays behind until a sync() covers
+  // them (the caller's fallback).
+  auto og = o;
+  og.sync = false;
+  Ledger g(g_dir(), og);
+  BOOST_REQUIRE(g.open().has_value());
+  auto first = leader.records(RaftIndex{1}, 10);
+  auto d1    = decode_records(concat(**first));
+  BOOST_REQUIRE(d1.has_value());
+  BOOST_REQUIRE(g.append_records(RaftIndex{0}, RaftTerm{0}, *d1, false).has_value());
+  BOOST_TEST(g.synced_idx() == RaftIndex{0});
+  BOOST_TEST(g.durable_idx() == RaftIndex{10});  // leader_sync off: the last appended
+  auto last = replicate_synced(leader, g, RaftIndex{10}, true);
+  BOOST_TEST(last == RaftIndex{60});
+  BOOST_TEST(g.synced_idx() < RaftIndex{60});
+  BOOST_REQUIRE(g.sync().has_value());
+  BOOST_TEST(g.synced_idx() == RaftIndex{60});
+
+  // A truncation lowers it.
+  BOOST_REQUIRE(g.truncate_after(RaftIndex{30}).has_value());
+  BOOST_TEST(g.synced_idx() == RaftIndex{30});
+}
+
+// Every write of a follower's synced appends failing in turn: what was appended before survives.
+BOOST_AUTO_TEST_CASE(follower_sync_write_failures) {
+  TmpDir base;
+  Dir    l_dir(base, "lead33");
+  Ledger leader(l_dir(), small(2048));
+  BOOST_REQUIRE(leader.open().has_value());
+  auto items = append_n(leader, 40, RaftTerm{1}, 1, 300);
+
+  auto o    = small(2048);
+  o.no_sync = false;
+  for (int k = 0;; ++k) {
+    Dir       tmp(base, "tmp34");
+    RaftIndex last{0};
+    bool      failed = false;
+    {
+      FaultLedger f(tmp(), o);
+      f.fail_at = k;
+      BOOST_REQUIRE(f.open().has_value());
+      last   = replicate_synced(leader, f, RaftIndex{0}, true);
+      failed = last != RaftIndex{40};
+    }
+    Ledger f(tmp(), o);
+    BOOST_REQUIRE(f.open().has_value());
+    BOOST_TEST(f.verify().has_value());
+    BOOST_TEST(std::get<1>(f.last_entry()) >= last);
+    if (last > RaftIndex{0})
+      check_entries(f, RaftIndex{1}, vector<Item>(items.begin(), items.begin() + INT(last)));
     if (!failed)
       break;
   }

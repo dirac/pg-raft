@@ -177,7 +177,14 @@ The commit-path syncs are `leader_sync` and `follower_sync` (§11), separate fla
     last record below that offset, and wake the commit. The leader counts itself in the quorum at
     `durable_idx` (§10.3), so its sync runs in parallel with the network round instead of before
     it. Rounds that arrive while a sync is in flight are covered by the next one (group commit).
-- **`follower_sync = true`.** A follower, after the `pwrite`, calls `fdatasync` and then responds.
+- **`follower_sync = true`.** A follower writes the records with `pwritev2(RWF_DSYNC)` (one system
+  call: they are on disk when it returns; a file's first records are followed by an `fdatasync`,
+  for its header) and then responds. `synced_idx` is the highest index a sync covered; when it
+  doesn't reach the answer's index (records the follower already had, e.g. from its time as the
+  leader, skipped and never synced) the follower `fdatasync`s first. Measured: no gain over `pwrite`
+  + `fdatasync` (the ~30 µs is the disk write), and heartbeats no longer sync. A follower never
+  has more than about one AppendEntries waiting (PostgreSQL's WAL arrives one flush at a time), so
+  grouping their syncs wouldn't help.
 - **Off.** `durable_idx` is the appended index. A background thread `fdatasync`s the
   last file once a second. A machine crash can lose the last
   second of a node's acknowledged entries; commits survive through replication, as they do today.
@@ -198,7 +205,7 @@ The request's attached bytes are whole records (§10.1). For each record, the fo
 
 A record whose index the follower already holds with the same CRC is skipped. At the first one
 whose CRC differs, the follower truncates (§6.4) and appends the rest with one `pwrite` per file,
-then answers (after an `fdatasync` with `follower_sync`). The WAL bytes go into its `raft/wal` when the
+then answers (written with `RWF_DSYNC` with `follower_sync`, §6.2). The WAL bytes go into its `raft/wal` when the
 entries are applied (§9.1).
 
 ### 6.4 Truncation

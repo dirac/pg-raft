@@ -896,11 +896,14 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
 
   std::optional<Appended> appended;
   if (decoded && decoded->size() == request.n && request.prev_log_idx >= commit_idx())
-    appended = value(ledger_.append_records(request.prev_log_idx, request.prev_log_term, *decoded));
+    appended = value(ledger_.append_records(
+        request.prev_log_idx, request.prev_log_term, *decoded, options_.follower_sync));
 
   if (appended) [[likely]] {
-    // Their WAL goes into wal_dir when they are applied (committed).
-    if (options_.follower_sync)
+    // Their WAL goes into wal_dir when they are applied (committed). With follower_sync the
+    // records were written with RWF_DSYNC; a full sync only when that didn't cover everything up
+    // to the answer (records this ledger already had, e.g. from its time as the leader).
+    if (options_.follower_sync && ledger_.synced_idx() < appended->last)
       value(ledger_.sync());
 
     update_last_ping(false);

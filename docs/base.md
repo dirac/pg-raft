@@ -45,7 +45,7 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 | `write_op_bytes` | on the leader, the WAL written since the last flush goes with the next flush (one raft entry per fsync), or as a `WriteOp` of its own as soon as this many bytes of a segment are pending | `65536` |
 | `frame_checksums` | xxhash32 of every network frame raft sends; TCP checksums the segments already (the raft log's records carry a CRC-32C of their own, [ledger.md](ledger.md)) | `false` |
 | `leader_sync` | the leader counts itself in the quorum only once its ledger has the entry on disk (its `fdatasync` runs during the round; raft `Options::leader_sync`) | `false` |
-| `follower_sync` | a follower `fdatasync`s its ledger before it acknowledges an AppendEntries (raft `Options::follower_sync`) | `false` |
+| `follower_sync` | a follower writes its ledger records with `RWF_DSYNC` (on disk) before it acknowledges an AppendEntries (raft `Options::follower_sync`) | `false` |
 | `ledger_file_size` | each raft ledger file: a power of 2, larger than 32 MiB, at most 2 GiB ([ledger.md](ledger.md) §4) | 1 GiB |
 
 With the three syncs off (the default), a commit is durable once a majority has the WAL in its
