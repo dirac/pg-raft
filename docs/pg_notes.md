@@ -270,7 +270,9 @@ With `off`, a crash can lose the most recent commits but cannot corrupt data.
 
 - **Creation** (`XLogFileInit` → `XLogFileInitInternal`):
   1. Write a new file named **`xlogtemp.<pid>`** in `pg_wal`.
-  2. Fill it with zeros when `wal_init_zero = on` (the default).
+  2. Fill it with zeros when `wal_init_zero = on` (the default); with `off`, write one byte at
+     its end. (pg-raft sets `off`: the zeros go through FUSE under `WALWriteLock`, ~85 ms a
+     segment during which no commit can complete.)
   3. fsync it.
   4. `durable_rename` it to the real segment name (`InstallXLogFileSegment`), then fsync the
      directory.

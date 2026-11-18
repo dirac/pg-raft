@@ -82,6 +82,7 @@ bool PgInstance::init(std::vector<std::string> initdb_args) {
 static std::map<std::string, std::string> const kDefaultConfig = {
     {"wal_sync_method", "fsync"},
     {"wal_recycle", "off"},
+    {"wal_init_zero", "off"},
     {"wal_level", "replica"},
     {"listen_addresses", "'*'"},
     {"fsync", "on"},
