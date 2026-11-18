@@ -111,6 +111,29 @@ Found in the second review (2026-11-12), not fixed yet:
   (only what tests and the node poller need is there today).
 - [ ] **backup**: no S3 store (decided); a shared filesystem works as a `DirBackupStore` if it has
   atomic rename, a shared mtime and a durable fsync.
+- [ ] **PostgreSQL patch for an overlapping commit wait** (not started). Today a commit waits for the
+  quorum inside the WAL fsync, under `WALWriteLock`, so the raft rounds are serial (the cost
+  against streaming replication, `bench/README.md` 2026-11-18). Waiting instead as PostgreSQL's
+  synchronous standby (`SyncRepWaitForLSN`, branch `sync-rep-commit`, `commit_wait = "sync_rep"`)
+  overlaps the rounds, but stock PostgreSQL then lets a commit become visible without the quorum.
+  What would have to change, in `src/backend/replication/syncrep.c` (17.9) and around it, behind a
+  setting (e.g. `synchronous_commit_wait = uninterruptible`):
+  - `SyncRepWaitForLSN`, `QueryCancelPending` (a cancel request, `statement_timeout`,
+    `transaction_timeout`): today it stops waiting with a WARNING and the commit becomes visible.
+    It should keep waiting (clear the flag, don't break).
+  - `ProcDiePending` (`pg_terminate_backend`, a fast shutdown): today it stops waiting with a
+    WARNING and the commit becomes visible before the process exits. It should end the process
+    without the commit becoming visible: PANIC, since a committed transaction can't be aborted.
+  - Postmaster death: already exits without the commit becoming visible (the process dies).
+  - A PANIC restarts every backend and replays the local WAL, which would bring the unreplicated
+    commit back: pg-raft would also force `restart_after_crash = off`, so that the node restarts
+    PostgreSQL as a standby on a `pg_wal` rebuilt from raft (as after any unclean end).
+  - `synchronous_standby_names` emptied or changed by a reload (`ALTER SYSTEM`) releases every
+    waiter (`SyncRepUpdateSyncStandbysDefined`): the node must own it (reject or rewrite changes).
+  - A session can set `synchronous_commit` to `local` or `off` and skip the wait: its own choice,
+    but no longer the cluster's guarantee; document it, or force it (a role or database setting).
+  - The patch is small (one function plus a setting); it has to be carried, and checked, for each
+    PostgreSQL major version that pg-raft supports (it already builds its own, `external/`).
 
 ## Tests and housekeeping
 
