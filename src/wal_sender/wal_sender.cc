@@ -173,6 +173,12 @@ string WalSender::format_lsn(uint64_t lsn) {
   return buf;
 }
 
+string wal_segment_name(uint32_t tli, uint64_t lsn, uint32_t segment_size) {
+  uint64_t const per_log_id = (uint64_t{1} << 32) / segment_size;
+  uint64_t const seg_num    = lsn / segment_size;
+  return std::format("{:08X}{:08X}{:08X}", tli, seg_num / per_log_id, seg_num % per_log_id);
+}
+
 int64_t WalSender::now_pg_ts() {
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch())
@@ -592,12 +598,7 @@ void WalSender::send_wal() {
     uint64_t seg_end   = seg_start + wal_segment_size_;
     uint64_t read_end  = std::min({seg_end, limit, owner->end});
 
-    uint32_t seghi = static_cast<uint32_t>(seg_num >> 32);
-    uint32_t seglo = static_cast<uint32_t>(seg_num & 0xFFFFFFFFu);
-
-    char name[32];
-    snprintf(name, sizeof(name), "%08X%08X%08X", owner->tli, seghi, seglo);
-    auto fpath = wal_dir_ / name;
+    auto fpath = wal_dir_ / wal_segment_name(owner->tli, pos, wal_segment_size_);
 
     int fd = open(fpath.c_str(), O_RDONLY);
     if (fd < 0) {

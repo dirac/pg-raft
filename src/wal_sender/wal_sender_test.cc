@@ -52,6 +52,19 @@ static uint64_t read_system_id(string const& data_dir) {
 
 // ── test ──────────────────────────────────────────────────────────────────────
 
+// Segment names past 4 GiB of WAL (the sender stopped there: it looked for ...00000100).
+BOOST_AUTO_TEST_CASE(segment_names) {
+  uint32_t const k16M = 16u << 20;
+  BOOST_TEST(wal_segment_name(2, 0x0FFFFF970, k16M) == "0000000200000000000000FF");
+  BOOST_TEST(wal_segment_name(2, 0x100000000, k16M) == "000000020000000100000000");
+  BOOST_TEST(wal_segment_name(2, 0x12C108E40, k16M) == "00000002000000010000002C");
+  BOOST_TEST(wal_segment_name(1, 0xA3FF000000, k16M) == "00000001000000A3000000FF");
+  BOOST_TEST(wal_segment_name(1, 0x100000000, 1u << 30) == "000000010000000100000000");
+  BOOST_TEST(wal_segment_name(1, 0x1C0000000, 1u << 30) == "000000010000000100000003");
+  for (uint64_t lsn : {0x0ULL, 0x3000000ULL, 0xFFFFF970ULL, 0x100000000ULL, 0x12C108E40ULL})
+    BOOST_TEST(wal_segment_name(7, lsn, k16M) == filename(LogSeqNumber{7, lsn}));
+}
+
 BOOST_AUTO_TEST_CASE(primary_standby_async, * boost::unit_test::timeout(60)) {
   if (!pg_available()) {
     BOOST_TEST_MESSAGE("PostgreSQL not available at " + string(kPgBin) + "; skipping");

@@ -7,6 +7,11 @@ struct StandbyStatus {
   uint64_t applied_lsn;
 };
 
+// The name of the WAL segment file holding |lsn| on |tli|, as PostgreSQL's XLogFileName: the
+// timeline, then the segment number split into the 4 GiB "log id" and the segment within it
+// (not the segment number's high and low 32 bits: 1/00000000 is 000000010000000100000000).
+std::string wal_segment_name(uint32_t tli, uint64_t lsn, uint32_t segment_size);
+
 // Asio-based WAL sender.  Handles one physical replication connection.
 // Reads WAL from |wal_dir| as advance() notifications arrive.
 //
