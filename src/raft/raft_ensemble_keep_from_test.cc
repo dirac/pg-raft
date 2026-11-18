@@ -43,6 +43,21 @@ BOOST_AUTO_TEST_CASE(keep_from, *boost::unit_test::timeout(timeout)) {
   for (unsigned i = 0; i < 3; ++i)
     if (auto s = service.server(i))
       s->set_wal_keep_from(keep);
+  // Compaction never goes past the last checkpoint (checkpoint_secs): when the segments filled
+  // before one, the servers compact at a later periodic().
+  auto compacted = [&service] {
+    for (unsigned i = 0; i < 3; ++i)
+      if (auto s = service.server(i);
+          !s || s->inspect_for_test([](RaftState const&, Ledger const& log, RaftIndex) {
+                  return log.first_idx();
+                }) == RaftIndex{1})
+        return false;
+    return true;
+  };
+  for (auto end = std::chrono::steady_clock::now() + 30s;
+       !compacted() && std::chrono::steady_clock::now() < end;
+       std::this_thread::sleep_for(200ms)) {
+  }
   std::this_thread::sleep_for(1s);  // the WAL deletion thread
 
   for (unsigned i = 0; i < 3; ++i) {
