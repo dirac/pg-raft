@@ -85,6 +85,7 @@ BOOST_AUTO_TEST_CASE(wiped_node_recovers, *boost::unit_test::timeout(600)) {
 
   auto options                        = NodeOptions{};
   options.raft.election_timeout_msecs = 1000;
+  options.ledger_file_size_for_test   = size_t{4} << 20U;  // the WAL spans several files
   options.backup_check_interval       = 2s;
 
   vector<shared_ptr<Node>> nodes;
@@ -111,9 +112,11 @@ BOOST_AUTO_TEST_CASE(wiped_node_recovers, *boost::unit_test::timeout(600)) {
     return latest && *latest && (*latest)->time > after;
   }));
   auto const latest = store.latest().value().value();
+  // By whole ledger files: the first file kept may start in the segment before.
   BOOST_REQUIRE(wait_for(60s, [&] {
     auto s = primary->raft()->applied_state();
-    return s.first_idx > RaftIndex{1} && !(s.first_segment < keep_from(latest));
+    return s.first_idx > RaftIndex{1} &&
+           s.first_segment.lsn + kWalSegmentSize >= keep_from(latest).lsn;
   }));
 
   // A follower loses everything.

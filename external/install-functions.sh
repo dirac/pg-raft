@@ -4,7 +4,6 @@ OPENSSL_VERSION=3.6.0
 BOOST_VERSION=1.90.0
 CXXOPTS_VERSION=3.3.1
 TOML_VERSION=4.4.0
-LMDB_VERSION=1.0.0-branch
 
 function exit_on_error {
   if [ "$1" -ne "0" ]; then

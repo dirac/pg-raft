@@ -62,11 +62,20 @@ struct Config {
   /// of its own), so that a large transaction streams its WAL before its commit.
   uint64_t write_op_bytes = 64 * 1024;
   /// frame_checksums: xxhash32 of every network frame raft sends (TCP checksums the segments
-  /// already; LMDB's page checksums, for crash recovery, are always on).
+  /// already; the ledger's records carry a CRC-32C of their own, always).
   bool frame_checksums = false;
-  /// log_sync: every commit of the raft log (LMDB) is synced. Off: MDB_NOSYNC, and a background
-  /// thread syncs the log within a second.
+  /// log_sync: the raft log (the ledger, docs/ledger.md) is synced before an entry counts as held
+  /// by a node. Off: a background thread syncs it within a second.
   bool log_sync = false;
+  /// ledger_file_size: the size of each ledger file. A power of 2, larger than 32 MiB (a ledger
+  /// file outgrows a 16 MiB WAL segment, an InstallSnapshot's two), at most 2 GiB (a file's
+  /// written offset is 32 bits): 64 MiB, 128 MiB, ..., 2 GiB.
+  uint64_t ledger_file_size = uint64_t{1} << 30U;
+
+  /// Whether |size| is a valid ledger_file_size.
+  static bool valid_ledger_file_size(uint64_t size) {
+    return std::has_single_bit(size) && size > (uint64_t{32} << 20U) && size <= (uint64_t{2} << 30U);
+  }
 
   /// Proxy configuration
   uint16_t proxy_pg_port   = 5432;  // For client connections, that will be forwarded to the leader.

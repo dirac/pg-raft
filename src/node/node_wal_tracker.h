@@ -7,12 +7,12 @@
 // entries on the leader, and stays local on a follower.
 //
 // Leader mode:
-//  - async_publish: the bytes go from PostgreSQL's segment (pg/pg_wal) into the same segment in
-//    raft's wal_dir (raft/wal), from which the peer connections send them, and their range is
-//    added to the segment's pending range. Once that reaches write_op_bytes it is sent at once,
-//    as a WriteOp (a large transaction streams its WAL before its commit); smaller writes wait
-//    for the next flush.
-//  - async_fsync: (with leader_sync, msync both copies,) then one FlushOp that carries what is
+//  - async_publish: the range is added to the segment's pending range. Once that reaches
+//    write_op_bytes it is sent at once, as a WriteOp (a large transaction streams its WAL before
+//    its commit); smaller writes wait for the next flush. An entry's WAL bytes go to exec() from
+//    PostgreSQL's segment (pg/pg_wal); its ledger record copies them, and every node writes them
+//    into raft/wal when it applies the entry.
+//  - async_fsync: (with leader_sync, msync pg_wal,) then one FlushOp that carries what is
 //    pending of the segment, the bytes written since its last WriteOp or flush; PostgreSQL's
 //    fsync (and its commit) returns when the FlushOp is committed on a quorum, and fails with
 //    kNoConsensus if the node is not, or stops being, the leader (PostgreSQL then PANICs, by

@@ -36,6 +36,13 @@ void parse_node(T& data, Config& config) {
     config.frame_checksums = toml::find<bool>(data, "frame_checksums");
   if (data.contains("log_sync"))
     config.log_sync = toml::find<bool>(data, "log_sync");
+  if (data.contains("ledger_file_size")) {
+    config.ledger_file_size = toml::find<uint64_t>(data, "ledger_file_size");
+    if (!Config::valid_ledger_file_size(config.ledger_file_size))
+      throw std::invalid_argument(std::format(
+          "ledger_file_size = {}: a power of 2, larger than 32 MiB and at most 2 GiB",
+          config.ledger_file_size));
+  }
   if (data.contains("proxy_pg_port"))
     config.proxy_pg_port = toml::find<uint16_t>(data, "proxy_pg_port");
   if (data.contains("proxy_http_port"))

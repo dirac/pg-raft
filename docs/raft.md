@@ -1,7 +1,7 @@
 # `raft` — Consensus over the WAL stream
 
-Source: `src/raft/`. The module is built, and it is tested by `raft_log_test` plus six in-process
-ensemble tests.
+Source: `src/raft/`. The module is built, and it is tested by `ledger_test` plus six in-process
+ensemble tests. The log is the ledger ([ledger.md](ledger.md)).
 
 ## 1. Purpose
 
@@ -20,8 +20,8 @@ into an entry. The WAL bytes travel alongside the entries.
 ### Construction and options
 
 `RaftServer(id, acceptor, config, dir, wal_dir, options, observer)`, instantiated with
-`Server::create<RaftServer>(...)` (`net`). `dir` holds the LMDB log, `wal_dir` the WAL segments
-(`raft/wal` in a node). `raft_log()` is the log accessor (`log()` would hide the global logger).
+`Server::create<RaftServer>(...)` (`net`). `dir` holds the ledger (`dir/ledger`), the term file
+and the meta file; `wal_dir` the WAL segments (`raft/wal` in a node). `raft_log()` is the log accessor (`log()` would hide the global logger).
 
 `Options` (`options.h`):
 
@@ -36,7 +36,10 @@ into an entry. The WAL bytes travel alongside the entries.
 | `keep_old_logs` | 16384 | entries kept by a compaction without `keep_from` |
 | `compaction_lag` | 65536 | applied entries between compactions |
 | `log_req_response` | false | log every request and response |
-| `sync_commits` | false | sync the log on every commit, rather than in the background within a second |
+| `ledger_file_size` | 1 GiB | each ledger file's size (the node passes `Config::ledger_file_size`) |
+| `max_request_bytes` | 8 MiB | the records of an AppendEntries, the chunk of an InstallSnapshot |
+| `sync_commits` | false | sync the ledger before an entry counts as held (the leader: during the round; a follower: before it answers), rather than in the background within a second |
+| `checkpoint_secs` | 10 | how often the WAL written into `wal_dir` on apply is synced and the applied state saved (a checkpoint) |
 | `no_sync` | false | tests only: never sync (a machine crash loses the term, vote and log) |
 
 ## 2. Data model
@@ -58,28 +61,19 @@ struct WalCommand {
 };
 ```
 
-### 2.2 WAL payload (`MemBlock`)
+### 2.2 WAL payload: the ledger's records
 
-An entry only names a region; the bytes go in the same message as the request:
-
-```
-[ net header: data size, attached size, xxhash32 of each ]
-[ RaftRequest (binary archive, incl. data = up to 2 MemBlocks) ][ block0 bytes ][ block1 bytes ]
-```
-
-- `RaftPeerConnection::mem_blocks(entries)` takes the union range of the WAL bytes in each segment
-  (`wal_bytes(cmd)`: a `WriteOp`'s, or a `FlushOp`'s). `trim()` cuts a batch so that it touches at
-  most **2 segments**.
-- `send_request` **copies** the block bytes out of the segment mmap into a buffer owned by the
-  request, then attaches that buffer. The copy is required: PostgreSQL keeps writing into the
-  segment and rewrites its last page, so sending directly from the mmap lets the bytes change
-  between computing the frame checksum and writing the socket. The ensemble tests caught exactly
-  this.
-- The follower receives `(RaftRequest, bytes)` through `read_data_and_buff()`. It checks that the
-  block sizes add up to the bytes received. The server writes and msyncs the bytes **only after**
-  it has accepted the request (term current, log matching). So a request from a deposed leader
-  never touches the WAL, and a successful `AppendEntriesResponse` means the bytes are durable on
-  that follower.
+Each entry is a ledger record: the entry followed by the WAL bytes its command names
+([ledger.md](ledger.md) §3). The leader creates the record in `exec(cmd, wal, handler)`, from the
+WAL bytes the node passes (PostgreSQL's `pg_wal`); from then on the record is copied byte for byte, so `prev_crc` links one
+chain across nodes. An AppendEntries carries `n` whole records as its attached bytes, read from
+the leader's ledger files (no copy from a segment mmap, which PostgreSQL keeps rewriting). The
+follower decodes and checks them (crc, indexes, terms, chain) and appends the new ones to its
+ledger only **after** it has accepted the request (term current, log matching), so a request from
+a deposed leader never touches its log. `wal_dir` gets an entry's WAL bytes when the entry is
+applied, on every node ([ledger.md](ledger.md) §9): it holds committed WAL only. A successful
+`AppendEntriesResponse` means the records are in that follower's ledger (on its disk with
+`sync_commits`).
 
 ### 2.3 State machine (`raft_state.h`)
 
@@ -94,6 +88,7 @@ position:
 | `flushed_lsn` | highest `flushed_lsn` applied: the committed WAL a standby may replay |
 | `needs_backup` | set when the log was replaced by an InstallSnapshot; the WAL before the snapshot's segments is missing until a PostgreSQL backup restores it |
 | `wal_end` | highest end (segment + offset + size) of the WAL bytes applied (`WriteOp`s and `FlushOp`s): the end of the WAL in `wal_dir`. A new leader's standby replays up to it before promotion (see [node.md](node.md#32-promotion-became_leader)). A maximum, because a rewritten page is published again over earlier offsets. It can end inside an incomplete record |
+| `first_idx`, `first_segment` | the node's own: the first entry of its ledger (a ledger file's first index), and the segment of the first entry that has one |
 
 A `RaftObserver` (set by the node) receives `applied(idx, entry, state)` for each applied entry,
 `installed(state)` after a snapshot, `became_leader(term)` at full leadership (once every
@@ -105,37 +100,20 @@ must not block. On a follower, `applied` advances the WalSender to `state.flushe
 doesn't start elections and doesn't take one from a `RequestElection`; it still votes and
 replicates (`raft_ensemble_needs_backup_test`).
 
-### 2.4 Persistent state (`RaftLog`, LMDB)
-
-`RaftLog` keeps:
-
-- 4 KiB pages. No LMDB page checksums on the logs database: every value is
-  `[CRC-32C of its key and object][the object]`, the CRC computed while serializing (`RawOArchive`)
-  and not checked by the reads; `RaftLog::verify()` checks every value, that the log starts at the
-  saved state's `first_idx` (or the `(0, 0)` sentinel) and that no index is missing after it, and
-  that the terms never decrease. The term database (term, vote) has LMDB's page checksums (xxhash32).
-- The thread-local check that no transaction or cursor leaks.
-- A background sync thread, unless `sync_commits` is set (`no_sync` is for tests only).
+### 2.4 Persistent state
 
 | File | Contents |
 |---|---|
-| `term.lmdb` | `"term"` → u64 (the term only moves forward, and a new term clears the vote), `"vote"` → node |
-| `logs.lmdb` / `logs_` | `(idx BE, term BE)` → binary-archived `Entry`. A sentinel `(0,0)` is written on creation |
-| `logs.lmdb` / `meta_` | `"state"` → `RaftState` |
+| `dir/ledger/*.ledger` | the log: the ledger's files ([ledger.md](ledger.md)), each with a header holding the state at the entry before its first record |
+| `dir/term` | `{term, voted_for}` (`TermFile`): the term only moves forward, a new term clears the vote, one vote per term; always synced (but with `no_sync`) |
+| `dir/meta` | `{state, installing}`: the saved `RaftState`, written at compaction, on `needs_backup` changes and by an install |
 
-Operations:
-
-- `append_entries(prev_idx, prev_term, entries, delete_entries)`:
-  - Leader path: append only after the last entry.
-  - Follower path: delete everything after a matching `(prev_idx, prev_term)`, then append.
-  - On `MDB_MAP_FULL` the map grows ×4. On `MDB_TXN_FULL` the batch is split in half.
-- `entries_from(idx, n)` (`nullopt` if `idx` was compacted), `latest_entries(n)`, `get_term(idx)`.
-- `save_snapshot(state, keep)`: store the state, then delete entries before
-  `state.log_idx - keep`.
-- `compact(first, state, boundary)`: delete the entries before `first` and store the state and the
-  boundary state in one transaction (§3.5); `load_boundary()` reads the boundary back.
-- `install_snapshot(log_idx, entries, state, boundary)`: replace the whole log with
-  `(log_idx, …]` and store both states.
+The term and meta files are written whole (temporary file, sync, rename, directory sync) and carry
+a CRC-32C. On startup the server reads the term, the meta file (an empty state when there is none),
+and opens the ledger at the saved `first_idx` (finishing an install the meta file names); the
+state machine starts from the saved state and re-applies the entries after it as they commit. The
+**boundary state** (the state at the entry before the first one) is the first ledger file's
+header.
 
 ## 3. Protocol
 
@@ -144,7 +122,7 @@ The message types:
 ```
 RaftRequest  { term, node_id, variant<monostate /*ping*/, RequestVote, AppendEntries,
                                       InstallSnapshot, RequestElection> request,
-               RequestResponseInfo info, inplace_vector<MemBlock,2> data }
+               RequestResponseInfo info }        // + attached bytes: records, or a file chunk
 RaftResponse { term, node_id, variant<monostate, RequestVoteResponse, AppendEntriesResponse,
                                       InstallSnapshotResponse, RequestElectionResponse> response,
                RequestResponseInfo info }
@@ -187,20 +165,22 @@ gets a `RaftClientConnection` (§6). `PeerConnectionMgr` reconnects closed slots
 - `send_append_entries`:
   - When the peer is caught up, an AppendEntries is sent at most every `election_timeout/4`; it
     doubles as the heartbeat.
-  - Otherwise it sends up to `max_entries` entries, trimmed to 2 segments, with their blocks.
+  - Otherwise it sends up to `max_entries` records (at most `max_request_bytes`, at most two
+    ledger files).
   - If the needed entries have been compacted, it sends InstallSnapshot instead.
 - **Follower:**
   - Reject a stale term.
   - Become a follower.
   - Accept only if `prev_log_idx >= commit_idx` and the log matches.
-  - Write the blocks.
+  - Append the new records to the ledger (skipping those it has, truncating at the first that
+    differs), and write their WAL bytes.
   - Set `commit_idx = min(leader_commit, last new)`.
   - On a mismatch, reply `{idx, term at idx, n}`, where `n` is the run of uncommitted entries with
     that term.
 - **Leader on response:**
   - Success: `in_sync`, then the match index. The commit index is the highest index held by a
-    majority (`MatchIndexes` counts peers only, quorum `n/2`, because the leader's own copy is
-    implicit). Then apply.
+    majority of all the nodes (`MatchIndexes`, quorum `n/2 + 1`), the leader counted at its
+    ledger's durable index (the ledger's sync thread updates it too). Then apply.
   - Failure: walk back up to `min(n, 64)` entries looking for a match. If there is no term to
     compare (`term` missing) or the entry has been compacted, send InstallSnapshot.
 - **Ticks:** the leader appends a tick entry if it has appended nothing for `tick_seconds`.
@@ -213,32 +193,35 @@ entries inherited from earlier leaders have no handler.
 
 ### 3.5 Compaction and snapshots
 
-- **Compaction** (`compact_log`, implemented): after `compaction_lag` applied entries, or when
+- **Compaction** (`compact_log`): after `compaction_lag` applied entries, or when
   `set_wal_keep_from` moves. With a `keep_from` (the start of the latest backup's segment, set by
-  the node) the new first entry is the first one whose segment is at or after it; without one
-  (the raft tests) `keep_old_logs` entries are kept. Never past the last applied entry, which
-  stays. **The leader compacts too**; stepping down to compact would be a PostgreSQL failover.
-  The state at the entry before the new first one (the **boundary state**) is the previous
-  boundary with the deleted entries applied. `RaftLog::compact` deletes the entries and saves the
-  state (with `first_idx` and `first_segment`) and the boundary state in **one** transaction.
+  the node's backup thread on every node) the target is the first entry whose segment is at or
+  after it; without one (the raft tests) `keep_old_logs` entries are kept. Never past the last
+  applied entry, nor past the last checkpoint ([ledger.md](ledger.md) §9.2; a checkpoint compacts
+  again when a `keep_from` is set). Then it is rounded down to the first index of the ledger file that holds it:
+  **compaction deletes whole files**, and the new first file's header is the boundary state. The
+  meta file is written first (`first_idx`, `first_segment`), then the files are deleted. **The
+  leader compacts too**; stepping down to compact would be a PostgreSQL failover. No node takes a
+  backup to compact: the standbys take the backups.
 - **WAL deletion** (`wal_gc`, a thread of its own): deletes the segments of `wal_dir` wholly before
   `first_segment`, by address, so the parent timeline's copy of the segment where a timeline
   starts is kept (the WAL sender reads the start of the new timeline's first segment from it).
   Every entry in the log has its WAL in `wal_dir`.
-- **InstallSnapshot, phase 1 (raft)**: the leader sends its **oldest** entries (not the
-  sentinel), as many as write to at most 2 segments, with the **full contents** of those segments,
-  its **boundary state** (the state at the entry before them), and its latest timeline history
-  file, if any (`InstallSnapshot::timeline`). The follower writes the segments and the history
-  file, installs the entries with the boundary state as its state (`needs_backup = true`,
-  `first_idx`, `first_segment`) and as its boundary, and continues with AppendEntries from there.
-  Since the leader keeps every entry from the latest backup on, that backup and these entries
-  meet.
+- **InstallSnapshot, phase 1 (raft)**: the leader sends its **first ledger file**, bytes
+  `[0, written offset)`, in chunks of `max_request_bytes`, one at a time
+  (`InstallSnapshot{first, offset, size}`). The follower writes them to its install file; after the
+  last one it checks the file whole, replaces its ledger with it, takes the file header's state
+  as its state (`needs_backup = true`, `first_idx`, `first_segment`), writes the records' WAL into
+  `wal_dir`, and answers with its last index; the leader continues with AppendEntries from there
+  ([ledger.md](ledger.md) §6.6). A failed chunk ends it; the next InstallSnapshot starts over.
+  Since the leader keeps every entry from the latest backup on, that backup and this file meet.
 - **No snapshot when none is needed**: a follower that is behind answers a failed AppendEntries
   without a term when its log ends within what it committed; those entries match the leader's,
   so the leader continues right after them if it still has that entry, and sends a snapshot only
   when it has compacted it away.
 - **Phase 2 (PostgreSQL backup)** (implemented in the node, [node.md](node.md#43-recovering-from-needs_backup)):
-  a node with `needs_backup` restores the latest backup and restarts its standby;
+  a node with `needs_backup` restores the latest backup and restarts its standby; the restore
+  copies the backup's segments and history files into `wal_dir` where missing.
   `RaftServer::restored_backup(end)` clears `needs_backup` only if the backup's last segment
   reaches `first_segment` (an InstallSnapshot during the restore can move it), under the server
   lock.
@@ -247,14 +230,15 @@ entries inherited from earlier leaders have no handler.
 
 | Where | What |
 |---|---|
-| Leader `WalTracker::async_publish(seg, off, size)` (`NodeWalTracker`) | copy the bytes into `wal_dir`'s segment and add them to the segment's pending range; `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, …)` once it reaches `write_op_bytes`, else they go with the next flush |
+| Leader `WalTracker::async_publish(seg, off, size)` (`NodeWalTracker`) | add them to the segment's pending range; `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, bytes, …)` (the range's bytes from `pg_wal`) once it reaches `write_op_bytes`, else they go with the next flush |
 | Leader `WalTracker::async_timeline(tli, content)` | `exec(WalCommand{…, TimelineOp{tli, content}})` |
-| Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{pending range}}, h)`: the flush carries the writes since the last `WriteOp` or flush. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
+| Leader `WalTracker::async_fsync(seg, off, size, cb)` | `exec(WalCommand{…, FlushOp{pending range}}, bytes, h)`: the flush carries the writes since the last `WriteOp` or flush. `h` calls `cb(ok)` on commit, or `cb(kNoConsensus)` on `kNotLeader`. PostgreSQL's fsync, and therefore its commit, returns only after quorum. |
 | Follower `RaftObserver::applied` | `WalSender::advance(state.flushed_lsn.lsn)` |
 | Every node | `set_pg_status(...)` from a `PgClient` poller, `set_serving(true)` once the leader's PostgreSQL is promoted, `set_needs_backup(true)` when it has no usable data directory, `restored_backup(end)` after a restore, and `set_wal_keep_from(keep_from(latest backup))` |
 
 `RaftServer::segment(lsn)` opens segments in the server's `wal_dir` through one
-`WalSegmentCache`, and creates a missing segment, zero-filled. In the node design `wal_dir` is
+`WalSegmentCache`, and creates a missing segment, zero-filled (for reading: `wal_dir` is written
+with `pwrite` on apply, and synced by the checkpoints). In the node design `wal_dir` is
 `raft/wal`, separate from the FUSE backing directory `pg/pg_wal` (see
 [node.md](node.md#directory-layout)).
 
@@ -266,7 +250,8 @@ The model:
 - `usage_lock_` (shared) guards against shutdown. Request and response handlers take it, and
   `close()` takes it exclusively.
 - Each `RaftPeerConnection` serializes its sends with `mtx_`.
-- `RaftLog` has one writer and many readers.
+- The ledger has one writer (under the server lock) and many readers, which read without its lock
+  below each file's written offset ([ledger.md](ledger.md) §12).
 
 ## 6. Client channel (`client_types.h`)
 
@@ -288,13 +273,13 @@ The model:
 
 | Test | What |
 |---|---|
-| `raft_log_test` | fault injection (every LMDB call fails in turn, and no txn or cursor leaks), plus appends and conflicts, entries and latest entries, snapshot and compaction, `install_snapshot`, term and vote, key encoding |
+| `ledger_test` | the ledger: records, file headers, appends and conflicts, truncation, torn tails, compaction, InstallSnapshot in chunks and its crash points, write failures, the term and meta files ([ledger.md](ledger.md) §14) |
 | `raft_ensemble_sanity_test` | 5 nodes for 20 s under the Writer |
 | `raft_ensemble_leader_stopped_test` | the leader crashes 3 times and restarts |
 | `raft_ensemble_stepdown_test` | 4 hand-overs via `RequestElection` |
 | `raft_ensemble_snapshot_test` | a follower loses its files while the others compact. It must receive an InstallSnapshot **while the leader is under load** and catch up with `needs_backup` set. |
 | `raft_ensemble_needs_backup_test` | a node with `needs_backup` set never leads, but votes and replicates |
-| `raft_ensemble_keep_from_test` | `set_wal_keep_from` compacts every server to the first entry of the kept segment, the earlier segments are deleted, and a wiped server catches up through an InstallSnapshot of the oldest entries with the leader's boundary state |
+| `raft_ensemble_keep_from_test` | `set_wal_keep_from` compacts every server, by whole ledger files, to the start of the file holding the kept segment's first entry; the segments before the first one kept are deleted; a wiped server catches up through an InstallSnapshot of the leader's first ledger file |
 
 The **Writer** plays the primary. It writes random bytes into the leader's segments at increasing
 offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
@@ -311,9 +296,8 @@ offsets, calls `exec(WriteOp)`, and calls `exec(FlushOp)` from time to time.
    `<timeline>.history`) generate entries.
 2. **Client channel leftovers**: `SnapshotRequest` / `SnapshotResponse` and `set_backup_provider`
    are unused by the node design (nodes restore from the backup store); candidates for removal.
-3. `RaftLog::install_snapshot` runs three transactions (delete every entry, append the new ones,
-   save the states): a crash between them leaves a log that doesn't match its stored state. One
-   transaction would fix it.
+3. (Fixed by the ledger: an install is named in the meta file before it replaces the ledger, and
+   startup finishes it.)
 
 Fixed and worth remembering (found by `node_test`): on a short log the leader's walk-back could set
 `next_idx = 0`, so the next AppendEntries had `prev_log_idx = 0 - 1` and became an

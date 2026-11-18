@@ -3,11 +3,11 @@
 #include "src/base/wal_segment.h"
 #include "src/net/connection.h"
 #include "src/raft/options.h"
-#include "src/raft/raft_log.h"
+#include "src/raft/ledger.h"
 #include "src/raft/raft_types.h"
 
-// The requests carry the WAL bytes of their entries (MemBlocks, copied from the segment mmap and
-// sent as an attached buffer); an InstallSnapshot sends the latest entries and their segments.
+// AppendEntries carries the leader's ledger records, byte for byte (read from the ledger files, at
+// most two buffers); an InstallSnapshot sends the first ledger file, in chunks.
 
 class RaftPeerConnection;
 
@@ -41,19 +41,9 @@ struct PeerConnectionApi {
 
   virtual std::shared_lock<std::shared_mutex> usage_lock() const = 0;
 
-  /// The WAL segment, to send its bytes.
-  virtual Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const = 0;
-
-  /// The latest timeline history file in wal_dir, to send with an InstallSnapshot.
-  virtual std::optional<TimelineOp> latest_timeline() const = 0;
-
   /// A copy of the applied state. It must not take the server lock: a caller may hold the
   /// connection's lock.
   virtual RaftState applied_state() const = 0;
-
-  /// A copy of the state at the entry before the first one (RaftLog::load_boundary), sent with an
-  /// InstallSnapshot of the oldest entries. Without the server lock, as applied_state().
-  virtual RaftState boundary_state() const = 0;
 
   [[noreturn]] virtual void system_error(std::error_code ec) const = 0;
 };
@@ -90,22 +80,31 @@ class RaftPeerConnection : public Connection {
   /// receives a reply from the majority of nodes (Exclusing self) and it will not vote for one more
   /// than the  largest term number received.
   ///
-  void send_ping(RaftLog const& rlog);
+  void send_ping(RaftTerm current_term);
 
   /// If the node is a leader.
-  void send_append_entries(RaftLog const& rlog, RaftTerm leadership_term, RaftIndex commit_idx) {
+  void send_append_entries(Ledger const& ledger, RaftTerm leadership_term, RaftIndex commit_idx) {
     return send_append_entries(
-        std::unique_lock<std::mutex>{mtx_}, rlog, leadership_term, commit_idx);
+        std::unique_lock<std::mutex>{mtx_}, ledger, leadership_term, commit_idx);
   }
 
   void send_append_entries(std::unique_lock<std::mutex> lk,
-                           RaftLog const&               rlog,
+                           Ledger const&                ledger,
                            RaftTerm                     leadership_term,
                            RaftIndex                    commit_idx);
 
+  /// Starts an InstallSnapshot: the first ledger file, from offset 0.
   void send_install_snapshot(std::unique_lock<std::mutex> lk,
-                             RaftLog const&               rlog,
+                             Ledger const&                ledger,
                              RaftTerm                     leadership_term);
+
+  /// The next chunk of the InstallSnapshot in progress (after the follower took the previous one).
+  void send_snapshot_chunk(std::unique_lock<std::mutex> lk,
+                           Ledger const&                ledger,
+                           RaftTerm                     leadership_term);
+
+  /// The InstallSnapshot is over (installed, or failed: the next one starts from offset 0).
+  void end_snapshot(std::unique_lock<std::mutex> const&) { snapshot_.reset(); }
 
   /// On failure of AppendEntries, should we send any append entries. If we have an outstanding
   /// append entry its response will also fail and trigger an append entries request.
@@ -117,10 +116,10 @@ class RaftPeerConnection : public Connection {
   }
 
   /// If the node is a candidate.
-  void send_request_vote(RaftLog const& rlog, RaftTerm candidate_term);
+  void send_request_vote(Ledger const& ledger, RaftTerm candidate_term);
 
   /// Request election from the node
-  void send_request_election(RaftLog const& rlog, RaftTerm leadership_term);
+  void send_request_election(Ledger const& ledger, RaftTerm leadership_term);
 
   /// On leader election or on failure of append entries the server resets the nextIndex.
   void set_next_idx(RaftIndex idx, std::unique_lock<std::mutex> const&) {
@@ -134,14 +133,6 @@ class RaftPeerConnection : public Connection {
   RaftNodeId self_id() const { return self_id_; }
   RaftNodeId peer_id() const { return peer_id_; }
 
-  /// Drop the entries after the first ones that write to more than two segments: a request carries
-  /// the bytes of at most two segments.
-  static void trim(vector<Entry>& entries);
-
-  /// The regions of the segments written by the entries (the whole segments with
-  /// full_wal_segment).
-  static inplace_vector<MemBlock, 2> mem_blocks(vector<Entry> const& entries,
-                                                bool                 full_wal_segment);
 
  private:
   static constexpr unsigned kSeqBits = 32;
@@ -183,7 +174,7 @@ class RaftPeerConnection : public Connection {
     }
     if (auto const* r = std::get_if<AppendEntries>(&request.request)) {
       request.info.log =
-          options_.log_req_response && (r->prev_log_idx != prev_log_idx_ || !r->entries.empty());
+          options_.log_req_response && (r->prev_log_idx != prev_log_idx_ || r->n != 0);
       prev_log_idx_ = r->prev_log_idx;
     } else {
       request.info.log = true;
@@ -219,10 +210,12 @@ class RaftPeerConnection : public Connection {
   // Read the message (RaftResponse);
   void response_handler(Result<Data> msg);
 
-  /// Send the request followed by the bytes of its MemBlocks; releases the lock.
-  void send_request(std::unique_lock<std::mutex> lk, RaftRequest request);
+  /// Send the request followed by the attached bytes (at most two buffers); releases the lock.
+  void send_request(std::unique_lock<std::mutex>  lk,
+                    RaftRequest                   request,
+                    shared_ptr<vector<Bytes>> const& attached = nullptr);
 
-  void set_leader_term(RaftLog const&                      rlog,
+  void set_leader_term(Ledger const&                       ledger,
                        RaftTerm                            leadership_term,
                        std::unique_lock<std::mutex> const& lk);
 
@@ -243,6 +236,13 @@ class RaftPeerConnection : public Connection {
   std::atomic_flag in_sync_;
 
   RaftIndex next_idx_{0};
+
+  // The InstallSnapshot in progress: the file, and the bytes sent so far.
+  struct Snapshot {
+    SnapshotFile file;
+    size_t       sent = 0;
+  };
+  std::optional<Snapshot> snapshot_;
   unsigned  last_send_{0};  // When (epoch_msec()) append entries or install snapshot was sent.
 
   // The diff between LSB and MSB is the number of outstanding calls of each kind.

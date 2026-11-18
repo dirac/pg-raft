@@ -69,9 +69,6 @@
 #include <variant>
 #include <vector>
 
-/// LMDB
-#include <lmdb.h>
-
 /// Boost ASIO
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>

@@ -45,7 +45,7 @@ BOOST_AUTO_TEST_CASE(needs_backup_never_leads, *boost::unit_test::timeout(timeou
   service.stop(other, /*delete_files=*/false, /*crash=*/true);
   service.start(other);
   BOOST_TEST(service.server(other)->inspect_for_test(
-      [](RaftState const& s, RaftLog const&, RaftIndex) { return s.needs_backup; }));
+      [](RaftState const& s, Ledger const&, RaftIndex) { return s.needs_backup; }));
 
   // Cleared, it may lead again.
   for (unsigned i = 0; i < 3; ++i)

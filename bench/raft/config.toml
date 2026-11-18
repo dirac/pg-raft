@@ -26,18 +26,22 @@ backup_pending_timeout_secs = 120
 # writes the pages back on its own. Only a power loss of a majority at once loses commits.
 #   leader_sync    the leader msyncs its WAL (pg_wal and raft's copy) before the commit round
 #   follower_sync  a follower msyncs the WAL it receives before acknowledging it
-#   log_sync       the raft log (LMDB) is synced on every commit (off: MDB_NOSYNC, synced in the
-#                  background within a second)
+#   log_sync       the raft log (the ledger, docs/ledger.md) is synced before an entry counts as
+#                  held by a node (off: synced in the background within a second)
 leader_sync   = false
 follower_sync = false
 log_sync      = false
+
+# Each raft ledger file (docs/ledger.md): a power of 2, larger than 32 MiB, at most 2 GiB. Each
+# node also keeps a zero-filled spare of this size.
+ledger_file_size = 1073741824   # 1 GiB
 
 # On the leader, the WAL written since the last flush goes with the next flush (one raft entry per
 # fsync), or as an entry of its own once this many bytes of a segment are pending.
 write_op_bytes = 65536
 
 # xxhash32 of every network frame raft sends (TCP checksums the segments already). The raft log's
-# page checksums, which matter after a crash, are always on.
+# records carry a CRC-32C of their own, always.
 frame_checksums = false
 
 # Lines for pg_hba.conf, written by init.sh ahead of pg-raft's defaults (the loopback is trusted,

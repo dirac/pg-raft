@@ -22,6 +22,7 @@ follower_sync = true
 log_sync = true
 write_op_bytes = 131072
 frame_checksums = true
+ledger_file_size = 268435456
 pg_hba = ["host all all 10.0.0.0/16 trust", "host replication all 10.0.0.0/16 trust"]
 proxy_pg_port = 6432
 proxy_http_port = 6480
@@ -52,6 +53,7 @@ max_connections = 100
   BOOST_TEST(c.log_sync);
   BOOST_TEST(c.write_op_bytes == 131072U);
   BOOST_TEST(c.frame_checksums);
+  BOOST_TEST(c.ledger_file_size == uint64_t{256} << 20U);
   BOOST_REQUIRE(c.pg_hba.size() == 2U);
   BOOST_TEST(c.pg_hba.at(1) == "host replication all 10.0.0.0/16 trust");
   BOOST_TEST(c.proxy_pg_port == 6432);
@@ -79,7 +81,23 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   BOOST_TEST(!c.log_sync);
   BOOST_TEST(c.write_op_bytes == 64U * 1024U);
   BOOST_TEST(!c.frame_checksums);
+  BOOST_TEST(c.ledger_file_size == uint64_t{1} << 30U);
   BOOST_TEST(c.pg_hba.empty());
   BOOST_TEST(c.proxy_pg_port == 5432);
   BOOST_TEST(c.proxy_http_port == 8080);
+}
+
+BOOST_AUTO_TEST_CASE(ledger_file_size) {
+  TmpDir tmp;
+  auto   file = tmp() / "config.toml";
+  for (uint64_t size : {uint64_t{64} << 20U, uint64_t{2} << 30U}) {
+    std::ofstream(file) << std::format("ledger_file_size = {}\n", size);
+    BOOST_TEST(Config{file.string()}.ledger_file_size == size);
+  }
+  // Not a power of 2, not larger than 32 MiB, larger than 2 GiB.
+  for (uint64_t size : {uint64_t{100} << 20U, uint64_t{32} << 20U, uint64_t{16} << 20U,
+                        uint64_t{4} << 30U}) {
+    std::ofstream(file) << std::format("ledger_file_size = {}\n", size);
+    BOOST_CHECK_THROW(Config{file.string()}, std::invalid_argument);
+  }
 }

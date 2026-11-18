@@ -23,7 +23,7 @@
 ///    entry that has one. Every entry in the log has its WAL in wal_dir, so the segments wholly
 ///    before first_segment (by address) can be deleted (RaftServer's WAL deletion thread).
 ///
-/// It is saved with the log on compaction (RaftLog::save_snapshot).
+/// It is saved in the meta file (docs/ledger.md §8) on compaction and on needs_backup changes.
 struct RaftState {
   RaftIndex    log_idx{0};
   std::time_t  timestamp{0};

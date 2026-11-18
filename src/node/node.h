@@ -32,6 +32,9 @@ struct NodeOptions {
   std::chrono::milliseconds poll_interval{500};
   std::chrono::seconds      promote_timeout{60};  // per step of a promotion
   std::chrono::seconds      backup_check_interval{60};
+  // Tests only: ledger files of this size instead of Config::ledger_file_size (which must be over
+  // 32 MiB), so that a test's WAL spans several files and compaction deletes some.
+  size_t ledger_file_size_for_test = 0;
 };
 
 class Node : public std::enable_shared_from_this<Node> {

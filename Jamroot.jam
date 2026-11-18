@@ -37,7 +37,6 @@ lib boost_serialization   : : <name>boost_serialization   <search>/opt/pg_raft/l
 
 lib boost_unit_test_framework  : : <name>boost_unit_test_framework <search>/opt/pg_raft/lib/ ;
 
-lib lmdb : : <name>lmdb <search>/opt/pg_raft/lib/ ;
 # Only a shared libfuse is installed on Linux.
 lib fuse : : <name>fuse <search>/usr/local/lib <target-os>linux:<link>shared ;
 
@@ -48,7 +47,6 @@ alias external :
     boost_json
     boost_filesystem
     boost_serialization
-    lmdb
     fuse
     ssl
     crypto

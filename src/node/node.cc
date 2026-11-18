@@ -160,8 +160,10 @@ Result<void> Node::start() {
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);
   // The disk syncs on the commit path (config.h): off unless the config (or the caller) asks.
   auto raft_options          = options_.raft;
-  raft_options.follower_sync = raft_options.follower_sync || config_.follower_sync;
   raft_options.sync_commits  = raft_options.sync_commits || config_.log_sync;
+  raft_options.ledger_file_size = options_.ledger_file_size_for_test != 0
+                                      ? options_.ledger_file_size_for_test
+                                      : config_.ledger_file_size;
   raft_                      = Server::create<RaftServer>(id_,
                                      asio::ip::tcp::acceptor(io_context(), endpoint),
                                      config_,

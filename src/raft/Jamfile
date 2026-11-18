@@ -5,7 +5,7 @@ alias deps
   ;
 
 lib raft_server
-  : raft_log.cc
+  : ledger.cc
     match_indexes.cc
     vote_tally.cc
     raft_peer_connection.cc
@@ -32,8 +32,8 @@ lib raft_test
     libs
   ;
 
-unit-test raft_log_test
-  : raft_log_test.cc
+unit-test ledger_test
+  : ledger_test.cc
     libs
     ../base//testing
   ;
@@ -75,6 +75,13 @@ unit-test raft_ensemble_needs_backup_test
 
 unit-test raft_ensemble_keep_from_test
   : raft_ensemble_keep_from_test.cc
+    raft_test
+    libs
+    ../base//testing
+  ;
+
+unit-test raft_ensemble_rematerialize_test
+  : raft_ensemble_rematerialize_test.cc
     raft_test
     libs
     ../base//testing

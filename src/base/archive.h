@@ -12,7 +12,7 @@
 // bytes are therefore those of binary_[io]archive with no_header (archive_test checks it).
 //
 // RawOArchive writes into a std::streambuf or appends to a std::string; RawIArchive reads from a
-// std::streambuf or from a memory range (an LMDB value, without copying it). Running out of input
+// std::streambuf or from a memory range (without copying it). Running out of input
 // throws boost::archive::archive_exception (input_stream_error).
 
 #include <boost/archive/basic_binary_iarchive.hpp>

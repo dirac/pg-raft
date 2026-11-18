@@ -20,7 +20,6 @@ mkdir -p BUILDS
 ${DIR}/install-pkg-config.sh
 ${DIR}/install-b2.sh
 ${DIR}/install-boost.sh
-${DIR}/install-lmdb.sh
 ${DIR}/install-toml.sh
 ${DIR}/install-cxxoptions.sh
 
