@@ -11,8 +11,10 @@ to its section there). Ordered roughly by how much they matter to a running clus
   forked timeline 5 there, so node 2's PostgreSQL failed with "requested timeline 5 is not a child
   of this server's history" and the node exited after `wait_ready` timed out. A standby replayed
   WAL past what the new leader treated as committed: either it received bytes beyond committed
-  `wal_end`, or `wal_end` stops short. Not yet investigated.
-  ([node.md §3.2](node.md#32-promotion-became_leader))
+  `wal_end`, or `wal_end` stops short. Not yet investigated. Since then the ledger changed what
+  `raft/wal` holds (committed WAL only, written on apply), and a node rebuilds `pg/pg_wal` on a
+  start after an unclean end (the last node of a stopping cluster always ends uncleanly: it can't
+  commit its shutdown checkpoint): re-test. ([node.md §3.2](node.md#32-promotion-became_leader))
 
 Found in the second review (2026-11-12), not fixed yet:
 
@@ -39,11 +41,6 @@ Found in the second review (2026-11-12), not fixed yet:
   `first_segment` (they are committed).
 - [ ] **node**: `restore_latest_backup` ignores a failed `copy_file` into `raft/wal` (the `ec` is
   overwritten by the next `rename`), and renames entries out of `data/pg_wal` while iterating it.
-- [ ] **node**: a node that restarts after crashing as the primary starts its PostgreSQL as a
-  standby on the `pg_wal` it has, which can hold WAL that never committed (an fsync that failed);
-  only a demotion rebuilds `pg_wal` from `raft/wal`. The node should rebuild `pg_wal` (as
-  `restart_as_standby` does) on every start that follows an unclean shutdown. (`pg_wal` is never
-  synced, [ledger.md §11](ledger.md#11-node-and-configuration); that makes no difference here.)
 - [ ] **raft**: `compact_log` runs under the server lock and, when `keep_from` moves, scans the
   entries from the first one to find the target (reading the ledger files): commits stall
   meanwhile. (It no longer applies them, nor deletes them in one transaction: the boundary state

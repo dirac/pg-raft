@@ -70,3 +70,9 @@ unit-test node_recovery_test
     libs
     ../base//testing
   ;
+
+unit-test node_restart_test
+  : node_restart_test.cc
+    libs
+    ../base//testing
+  ;

@@ -395,7 +395,8 @@ last appended index, and the result is the same as before.
 - **`pg_wal` is a cache of the WAL.** Raft keeps the committed WAL durably: the ledger, and
   `raft/wal` derived from it. A standby whose `pg_wal` lost pages in a machine crash finds an
   invalid record there and streams the rest from the WAL sender; a deposed primary's `pg_wal` is
-  rebuilt from `raft/wal` (`rebuild_pg_wal`) before it restarts as a standby.
+  rebuilt from `raft/wal` (`rebuild_pg_wal`) before it restarts as a standby, and so is a node's
+  after an unclean end of its previous run ([node.md §3.4](node.md#34-startup-and-postgresql-exits)).
 - **Config.** `leader_sync` and `follower_sync` are the ledger's syncs now (§6.2): they used to
   msync `pg_wal` and raft's copy, and `log_sync` synced LMDB (gone). `RAFT_SYNC=1` in
   `bench/multi` sets both.
@@ -486,10 +487,8 @@ These are estimates from the raw costs in the bench README. They will be measure
 
 ## 16. Open items
 
-1. **A restart after a crash as the primary.** The node starts its PostgreSQL as a standby on the
-   `pg_wal` it has, which can hold WAL that never committed; only a demotion rebuilds `pg_wal`
-   from `raft/wal`. (This predates the ledger: an unsynced `pg_wal` makes it no worse.) The node
-   should rebuild `pg_wal` on every start that follows an unclean shutdown. In `docs/todo.md`.
+1. (Done: a node rebuilds `pg_wal` from `raft/wal` on every start after an unclean end of its
+   previous run, [node.md §3.4](node.md#34-startup-and-postgresql-exits).)
 2. **The view instead of the copy** (§9.3).
 3. **Writes.** `O_DIRECT` or io_uring for the ledger's appends and syncs, if the `fdatasync`
    remains the commit's largest cost.

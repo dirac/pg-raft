@@ -262,6 +262,17 @@ Two cases are not raft events, so no hook fires for them:
 - **Startup.** The node restores a backup if it has no usable data directory (§4.2), then starts
   PostgreSQL as a standby by itself. If raft later reaches full leadership, `became_leader`
   promotes it.
+- **A start after an unclean end.** `node<N>/running` exists from `start()` until a `shutdown()`
+  that stopped PostgreSQL cleanly (Fast, within its wait). Found at a start (a crash, a kill, a
+  power loss, a PostgreSQL that had to be killed), it means `pg/pg_wal` can hold WAL that never
+  committed: a primary's writes whose fsync failed or never completed. So the node rebuilds
+  `pg/pg_wal` from `raft/wal` (`rebuild_pg_wal`, as a demotion does, §3.3) before it mounts FUSE
+  and starts PostgreSQL (not after a restore, which has just replaced it). `raft/wal` holds
+  committed WAL only (written on apply, [ledger.md](ledger.md) §9). The rebuild keeps it up to the
+  applied `wal_end` (the last checkpoint's, at a start), the restored backup's end, and where
+  PostgreSQL's control file says its replay must start or reach (its last checkpoint record, its
+  redo point, its minimum recovery point): those are committed, and raft/wal has no uncommitted
+  bytes to bring back past them. A standby then streams the rest (`node_restart_test`).
 - **PostgreSQL exits on its own**, without a role change (an OOM kill, a postmaster crash).
   **Not handled yet** (see §10): nothing watches the postmaster. The intended design: a watcher on
   the `Process` (`wait()`) wakes the transition thread, which restarts PostgreSQL in the node's
