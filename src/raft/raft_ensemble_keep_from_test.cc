@@ -34,31 +34,49 @@ BOOST_AUTO_TEST_CASE(keep_from, *boost::unit_test::timeout(timeout)) {
   }
   BOOST_REQUIRE(segments().size() >= 3U);
 
-  // The "latest backup" is in the second segment.
-  auto const keep   = *std::next(segments().begin());
+  // The "latest backup" is in the third segment: the compaction (by whole ledger files) deletes
+  // the first segment at least.
+  auto const keep   = *std::next(segments().begin(), 2);
   auto const writes = writer.writes();
   auto const first_kept =
       std::ranges::find_if(writes, [&](auto const& w) { return !(w.segment < keep); })->idx;
   for (unsigned i = 0; i < 3; ++i)
     if (auto s = service.server(i))
       s->set_wal_keep_from(keep);
+  // Compaction never goes past the last checkpoint (checkpoint_secs): when the segments filled
+  // before one, the servers compact at a later periodic().
+  auto compacted = [&service] {
+    for (unsigned i = 0; i < 3; ++i)
+      if (auto s = service.server(i);
+          !s || s->inspect_for_test([](RaftState const&, Ledger const& log, RaftIndex) {
+                  return log.first_idx();
+                }) == RaftIndex{1})
+        return false;
+    return true;
+  };
+  for (auto end = std::chrono::steady_clock::now() + 30s;
+       !compacted() && std::chrono::steady_clock::now() < end;
+       std::this_thread::sleep_for(200ms)) {
+  }
   std::this_thread::sleep_for(1s);  // the WAL deletion thread
 
   for (unsigned i = 0; i < 3; ++i) {
     auto s = service.server(i);
     auto [state, first] =
-        s->inspect_for_test([](RaftState const& st, RaftLog const& log, RaftIndex) {
-          return std::make_tuple(st, std::get<RaftIndex>(log.first_entry().value()));
+        s->inspect_for_test([](RaftState const& st, Ledger const& log, RaftIndex) {
+          return std::make_tuple(st, log.first_idx());
         });
-    // Compacted to the first entry in the kept segment, and no further.
+    // Compacted by whole ledger files: to the start of the file that holds the first entry in
+    // the kept segment, and no further (so the first segment kept may be the one before).
     BOOST_TEST(first == state.first_idx, i);
     BOOST_TEST(first > RaftIndex{1}, i);
     BOOST_TEST(first <= first_kept, i);
-    BOOST_TEST((state.first_segment == keep), i);
-    // The segments wholly before it are gone; it and the later ones are there.
+    BOOST_TEST(!(keep < state.first_segment), i);
+    BOOST_TEST(state.first_segment.lsn + 2U * kWalSegmentSize > keep.lsn, i);
+    // The segments wholly before the first one kept are gone; it and the later ones are there.
     for (auto const& seg : segments()) {
       auto exists = fs::exists(service.wal_dir(i) / filename(seg));
-      BOOST_TEST(exists == !(seg < keep), i << " " << filename(seg));
+      BOOST_TEST(exists == !(seg < state.first_segment), i << " " << filename(seg));
     }
   }
 
@@ -74,8 +92,8 @@ BOOST_AUTO_TEST_CASE(keep_from, *boost::unit_test::timeout(timeout)) {
        !caught && std::chrono::steady_clock::now() < end;
        std::this_thread::sleep_for(200ms)) {
     auto [state, first] = service.server(node)->inspect_for_test(
-        [](RaftState const& st, RaftLog const& log, RaftIndex) {
-          return std::make_tuple(st, std::get<RaftIndex>(log.first_entry().value()));
+        [](RaftState const& st, Ledger const& log, RaftIndex) {
+          return std::make_tuple(st, log.first_idx());
         });
     caught = state.needs_backup && first > RaftIndex{1} && first <= first_kept &&
              state.log_idx + 1000U > service.commit_idx();

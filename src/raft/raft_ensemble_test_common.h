@@ -6,8 +6,8 @@
 #include "src/base/xxhash.h"
 #include "src/raft/raft_test_service.h"
 
-// A Writer plays the primary: it writes WAL bytes into the leader's segments and appends
-// WriteOp/FlushOp entries with exec().
+// A Writer plays the primary: it appends WriteOp/FlushOp entries with exec(), with their WAL
+// bytes.
 
 using namespace std::chrono_literals;
 
@@ -25,12 +25,16 @@ auto const options = Options{
     .keep_old_logs            = 0x1U << 14U,
     .compaction_lag           = 0x1U << 16U,
     .log_req_response         = false,
+    // Small files: compactions and snapshots cross them, and each server zero-fills a spare.
+    .ledger_file_size = size_t{4} << 20U,
+    // An InstallSnapshot of a 4 MiB file goes in several chunks.
+    .max_request_bytes = size_t{1} << 20U,
     // The servers stop or crash as processes, never as machines: a sync only slows the tests.
     .no_sync = true,
 };
 
-/// Plays the primary: writes WAL bytes into the leader's segments at increasing offsets and
-/// appends their entries, one at a time (the WAL is written in order).
+/// Plays the primary: appends WriteOps of WAL bytes at increasing offsets, with the bytes, one at a
+/// time (the WAL is written in order).
 struct Writer {
   explicit Writer(RaftTestService& service) : service_(service) {
     thread_ = std::thread([this] { run(); });
@@ -80,12 +84,9 @@ struct Writer {
       auto bytes = Bytes(size);
       std::ranges::generate(bytes, [&rd] { return static_cast<uint8_t>(rd()); });
 
-      auto seg = s->segment(lsn);
-      BOOST_REQUIRE(seg.has_value());
-      seg.value()->write(bytes.data(), op.offset, op.size);
-
+      // The bytes go with the entry (every server writes them into its wal_dir on apply).
       auto flushed = LogSeqNumber{.timeline = 1, .lsn = o + size};
-      auto r       = exec(s, WalCommand{.flushed_lsn = flushed, .segment = lsn, .command = op});
+      auto r = exec(s, WalCommand{.flushed_lsn = flushed, .segment = lsn, .command = op}, bytes);
       if (r) {
         auto lk = std::unique_lock{mtx_};
         writes_.emplace_back(RaftTestService::Write{
@@ -118,10 +119,12 @@ struct Writer {
     }
   }
 
-  static Result<RaftIndex> exec(shared_ptr<TestRaftServer> const& s, WalCommand cmd) {
+  static Result<RaftIndex> exec(shared_ptr<TestRaftServer> const& s,
+                                WalCommand                        cmd,
+                                std::span<uint8_t const>          wal = {}) {
     auto promise = make_shared<std::promise<Result<RaftIndex>>>();
     auto future  = promise->get_future();
-    s->exec(std::move(cmd), [promise](Result<RaftIndex> r) { promise->set_value(r); });
+    s->exec(std::move(cmd), wal, [promise](Result<RaftIndex> r) { promise->set_value(r); });
 
     if (future.wait_for(30s) != std::future_status::ready) {
       BOOST_ERROR("exec did not complete in 30 seconds");

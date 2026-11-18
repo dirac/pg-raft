@@ -33,8 +33,9 @@ int main(int argc, char** argv) {
   sigaddset(&signals, SIGINT);
   pthread_sigmask(SIG_BLOCK, &signals, nullptr);
 
-  IoThreads io{8};
-  auto      node = Node::create(config(config_file), RaftNodeId(static_cast<uint16_t>(*id)));
+  auto      cfg = config(config_file);
+  IoThreads io{std::max(1U, cfg.io_threads)};
+  auto      node = Node::create(std::move(cfg), RaftNodeId(static_cast<uint16_t>(*id)));
   if (auto r = node->start(); !r) {
     node->shutdown();
     return 1;

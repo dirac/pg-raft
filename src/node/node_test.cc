@@ -79,6 +79,7 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
   cfg.wdir         = (tmp() / "w").string();
   cfg.backup_store = (tmp() / "store").string();
   cfg.socket_dir   = "/tmp";
+  cfg.ledger_file_size     = uint64_t{64} << 20U;  // the smallest: each node zero-fills a spare
   for (unsigned i = 0; i < kNodes; ++i)
     cfg.servers.push_back({.hostname = "127.0.0.1",
                            .pg_port  = static_cast<uint16_t>(kPgPort + i),

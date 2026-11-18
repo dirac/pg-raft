@@ -40,6 +40,21 @@ std::map<string, string> controldata(fs::path const& bin, fs::path const& dir) {
   return std::move(p.values);
 }
 
+/// Creates |path| (empty) and syncs it and its directory: it must be on disk before PostgreSQL
+/// writes anything.
+Result<void> write_marker(fs::path const& path) {
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT, file_mode());
+  if (fd == -1)
+    return elog(system_error_code(errno), "Unable to create {}", path);
+  ::fsync(fd);
+  ::close(fd);
+  if (int d = ::open(path.parent_path().c_str(), O_RDONLY); d != -1) {
+    ::fsync(d);
+    ::close(d);
+  }
+  return ok();
+}
+
 /// One query on a fresh connection; the first column of the first row.
 std::optional<string> query(uint16_t                  port,
                             char const*               sql,
@@ -160,8 +175,11 @@ Result<void> Node::start() {
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);
   // The disk syncs on the commit path (config.h): off unless the config (or the caller) asks.
   auto raft_options          = options_.raft;
+  raft_options.leader_sync   = raft_options.leader_sync || config_.leader_sync;
   raft_options.follower_sync = raft_options.follower_sync || config_.follower_sync;
-  raft_options.sync_commits  = raft_options.sync_commits || config_.log_sync;
+  raft_options.ledger_file_size = options_.ledger_file_size_for_test != 0
+                                      ? options_.ledger_file_size_for_test
+                                      : config_.ledger_file_size;
   raft_                      = Server::create<RaftServer>(id_,
                                      asio::ip::tcp::acceptor(io_context(), endpoint),
                                      config_,
@@ -170,15 +188,28 @@ Result<void> Node::start() {
                                      raft_options,
                                      make_shared<Observer>(weak_from_this()));
   tracker_                   = make_shared<NodeWalTracker>(
-      raft_, config_.leader_sync, config_.follower_sync, config_.write_op_bytes);
+      raft_, config_.write_op_bytes);
 
+  bool restored = false;
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
     raft_->set_needs_backup(true);  // no elections until there is something to promote
     // Behind the log (EAGAIN): start anyway, needs_backup stays set and the backup thread restores
     // a newer backup once there is one.
     if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
       return r;
+    restored = true;
   }
+
+  // After an unclean end of the previous run, pg/pg_wal can hold WAL that never committed (a
+  // primary's write whose fsync failed or never completed): rebuild it from raft/wal, which holds
+  // committed WAL only, before PostgreSQL starts on it. (A restore has just replaced it.)
+  if (fs::exists(running_marker()) && !restored && fs::exists(data_dir_ / "PG_VERSION")) {
+    log(WARN, "Node {}: the previous run did not end cleanly: rebuilding pg/pg_wal", id_);
+    if (auto r = rebuild(controldata(pg_bin(config_), data_dir_)); !r)
+      return r;
+  }
+  if (auto r = write_marker(running_marker()); !r)
+    return r;
 
   // FUSE over data/pg_wal, backed by pg/pg_wal.
   fs::create_directories(data_dir_ / "pg_wal", ec);
@@ -541,6 +572,59 @@ void Node::demote() {
           r.error().message());
 }
 
+LogSeqNumber Node::rebuild_end(std::map<string, string> const& control) const {
+  auto end  = raft_->applied_state().wal_end;
+  auto upto = [&end](LogSeqNumber lsn) {
+    if (end < lsn)
+      end = lsn;
+  };
+
+  // The backup's WAL counts up to the end of its last segment, not its End-LSN: pg_backup_stop
+  // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
+  // to the next segment boundary. Zeroing from the End-LSN would remove that record, and a
+  // standby promoted from this pg_wal would fork its timeline before where the others already are.
+  auto backup = backup_end();
+  if (backup.lsn % kWalSegmentSize != 0)
+    backup.lsn += kWalSegmentSize - backup.lsn % kWalSegmentSize;
+  upto(backup);
+
+  // At a start: the applied state is the last checkpoint's (raft re-applies the entries after
+  // it as they commit), which can be behind where PostgreSQL's replay must start or reach. Those
+  // positions are committed (a primary writes its checkpoint record, fsyncs it through raft, then
+  // updates its control file; a standby replays committed WAL only), and raft/wal holds committed
+  // bytes only (written on apply), so keeping its bytes up to them can't bring back uncommitted
+  // WAL. The checkpoint record's end is not in the control file: up to two pages after its start.
+  auto field = [&control](char const* key) -> std::optional<uint64_t> {
+    if (auto pos = control.find(key); pos != control.end())
+      return parse_lsn(pos->second);
+    return std::nullopt;
+  };
+  auto tli = [&control](char const* key) -> std::optional<uint32_t> {
+    if (auto pos = control.find(key); pos != control.end())
+      try {
+        return static_cast<uint32_t>(std::stoul(pos->second));
+      } catch (std::exception const&) {
+      }
+    return std::nullopt;
+  };
+  if (auto t = tli("Latest checkpoint's TimeLineID"); t) {
+    if (auto at = field("Latest checkpoint location"); at && *at != 0)
+      upto({.timeline = *t, .lsn = *at - *at % kWalBlockSize + 2U * kWalBlockSize});
+    if (auto redo = field("Latest checkpoint's REDO location"); redo && *redo != 0)
+      upto({.timeline = *t, .lsn = *redo});
+  }
+  if (auto t = tli("Min recovery ending loc's timeline"); t && *t != 0)
+    if (auto min = field("Minimum recovery ending location"); min && *min != 0)
+      upto({.timeline = *t, .lsn = *min});
+  return end;
+}
+
+Result<void> Node::rebuild(std::map<string, string> const& control) {
+  auto const end = rebuild_end(control);
+  log(INFO, "Node {}: rebuilding pg/pg_wal from raft/wal up to {}", id_, end);
+  return rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_, end);
+}
+
 LogSeqNumber Node::backup_end() const {
   std::ifstream in(base_dir_ / "backup_end");
   uint32_t      timeline = 0;
@@ -563,13 +647,7 @@ Result<void> Node::restart_as_standby() {
   // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
   // to the next segment boundary. Zeroing from the End-LSN would remove that record, and a
   // standby promoted from this pg_wal would fork its timeline before where the others already are.
-  auto backup = backup_end();
-  if (backup.lsn % kWalSegmentSize != 0)
-    backup.lsn += kWalSegmentSize - backup.lsn % kWalSegmentSize;
-  auto end = std::max(
-      raft_->applied_state().wal_end, backup, [](auto const& a, auto const& b) { return a < b; });
-  log(INFO, "Node {}: rebuilding pg/pg_wal from raft/wal up to {}", id_, end);
-  if (auto r = rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_, end); !r)
+  if (auto r = rebuild(); !r)
     return r;
 
   fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
@@ -762,10 +840,13 @@ void Node::shutdown() {
   // daemon has read cannot be killed, so the checkpointer holds PostgreSQL's output pipes and
   // stop() never returns. Shutting raft down fails the pending fsyncs (close() completes the
   // handlers with kNotLeader); the checkpointer then exits and the stop finishes.
+  // Clean: PostgreSQL ran and stopped (Fast) within the wait, its fsyncs all answered.
+  bool clean = false;
   if (pg_ && pg_->is_running()) {
     auto stopped =
         std::async(std::launch::async, [this] { pg_->stop(PgInstance::StopMode::Fast); });
-    if (stopped.wait_for(std::chrono::seconds(12)) != std::future_status::ready && raft_) {
+    clean = stopped.wait_for(std::chrono::seconds(12)) == std::future_status::ready;
+    if (!clean && raft_) {
       log(WARN, "Node {}: PostgreSQL did not stop; shutting raft down to release its fsyncs", id_);
       raft_->shutdown();
     }
@@ -789,5 +870,10 @@ void Node::shutdown() {
   }
   if (fuse_)
     fuse_->stop();
-  log(INFO, "Node {} stopped", id_);
+  // A clean end: the next start needs no rebuild of pg/pg_wal.
+  if (clean) {
+    std::error_code ec;
+    fs::remove(running_marker(), ec);
+  }
+  log(INFO, "Node {} stopped{}", id_, clean ? "" : " (not cleanly: the next start rebuilds pg/pg_wal)");
 }

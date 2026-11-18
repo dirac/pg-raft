@@ -51,14 +51,6 @@ void NodeWalTracker::async_publish(shared_ptr<WalSegment> segment, off_t offset,
   if (mode() != Mode::kLeader || size == 0)
     return;
 
-  // The bytes first: a peer connection may send them as soon as the entry is in the log.
-  auto copy = raft_->segment(segment->lsn());
-  if (!copy) {
-    elog(copy.error(), "Unable to open {} in raft's wal_dir", segment->lsn());
-    return;
-  }
-  copy.value()->write(segment->mapping() + offset, offset, size);
-
   // Pending: sent with the segment's next flush, or as a WriteOp once there is enough of it.
   auto const end   = offset + static_cast<off_t>(size);
   auto const epoch = epoch_.load();
@@ -78,12 +70,14 @@ void NodeWalTracker::async_publish(shared_ptr<WalSegment> segment, off_t offset,
   auto const [from, bytes] = take_pending(segment->lsn()).value_or(std::pair{off_t{0}, size_t{0}});
   if (bytes == 0)
     return;
+  // The bytes from PostgreSQL's segment: the entry's record copies them.
   raft_->exec(
       WalCommand{
           .flushed_lsn = carry(),
           .segment     = segment->lsn(),
           .command     = WriteOp{.offset = from, .size = bytes},
       },
+      std::span<uint8_t const>(segment->mapping() + from, bytes),
       [](Result<RaftIndex> r) {
         if (!r)
           log(DEBUG, "WriteOp not committed: {}", r.error().message());
@@ -92,29 +86,14 @@ void NodeWalTracker::async_publish(shared_ptr<WalSegment> segment, off_t offset,
 
 void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
                                  off_t                             offset,
-                                 size_t                            size,
+                                 size_t /*size*/,
                                  std::function<void(Result<void>)> completion) {
   if (mode() == Mode::kFenced)
     return completion(system_error_code(WalSegment::kNoConsensus));
 
-  // With leader_sync / follower_sync, local durability first, in pg_wal. Without it the bytes are
-  // in the page cache (written through the mmap) and a commit is durable by replication.
-  bool const leader = mode() == Mode::kLeader;
-  if (leader ? leader_sync_ : follower_sync_)
-    if (auto r = segment->fsync(offset, size); !r)
-      return completion(r);
-
-  if (!leader)
+  // pg_wal is a cache of the WAL (raft keeps it durably): no msync. A standby's fsync is done.
+  if (mode() != Mode::kLeader)
     return completion(ok());
-
-  // The leader's own copy counts towards the quorum.
-  if (leader_sync_) {
-    auto copy = raft_->segment(segment->lsn());
-    if (!copy)
-      return completion(copy.error());
-    if (auto r = copy.value()->fsync(offset, size); !r)
-      return completion(r);
-  }
 
   // The writes since the segment's last WriteOp or flush travel with this flush (wal_bytes());
   // nothing new: an empty FlushOp, still the barrier. Taken and appended under pending_mtx_, so
@@ -131,6 +110,7 @@ void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
           .segment     = segment->lsn(),
           .command     = flush,
       },
+      std::span<uint8_t const>(segment->mapping() + flush.offset, flush.size),
       [completion = std::move(completion)](Result<RaftIndex> r) {
         if (r)
           completion(ok());

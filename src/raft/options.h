@@ -13,15 +13,25 @@ struct Options {
   unsigned keep_old_logs    = 0x1U << 14U;   // Keep older logs upto when compacting.
   unsigned compaction_lag   = 0x1U << 16U;   // Compact the log after applying this many, 65k.
   bool     log_req_response = false;
-  // Sync the log on every commit, so that an entry is on the disk of a majority before it is
-  // committed. Otherwise the log is synced in the background, within a second.
-  bool sync_commits = false;
-  // A follower msyncs the WAL blocks of an AppendEntries before acknowledging it. Off by default:
-  // a commit is durable by replication (a majority has the bytes in its page cache, written
-  // through the mmap), not by the disks; the kernel writes the pages back on its own. Only a power
-  // loss of a majority at once loses acknowledged commits. (Config::follower_sync.)
+  // Each ledger file's size (docs/ledger.md); smaller in the tests.
+  size_t ledger_file_size = size_t{1} << 30U;
+  // The most bytes of records in an AppendEntries (at least one record is sent).
+  size_t max_request_bytes = size_t{8} << 20U;
+  // The ledger's syncs on the commit path (docs/ledger.md §6.2); without them it is synced in the
+  // background, within a second, and a commit is durable by replication.
+  // leader_sync: the leader counts itself in the quorum only once its ledger has the entry on disk
+  // (its fdatasync runs during the network round).
+  bool leader_sync = false;
+  // follower_sync: a follower fdatasyncs its ledger before it acknowledges an AppendEntries.
   bool follower_sync = false;
-  // Testing only: nothing is synced to the disk (MDB_NOSYNC), so a machine crash loses the term,
-  // the vote and the log. A process crash loses nothing.
+  // How often the WAL written into wal_dir on apply is synced and the applied state saved (a
+  // checkpoint, docs/ledger.md §9.2): after a crash the entries after it are applied again.
+  unsigned checkpoint_secs = 10;
+  // Both ends of each leader-to-follower connection read on a thread of their own (Connection's
+  // reader thread): the leader its follower's replies, the follower the leader's requests. The
+  // other connections stay on the io_context.
+  bool reader_threads = true;
+  // Testing only: nothing is synced to the disk, so a machine crash loses the term, the vote and
+  // the log. A process crash loses nothing.
   bool no_sync = false;
 };

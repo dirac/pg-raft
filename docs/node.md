@@ -35,9 +35,10 @@ wdir/node<N>/
 
 There are two WAL directories, on purpose:
 
-- **`raft/wal`** holds the replicated WAL, and means the same thing on every node. Raft writes
-  accepted bytes there (possibly before they commit), the peer connections send from it
-  (`RaftServer::segment()`), and the WAL sender reads it.
+- **`raft/wal`** holds the replicated WAL, and means the same thing on every node. Raft writes an
+  entry's WAL bytes there when it applies the entry (committed WAL only), from its ledger
+  ([ledger.md](ledger.md) §9), and the WAL sender reads it. The peer connections send the ledger's
+  records, not from it.
 - **`pg/pg_wal`** holds only what the local PostgreSQL wrote: on the primary, the WAL it
   generates; on a standby, the WAL it received from the WAL sender, which is committed WAL only.
 
@@ -56,15 +57,13 @@ raft ensemble (`node_wal_tracker_test`).
 
 `NodeWalTracker` runs in **leader mode**:
 
-- `async_publish(seg, off, size)` → copy the published bytes from the FUSE segment (in
-  `pg/pg_wal`) into the same segment in `raft/wal`, and add `[off, off + size)` to the segment's
-  pending range. Once that reaches `write_op_bytes` (64 KiB) it is sent at once:
-  `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, …)`, so that a large transaction streams
-  its WAL before its commit. Smaller writes wait for the flush. The peer connections send the
-  bytes from `raft/wal`.
-- `async_fsync(seg, off, size, cb)` → with `leader_sync`, a local `msync` of both copies
-  (`pg/pg_wal`, and the leader's own copy in `raft/wal`, which counts towards the quorum), then
-  `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{pending range}}, h)`: the flush carries the
+- `async_publish(seg, off, size)` → add `[off, off + size)` to the segment's pending range. Once
+  that reaches `write_op_bytes` (64 KiB) it is sent at once:
+  `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, bytes, …)`, with the range's bytes from
+  the FUSE segment (in `pg/pg_wal`), so that a large transaction streams its WAL before its
+  commit. Smaller writes wait for the flush. The entry's ledger record copies the bytes.
+- `async_fsync(seg, off, size, cb)` → `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{pending
+  range}}, bytes, h)` (no `msync` of `pg/pg_wal`, which is a cache of the WAL): the flush carries the
   writes since the segment's last `WriteOp` or flush (an empty `FlushOp` when there are none, still
   the barrier). Usually one entry and one raft round per fsync. `h` calls `cb(ok)` when the entry
   commits, or `cb(kNoConsensus)` when it gets `kNotLeader`. Taking the pending range and
@@ -90,7 +89,8 @@ standbys would stay behind the last flush once the writes stop.
 
 ### 2.2 Follower (PostgreSQL is a standby)
 
-- Raft writes the WAL bytes into `raft/wal` as it accepts requests.
+- Raft appends the leader's records to its ledger as it accepts requests, and writes their WAL
+  bytes into `raft/wal` when it applies them.
 - The WAL sender reads `raft/wal`. `RaftObserver::applied()` calls
   `WalSender::advance(state.flushed_lsn)` for each connected sender, so the standby receives only
   committed WAL.
@@ -227,8 +227,7 @@ On the transition thread:
    back as a standby.)
 3. **Rebuild `pg/pg_wal` from `raft/wal`** (`rebuild_pg_wal`, `src/node/wal_rebuild.h`;
    implemented). The old primary's `pg_wal` can hold WAL that it wrote but never committed (its
-   fsync failed), and even `raft/wal` can (the leader copies bytes in before they commit), so the
-   committed end is `max(state.wal_end, the restored backup's end rounded up to its segment's
+   fsync failed); `raft/wal` holds committed WAL only (written on apply), and the committed end is `max(state.wal_end, the restored backup's end rounded up to its segment's
    end)`: the backup's WAL is committed, and `pg_backup_stop` ends its last segment with an
    `XLOG_SWITCH` record past the backup's End-LSN, which every standby replays. With FUSE
    unmounted (`WalFuseOps` caches mmaps by LSN), each segment or history file of `pg/pg_wal`:
@@ -263,6 +262,17 @@ Two cases are not raft events, so no hook fires for them:
 - **Startup.** The node restores a backup if it has no usable data directory (§4.2), then starts
   PostgreSQL as a standby by itself. If raft later reaches full leadership, `became_leader`
   promotes it.
+- **A start after an unclean end.** `node<N>/running` exists from `start()` until a `shutdown()`
+  that stopped PostgreSQL cleanly (Fast, within its wait). Found at a start (a crash, a kill, a
+  power loss, a PostgreSQL that had to be killed), it means `pg/pg_wal` can hold WAL that never
+  committed: a primary's writes whose fsync failed or never completed. So the node rebuilds
+  `pg/pg_wal` from `raft/wal` (`rebuild_pg_wal`, as a demotion does, §3.3) before it mounts FUSE
+  and starts PostgreSQL (not after a restore, which has just replaced it). `raft/wal` holds
+  committed WAL only (written on apply, [ledger.md](ledger.md) §9). The rebuild keeps it up to the
+  applied `wal_end` (the last checkpoint's, at a start), the restored backup's end, and where
+  PostgreSQL's control file says its replay must start or reach (its last checkpoint record, its
+  redo point, its minimum recovery point): those are committed, and raft/wal has no uncommitted
+  bytes to bring back past them. A standby then streams the rest (`node_restart_test`).
 - **PostgreSQL exits on its own**, without a role change (an OOM kill, a postmaster crash).
   **Not handled yet** (see §10): nothing watches the postmaster. The intended design: a watcher on
   the `Process` (`wait()`) wakes the transition thread, which restarts PostgreSQL in the node's
@@ -412,10 +422,11 @@ On SIGTERM or SIGINT (`Node::shutdown`, implemented):
   follower's WAL sender only switches its standby to the new timeline once the history file is in
   `raft/wal`.
 - **InstallSnapshot:** a node whose log is replaced never applies the `TimelineOp`s from before
-  the snapshot (they may be compacted away). So the InstallSnapshot carries the leader's latest
-  history file (`InstallSnapshot::timeline`), which the follower writes into `raft/wal` before it
-  installs the entries. The latest history file lists every earlier timeline, so one file is
-  enough.
+  the leader's first ledger file (they are compacted away). Those timelines are older than the
+  latest backup's end (the ledger is kept from the file holding its segment), so the backup the
+  node then restores has their history file, which the restore copies into `raft/wal`; the
+  `TimelineOp`s after it are in the installed file and later records, which the node applies. The
+  latest history file lists every earlier timeline.
 - Segment names carry the timeline. The entries already carry `LogSeqNumber{timeline, lsn}`.
 
 ## 8. Testing

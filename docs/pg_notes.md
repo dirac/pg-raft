@@ -248,8 +248,9 @@ The syscall depends on `wal_sync_method`:
 
 PostgreSQL opens WAL with `open()`, not stdio, so it never calls `fflush`.
 
-> **pg-raft:** `PgInstance::write_config` forces `wal_sync_method=fsync`. Two reasons:
-> - FUSE intercepts `fsync`, but not `F_FULLFSYNC`.
+> **pg-raft:** `PgInstance::write_config` forces `wal_sync_method=fdatasync` (FUSE passes it to
+> `op_fsync` with `datasync` set; the WAL path treats it as `fsync`).
+> - FUSE intercepts `fsync` and `fdatasync`, but not `F_FULLFSYNC`.
 > - `open_*sync` would give the FUSE layer no fsync callback at all.
 >
 > Keep this override.
@@ -270,7 +271,9 @@ With `off`, a crash can lose the most recent commits but cannot corrupt data.
 
 - **Creation** (`XLogFileInit` → `XLogFileInitInternal`):
   1. Write a new file named **`xlogtemp.<pid>`** in `pg_wal`.
-  2. Fill it with zeros when `wal_init_zero = on` (the default).
+  2. Fill it with zeros when `wal_init_zero = on` (the default); with `off`, write one byte at
+     its end. (pg-raft sets `off`: the zeros go through FUSE under `WALWriteLock`, ~85 ms a
+     segment during which no commit can complete.)
   3. fsync it.
   4. `durable_rename` it to the real segment name (`InstallXLogFileSegment`), then fsync the
      directory.
@@ -1019,7 +1022,7 @@ Status as of 2026-11 (open ones are also in [`todo.md`](todo.md)):
    PostgreSQL replays to the last complete record, discards an incomplete one at the end and
    starts the new timeline there ([node.md](node.md#32-promotion-became_leader)). Demotion
    rebuilds `pg/pg_wal` up to the committed end.
-6. **Done.** `write_config` sets `wal_sync_method=fsync`.
+6. **Done.** `write_config` sets `wal_sync_method=fdatasync`.
 7. **Done.** `node_test` checks that the standbys converge on the final LSN.
 
 ---

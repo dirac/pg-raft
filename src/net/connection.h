@@ -119,6 +119,13 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   bool ssl_enabled() const { return socket_.index() == 1; }
 
+ protected:
+  /// A thread of the connection's own reads it (TCP only), instead of the io_context: it sleeps
+  /// until a frame arrives and handles it on that thread, without a hand-off to an io thread.
+  /// Writes stay on the io_context (queued: a slow peer never blocks the writer). Decided once, at
+  /// start().
+  virtual bool threaded_reader() const { return false; }
+
  private:
   static constexpr unsigned kHeaderWords = 6U;
 
@@ -216,6 +223,14 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   void process_header();
   void do_read_header();
+
+  // The reader thread (threaded_reader()): reads frames from |fd| (a dup of the socket's, closed
+  // when the thread ends) until the connection closes.
+  void read_loop(int fd);
+  // Reads exactly the bytes of |buffs|; false (the connection shut down) on an error or the end.
+  bool read_full(int fd, std::span<boost::asio::mutable_buffer const> buffs);
+  // Until |fd| is readable or the connection closes: false if closed.
+  bool wait_readable(int fd);
 
   void cleanup(std::error_code ec, int fd, std::filesystem::path const& file);
   void do_read_file(shared_ptr<Connection> self,

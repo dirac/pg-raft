@@ -13,6 +13,7 @@ way, and the known gaps.
 | `wal_fuse` | [wal_fuse.md](wal_fuse.md) | Implemented, tested |
 | `wal_sender` | [wal_sender.md](wal_sender.md) | Implemented, tested |
 | `raft` | [raft.md](raft.md) | Implemented, tested |
+| `ledger` (raft log + WAL) | [ledger.md](ledger.md) | `Ledger` implemented, tested; not yet used by raft |
 | `backup` | [backup.md](backup.md) | `BackupStore` and `DirBackupStore` implemented, tested |
 | `node` | [node.md](node.md) | Implemented, tested: `pg_raft_initdb`, startup from a backup, promotion, demotion, standby backups, compaction bounded by the latest backup, `needs_backup` recovery |
 | `proxy` | [proxy.md](proxy.md) | Implemented, tested, with a read-only admin interface |

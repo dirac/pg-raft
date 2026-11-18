@@ -6,7 +6,7 @@ struct MatchIndexes {
  public:
   MatchIndexes(RaftNodeId self_id, size_t n)
       : self_id_(self_id),
-        quorum_(static_cast<unsigned>(n) >> 1U),
+        quorum_((static_cast<unsigned>(n) >> 1U) + 1U),
         match_indexes_(n, RaftIndex{0}) {
     tmp_.reserve(n);
   }
@@ -29,7 +29,8 @@ struct MatchIndexes {
  private:
   RaftNodeId const self_id_;
 
-  // Votes required to update the commit idx.
+  // Nodes required to update the commit idx: a majority, the leader included (its own match index
+  // is its ledger's durable index).
   unsigned const quorum_;
 
   // Volatile state on leaders.

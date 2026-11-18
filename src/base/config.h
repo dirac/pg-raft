@@ -46,27 +46,37 @@ struct Config {
   /// bytes.
   string socket_dir = "/tmp";
 
-  /// Disk syncs on the commit path. All off by default: a commit is durable once a majority has
-  /// the WAL in its page cache (written through the mmap), so durability comes from replication;
-  /// the kernel writes the pages back on its own. Only a power loss of a majority at once loses
-  /// acknowledged commits. Turn them on to measure, or to survive that.
+  /// The disk syncs on the commit path, of the raft log (the ledger, docs/ledger.md), off by
+  /// default: a commit is durable once a majority has its ledger records in the page cache, so
+  /// durability comes from replication; the ledger is synced in the background within a second.
+  /// Only a power loss of a majority at once loses acknowledged commits. Turn them on to measure,
+  /// or to survive that. PostgreSQL's own pg_wal is never synced: raft keeps the committed WAL
+  /// (the ledger, and raft/wal derived from it), and a standby streams again what its pg_wal lost.
   ///
-  /// leader_sync: the leader msyncs PostgreSQL's pg_wal segment and raft's copy before appending
-  /// the FlushOp that completes PostgreSQL's fsync.
+  /// leader_sync: the leader counts itself in the quorum only once its ledger has the entry on
+  /// disk (its fdatasync runs during the network round).
   bool leader_sync = false;
-  /// follower_sync: a follower msyncs the WAL blocks it receives before acknowledging them, and
-  /// its standby's own fsync (through FUSE) msyncs too.
+  /// follower_sync: a follower fdatasyncs its ledger before it acknowledges an AppendEntries.
   bool follower_sync = false;
   /// write_op_bytes: on the leader, the WAL written since the last flush is sent with the next
   /// flush (one raft entry per fsync), or as soon as this much of a segment is pending (a WriteOp
   /// of its own), so that a large transaction streams its WAL before its commit.
   uint64_t write_op_bytes = 64 * 1024;
+  /// io_threads: the node's io_context threads (connections other than raft's leader-to-follower
+  /// ones, which read on threads of their own; write completions, timers, the client channel).
+  unsigned io_threads = 2;
   /// frame_checksums: xxhash32 of every network frame raft sends (TCP checksums the segments
-  /// already; LMDB's page checksums, for crash recovery, are always on).
+  /// already; the ledger's records carry a CRC-32C of their own, always).
   bool frame_checksums = false;
-  /// log_sync: every commit of the raft log (LMDB) is synced. Off: MDB_NOSYNC, and a background
-  /// thread syncs the log within a second.
-  bool log_sync = false;
+  /// ledger_file_size: the size of each ledger file. A power of 2, larger than 32 MiB (a ledger
+  /// file outgrows a 16 MiB WAL segment, an InstallSnapshot's two), at most 2 GiB (a file's
+  /// written offset is 32 bits): 64 MiB, 128 MiB, ..., 2 GiB.
+  uint64_t ledger_file_size = uint64_t{1} << 30U;
+
+  /// Whether |size| is a valid ledger_file_size.
+  static bool valid_ledger_file_size(uint64_t size) {
+    return std::has_single_bit(size) && size > (uint64_t{32} << 20U) && size <= (uint64_t{2} << 30U);
+  }
 
   /// Proxy configuration
   uint16_t proxy_pg_port   = 5432;  // For client connections, that will be forwarded to the leader.

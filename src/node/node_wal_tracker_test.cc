@@ -89,7 +89,7 @@ BOOST_AUTO_TEST_CASE(leader_mode, *boost::unit_test::timeout(timeout)) {
     BOOST_TEST(std::memcmp(copy.value()->mapping(), bytes.data(), bytes.size()) == 0, i);
 
     auto state =
-        s->inspect_for_test([](RaftState const& st, RaftLog const&, RaftIndex) { return st; });
+        s->inspect_for_test([](RaftState const& st, Ledger const&, RaftIndex) { return st; });
     BOOST_TEST(state.flushed_lsn.lsn == lsn.lsn + 12000, i);
     BOOST_TEST(state.wal_end.lsn == lsn.lsn + 12000, i);
   }
@@ -102,7 +102,7 @@ BOOST_AUTO_TEST_CASE(writes_batched_until_flush_or_threshold, *boost::unit_test:
   auto     lsn    = LogSeqNumber{.timeline = 1, .lsn = 0x4000000};
   auto     seg    = make_segment(e.dir() / "pg_wal", lsn);
 
-  NodeWalTracker tracker{e.service.server(leader), false, false, /*write_op_bytes=*/16384};
+  NodeWalTracker tracker{e.service.server(leader), /*write_op_bytes=*/16384};
   tracker.set_mode(NodeWalTracker::Mode::kLeader);
   auto bytes = random_bytes(30000);
   seg->write(bytes.data(), 0, bytes.size());

@@ -24,10 +24,11 @@ RAFT_MODES="${RAFT_MODES:-proxy direct}"
 # all), whatever ran last.
 stop_all() {
   log "stopping anything left on the proxy and node machines"
-  on_each "CONFIG=$(raft_config 5) ./raft/stop.sh > /dev/null 2>&1;
-           STD_CLUSTER=$(std_cluster 5) ./std/stop.sh > /dev/null 2>&1;
+  [[ "$PROXY_HOST" == "$CLIENT_HOST" ]] && on "$CLIENT_HOST" "CONFIG=$(raft_config $MAX_NODES) ./raft/stop.sh > /dev/null 2>&1; true"
+  on_each "CONFIG=$(raft_config $MAX_NODES) ./raft/stop.sh > /dev/null 2>&1;
+           STD_CLUSTER=$(std_cluster $MAX_NODES) ./std/stop.sh > /dev/null 2>&1;
            SOLO_CLUSTER=$SOLO_CLUSTER_FILE ./solo/stop.sh > /dev/null 2>&1; true" \
-    "$PROXY_HOST" "${NODE_HOSTS[@]}"
+    "${OTHER_PROXY[@]}" "${NODE_HOSTS[@]}"
 }
 
 # sweep SETUP_DIR N BENCH_ENV MODES...: pgbench at each client count, in each mode (the bench.sh
@@ -66,7 +67,7 @@ run_std() {
   local n=$1 env="STD_CLUSTER=$(std_cluster "$1")"
   stop_all
   log "std, $n nodes: deleting the old data on every node machine"
-  on_each "STD_CLUSTER=$(std_cluster 5) ./std/prepare.sh > /dev/null" "${NODE_HOSTS[@]}"
+  on_each "STD_CLUSTER=$(std_cluster $MAX_NODES) ./std/prepare.sh > /dev/null" "${NODE_HOSTS[@]}"
   on "${NODE_HOSTS[0]}" "$env ./std/init_primary.sh"
   # The standbys one at a time: concurrent pg_basebackups each force a checkpoint, which can
   # invalidate another one's temporary replication slot (the primary then terminates it).
@@ -87,7 +88,7 @@ run_raft() {
   stop_all
   log "raft, $n nodes: deleting the backups and every node directory"
   for h in "${NODE_HOSTS[@]}"; do
-    on "$h" "CONFIG=$(raft_config 5) ./raft/install_bins.sh --from $SHARED/bin" 2>&1 | sed "s/^/  [$h] /"
+    on "$h" "CONFIG=$(raft_config $MAX_NODES) ./raft/install_bins.sh --from $SHARED/bin" 2>&1 | sed "s/^/  [$h] /"
   done
   on "${NODE_HOSTS[0]}" "CONFIG=$cfg ./raft/init.sh"
   on_each "CONFIG=$cfg ./raft/start_node.sh {i}" $(nodes "$n")
@@ -120,8 +121,8 @@ stop_raft() {
 
 case "${1:-}" in
   solo) run_solo ;;
-  std)  [[ "${2:-}" =~ ^[35]$ ]] || die "usage: run.sh std 3|5"; run_std "$2" ;;
-  raft) [[ "${2:-}" =~ ^[35]$ ]] || die "usage: run.sh raft 3|5"; run_raft "$2" ;;
+  std)  [[ " ${NODE_SIZES[*]} " == *" ${2:-} "* ]] || die "usage: run.sh std ${NODE_SIZES[*]// /|}"; run_std "$2" ;;
+  raft) [[ " ${NODE_SIZES[*]} " == *" ${2:-} "* ]] || die "usage: run.sh raft ${NODE_SIZES[*]// /|}"; run_raft "$2" ;;
   stop) stop_all ;;
   *) sed -n '2,16p' "$0"; exit 1 ;;
 esac

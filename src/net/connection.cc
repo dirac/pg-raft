@@ -1,5 +1,8 @@
 #include "src/net/connection.h"
 
+#include <poll.h>
+#include <sys/socket.h>
+
 #include "src/base/logger.h"
 #include "src/base/xxhash.h"
 
@@ -86,7 +89,16 @@ void Connection::start() {
   [[maybe_unused]] auto const started = test_and_set(started_);
   assert(!started);
 
-  do_read_header();
+  int fd = -1;
+  if (threaded_reader() && socket_.index() == 0)
+    fd = ::dup(std::get<0>(socket_).native_fd());
+  if (fd != -1)
+    std::thread([this, s = self(), fd] {
+      read_loop(fd);
+      ::close(fd);
+    }).detach();
+  else
+    do_read_header();
   if (timeout_.count() > 0 && times_ > 0) {
     request_peer_status();
     enqueue_timeout_check();
@@ -249,6 +261,123 @@ void Connection::do_read_header() {
   };
   async_read(boost::asio::mutable_buffer(read_header_.data(), sizeof(read_header_)),
              std::move(handler));
+}
+
+// ── the reader thread ─────────────────────────────────────────────────────────
+
+void Connection::read_loop(int fd) {
+  std::array<uint32_t, kHeaderWords> header{};
+  while (!closed()) {
+    std::array const hb{boost::asio::mutable_buffer(header.data(), sizeof(header))};
+    if (!read_full(fd, hb))
+      return;
+
+    if (header[0] != hton(0xDEADBEEF)) [[unlikely]]
+      return breakpoint("Invalid start of the packet");
+    if (++recv_packet_ != ntoh(header[1])) [[unlikely]]
+      return breakpoint("Invalid counter");
+
+    uint32_t const h    = ntoh(header[2]);
+    auto const     ctrl = h >> 30U;
+    if (ctrl == 0x3) {
+      if ((h & 0xFFU) != 0) {
+        clear(outstanding_status_request_);
+        set_peer_status(u1(h & 0xFFU) - u1(1U));
+      } else {
+        async_write_status(false);
+      }
+      continue;
+    }
+    if (ctrl == 0x2) [[unlikely]]
+      return breakpoint("A file on a connection read by its own thread");
+
+    uint32_t const data_size = ntoh(header[2]);
+    uint32_t const buff_size = ntoh(header[3]);
+    uint32_t const data_chk  = ntoh(header[4]);
+    uint32_t const buff_chk  = ntoh(header[5]);
+
+    Data  data{data_size};
+    Bytes buff(buff_size);
+    auto  buffs = data.mutable_buffer();
+    if (buff_size != 0U)
+      buffs.emplace_back(buff.data(), buff.size());
+    if (!read_full(fd, buffs))
+      return;
+
+    if (auto v = data_chk ? xxhash32(data.const_buffer()) : 0U; v != data_chk) {
+      auto ec = system_error_code(EBADMSG);
+      log(ERROR, "{}Data checksum did not match {} vs {}", log_prefix(), data_chk, v);
+      enqueue<ReadData>(ec, read_data_q_);
+      return shutdown(ec);
+    }
+    if (auto v = buff_chk ? xxhash32(buff) : 0U; v != buff_chk) {
+      auto ec = system_error_code(EBADMSG);
+      log(ERROR, "{}Buffer checksum did not match {} vs {}", log_prefix(), buff_chk, v);
+      enqueue<ReadData>(ec, read_data_q_);
+      return shutdown(ec);
+    }
+    enqueue<ReadData>(std::make_tuple(std::move(data), std::move(buff)), read_data_q_);
+  }
+}
+
+bool Connection::read_full(int fd, std::span<boost::asio::mutable_buffer const> buffs) {
+  std::vector<iovec> iov;
+  iov.reserve(buffs.size());
+  for (auto const& b : buffs)
+    if (b.size() != 0)
+      iov.push_back(iovec{.iov_base = b.data(), .iov_len = b.size()});
+  size_t first = 0;
+  while (first < iov.size()) {
+    msghdr msg{};
+    msg.msg_iov    = iov.data() + first;
+    msg.msg_iovlen = iov.size() - first;
+    auto n         = ::recvmsg(fd, &msg, MSG_DONTWAIT);
+    if (n > 0) {
+      std::get<0>(socket_).count_read();
+      auto left = static_cast<size_t>(n);
+      while (left > 0 && first < iov.size()) {
+        auto& v = iov.at(first);
+        if (left >= v.iov_len) {
+          left -= v.iov_len;
+          ++first;
+        } else {
+          v.iov_base = static_cast<char*>(v.iov_base) + left;
+          v.iov_len -= left;
+          left = 0;
+        }
+      }
+      continue;
+    }
+    if (n == 0) {
+      error_code ec = boost::asio::error::eof;
+      enqueue<ReadData>(ec, read_data_q_);
+      shutdown(ec);
+      return false;
+    }
+    if (errno == EINTR)
+      continue;
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      error_code ec(errno, boost::system::system_category());
+      enqueue<ReadData>(ec, read_data_q_);
+      shutdown(ec);
+      return false;
+    }
+    if (!wait_readable(fd))
+      return false;
+  }
+  return true;
+}
+
+bool Connection::wait_readable(int fd) {
+  // The socket is non-blocking (asio's, and a dup shares the flag): wait in ppoll, waking every
+  // 100 ms to notice a close.
+  while (!closed()) {
+    timespec ts{.tv_sec = 0, .tv_nsec = 100'000'000};
+    pollfd   p{.fd = fd, .events = POLLIN, .revents = 0};
+    if (::ppoll(&p, 1, &ts, nullptr) > 0)
+      return true;
+  }
+  return false;
 }
 
 void Connection::breakpoint(char const* data) {

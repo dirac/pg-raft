@@ -21,24 +21,9 @@ void RaftFollowerConnection::read_request() {
   });
 }
 
-bool RaftFollowerConnection::valid(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes) {
-  auto size = std::accumulate(
-      std::begin(blocks), std::end(blocks), size_t{0}, [](size_t result, MemBlock const& b) {
-        return result + b.size;
-      });
-  return size == bytes.size() && std::ranges::all_of(blocks, [](MemBlock const& b) {
-           return b.offset >= 0 && b.offset + static_cast<off_t>(b.size) <= kWalSegmentSize;
-         });
-}
-
 void RaftFollowerConnection::received(RaftRequest&& req, Bytes&& bytes) {
   if (req.info.log)
     log(INFO, "{}{}", log_prefix(), req);
-
-  if (!valid(req.data, bytes)) {
-    log(ERROR, "{}The WAL blocks do not match the {} bytes received", log_prefix(), bytes.size());
-    return shutdown(system_error_code(EBADMSG));
-  }
 
   auto [lk, server] = lock();
   if (!lk)
@@ -47,13 +32,12 @@ void RaftFollowerConnection::received(RaftRequest&& req, Bytes&& bytes) {
   auto const info    = req.info;
   auto const term    = req.term;
   auto const from_id = req.node_id;
-  auto const blocks  = req.data;
 
   auto response = std::visit(
       [&](auto&& v) -> RaftResponse {
         using T = std::decay_t<decltype(v)>;
         if constexpr (std::is_same_v<T, AppendEntries> || std::is_same_v<T, InstallSnapshot>)
-          return server->handle_peer_request(from_id, term, std::move(v), blocks, bytes);
+          return server->handle_peer_request(from_id, term, std::move(v), bytes);
         else
           return server->handle_peer_request(from_id, term, std::move(v));
       },

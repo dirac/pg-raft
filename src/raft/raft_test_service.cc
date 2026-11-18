@@ -114,7 +114,7 @@ RaftIndex RaftTestService::commit_idx() const {
   auto idx = RaftIndex{0};
   for (auto const& s : servers())
     if (s)
-      idx = std::max(idx, s->inspect_for_test([](RaftState const&, RaftLog const&, RaftIndex c) {
+      idx = std::max(idx, s->inspect_for_test([](RaftState const&, Ledger const&, RaftIndex c) {
         return c;
       }));
   return idx;
@@ -201,23 +201,27 @@ struct ServerView {
 };
 
 std::tuple<RaftIndex, RaftIndex, RaftIndex> positions(RaftServer const& s) {
-  return s.inspect_for_test([](RaftState const& state, RaftLog const& log, RaftIndex) {
-    return std::make_tuple(std::get<RaftIndex>(log.first_entry().value()),
-                           std::get<RaftIndex>(log.last_entry().value()),
+  return s.inspect_for_test([](RaftState const& state, Ledger const& log, RaftIndex) {
+    return std::make_tuple(log.first_idx(),
+                           std::get<RaftIndex>(log.last_entry()),
                            state.log_idx);
   });
 }
 
 ServerView view(unsigned node, RaftServer const& s) {
-  return s.inspect_for_test([node](RaftState const& state, RaftLog const& log, RaftIndex) {
+  return s.inspect_for_test([node](RaftState const& state, Ledger const& log, RaftIndex) {
     auto v = ServerView{
         .node  = node,
-        .first = std::get<RaftIndex>(log.first_entry().value()),
-        .last  = std::get<RaftIndex>(log.last_entry().value()),
+        .first = log.first_idx(),
+        .last  = std::get<RaftIndex>(log.last_entry()),
         .state = state,
     };
-    v.entries = log.entries_from(v.first, (v.last - v.first) + 1U).value().value();
-    assert(v.entries.size() == (v.last - v.first) + 1U);
+    auto const n = (v.last - v.first) + 1U;
+    for (auto const& e :
+         log.entries(v.first, n, std::numeric_limits<size_t>::max()).value().value_or(
+             vector<LedgerEntry>{}))
+      v.entries.push_back(e.entry);
+    assert(v.entries.size() == n);
     return v;
   });
 }
@@ -344,6 +348,10 @@ RaftTestService::Consistency RaftTestService::check_consistency(
       if (w.idx < v.first || w.idx > v.state.log_idx)
         continue;
 
+      // Compacted meanwhile (the view was taken before): the segment was deleted. segment() would
+      // create it again, zero filled.
+      if (!std::filesystem::exists(wal_dir(v.node) / filename(w.segment)))
+        continue;
       auto seg = servers.at(v.node)->segment(w.segment);
       if (!seg) {
         result.violations.emplace_back(

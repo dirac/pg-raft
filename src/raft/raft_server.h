@@ -8,7 +8,7 @@
 #include "src/raft/peer_connection_mgr.h"
 #include "src/raft/raft_client_connection.h"
 #include "src/raft/raft_follower_connection.h"
-#include "src/raft/raft_log.h"
+#include "src/raft/ledger.h"
 #include "src/raft/raft_peer_connection.h"
 #include "src/raft/raft_state.h"
 #include "src/raft/raft_types.h"
@@ -22,8 +22,12 @@
 //    entry (e.g. to advance the WalSender to the committed flushed_lsn) and of the role changes
 //    (to promote or demote PostgreSQL).
 //  - A node without a usable PostgreSQL (RaftState::needs_backup) doesn't start elections.
-//  - The WAL bytes travel with the entries and are written to the segments in wal_dir as they are
-//    accepted.
+//  - The log is the ledger (docs/ledger.md): each entry is a record with its WAL bytes, created by
+//    the leader and copied byte for byte to the followers. wal_dir is derived from it: every node
+//    writes an entry's WAL bytes into its segment when it applies the entry, so wal_dir holds
+//    committed WAL only. A checkpoint thread syncs those writes and saves the applied state in
+//    |dir|/meta; after a crash the entries after it are applied again. The term and vote are in
+//    |dir|/term.
 //  - A leader compacts its own log (stepping down to compact would be a PostgreSQL failover).
 //  - InstallSnapshot sends the latest entries and their segments; the node then needs a PostgreSQL
 //    backup (RaftState::needs_backup), which it fetches over the client channel (backup()).
@@ -60,7 +64,8 @@ class RaftServer : public ClientConnectionApi,
                    public PeerConnectionApi,
                    public Server {
  public:
-  /// |dir| holds the raft log, |wal_dir| the WAL segments (raft/wal in a node).
+  /// |dir| holds the ledger, the term and meta files, |wal_dir| the WAL segments (raft/wal in a
+  /// node).
   RaftServer(RaftNodeId                     id,
              boost::asio::ip::tcp::acceptor acceptor,
              Config const&                  config,
@@ -163,21 +168,22 @@ class RaftServer : public ClientConnectionApi,
   }
   void backup(SnapshotRequest request, BackupHandler handler) override;
 
-  /// Append the command to the log (leader only); the handler is called when it is committed, with
-  /// the server lock held, or with ErrorCode::kNotLeader.
-  void exec(WalCommand cmd, ExecHandler handler);
+  /// Append the command to the log (leader only), with |wal|, the WAL bytes it names
+  /// (wal_bytes(cmd): a WriteOp's or a FlushOp's, from PostgreSQL's segment; none otherwise); the
+  /// record keeps its own copy of them. The handler is called when it is committed, with the
+  /// server lock held, or with ErrorCode::kNotLeader.
+  void exec(WalCommand cmd, std::span<uint8_t const> wal, ExecHandler handler);
+  void exec(WalCommand cmd, ExecHandler handler) { exec(std::move(cmd), {}, std::move(handler)); }
+
+  /// For the tests: a checkpoint now (docs/ledger.md §9.2).
+  void checkpoint_for_test() { checkpoint(); }
 
   /// The WAL segment in wal_dir, created (zero filled) if it doesn't exist.
-  Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const override;
-
-  /// The latest timeline history file in wal_dir (written when a TimelineOp is applied, or by an
-  /// InstallSnapshot), or nullopt before the first promotion.
-  std::optional<TimelineOp> latest_timeline() const override;
+  Result<shared_ptr<WalSegment>> segment(LogSeqNumber const& lsn) const;
 
   /// A copy of the state, published under its own mutex after every change, so that a peer
   /// connection can read it without the server lock.
   RaftState applied_state() const override;
-  RaftState boundary_state() const override;
 
   RaftResponse handle_peer_request(RaftNodeId node_id, RaftTerm term, std::monostate) override;
 
@@ -185,17 +191,15 @@ class RaftServer : public ClientConnectionApi,
                                    RaftTerm    term,
                                    RequestVote request) override;
 
-  RaftResponse handle_peer_request(RaftNodeId                         leader,
-                                   RaftTerm                           term,
-                                   InstallSnapshot                    request,
-                                   inplace_vector<MemBlock, 2> const& blocks,
-                                   Bytes const&                       bytes) override;
+  RaftResponse handle_peer_request(RaftNodeId      leader,
+                                   RaftTerm        term,
+                                   InstallSnapshot request,
+                                   Bytes const&    bytes) override;
 
-  RaftResponse handle_peer_request(RaftNodeId                         leader,
-                                   RaftTerm                           term,
-                                   AppendEntries                      request,
-                                   inplace_vector<MemBlock, 2> const& blocks,
-                                   Bytes const&                       bytes) override;
+  RaftResponse handle_peer_request(RaftNodeId    leader,
+                                   RaftTerm      term,
+                                   AppendEntries request,
+                                   Bytes const&  bytes) override;
 
   RaftResponse handle_peer_request(RaftNodeId      candidate,
                                    RaftTerm        term,
@@ -228,13 +232,13 @@ class RaftServer : public ClientConnectionApi,
 
   RaftIndex commit_idx() const { return commit_idx_.load(std::memory_order_relaxed); }
 
-  RaftLog const& raft_log() const { return log_; }
+  Ledger const& ledger() const { return ledger_; }
 
   unsigned random_election_timeout() const {
     return static_cast<unsigned>(random_election_timeout_(rd_));
   }
 
-  /// Some LMDB error or file system error. The only sane thing to do is exit.
+  /// A file system error. The only sane thing to do is exit.
   [[noreturn]] void system_error(std::error_code ec) const override;
 
   RaftTerm current_term() const { return current_term_.load(std::memory_order_relaxed); }
@@ -254,12 +258,12 @@ class RaftServer : public ClientConnectionApi,
   /// For the tests: compact the log at idx, as periodic() does.
   void compact_for_test(RaftIndex idx) { compact(idx, unique_lock()); }
 
-  /// For the tests: fn(state, log, commit_idx) with the lock held, so that nothing is appended or
-  /// applied meanwhile.
+  /// For the tests: fn(state, ledger, commit_idx) with the lock held, so that nothing is appended
+  /// or applied meanwhile.
   template <typename Fn>
   auto inspect_for_test(Fn&& fn) const {
     auto lk = unique_lock();
-    return std::forward<Fn>(fn)(state_, log_, commit_idx());
+    return std::forward<Fn>(fn)(state_, ledger_, commit_idx());
   }
 
  protected:
@@ -312,6 +316,9 @@ class RaftServer : public ClientConnectionApi,
 
   void update_match_index(RaftNodeId node_id, RaftIndex idx);
 
+  /// The ledger's sync thread: the entries up to |idx| are on this node's disk.
+  void on_durable(RaftIndex idx);
+
   /// Number of entries.
   unsigned count(RaftIndex idx, RaftTerm term) const;
 
@@ -326,9 +333,9 @@ class RaftServer : public ClientConnectionApi,
   /// and truncates the log, if it holds the lock.
   void compact(RaftIndex idx, UniqueLock lk);
 
-  /// Compaction, with the server lock held: deletes the entries before the new first entry and
-  /// saves the state (first_idx, first_segment) and the boundary state, in one transaction; then
-  /// wakes the WAL deletion thread.
+  /// Compaction, with the server lock held: saves the state (first_idx, first_segment) and the
+  /// boundary state in the meta file, then drops the entries before the new first entry from the
+  /// ledger; then wakes the WAL deletion thread.
   void compact_log();
 
   /// The WAL deletion thread: deletes the segments of wal_dir wholly before first_segment (by
@@ -340,8 +347,44 @@ class RaftServer : public ClientConnectionApi,
   /// called off, so that the leader doesn't refuse the clients for ever.
   void check_stepdown_timeout();
 
-  /// Write the WAL bytes of the blocks to the segments.
-  void write_blocks(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes);
+  /// Write the WAL bytes of an applied entry to its segment in wal_dir (pwrite; synced by the
+  /// next checkpoint).
+  void write_wal(Entry const& e, std::span<uint8_t const> wal);
+
+  /// A segment of wal_dir open for writing (created, zero filled, if missing).
+  struct WalFile {
+    int fd = -1;
+    WalFile() = default;
+    WalFile(WalFile const&)            = delete;
+    WalFile& operator=(WalFile const&) = delete;
+    ~WalFile() {
+      if (fd >= 0)
+        ::close(fd);
+    }
+  };
+  Result<shared_ptr<WalFile>> wal_file(LogSeqNumber const& lsn);
+
+  /// The checkpoint (docs/ledger.md §9.2): syncs the segments written since the last one (without
+  /// the server lock), then saves the state applied before them.
+  void checkpoint();
+  void checkpoint_loop();
+
+  /// The InstallSnapshot's last chunk: the install file replaces the ledger.
+  void install(InstallInfo const& info);
+
+  /// The meta file: the state, and an install in progress. Its state never runs ahead of
+  /// wal_dir: the entries' part of it is the last checkpoint's (the node's own fields are
+  /// current).
+  std::filesystem::path meta_path() const { return dir_ / "meta"; }
+  void save_meta(std::optional<RaftIndex> installing = std::nullopt) {
+    auto s        = state_;
+    s.log_idx     = checkpoint_state_.log_idx;
+    s.timestamp   = checkpoint_state_.timestamp;
+    s.flushed_lsn = checkpoint_state_.flushed_lsn;
+    s.wal_end     = checkpoint_state_.wal_end;
+    value(write_meta_file(
+        meta_path(), LedgerMeta{.state = s, .installing = installing}, options_.no_sync));
+  }
 
   /// A stepdown is called off after this many election timeouts.
   constexpr static unsigned kStepdownTimeouts = 32U;
@@ -360,27 +403,12 @@ class RaftServer : public ClientConnectionApi,
       system_error(r.error());
   }
 
-  // Wrapper function on raft log.
-
-  bool vote(RaftTerm term, RaftNodeId candidate) { return value(log_.vote(term, candidate)); }
-
-  RaftState load_snapshot() const { return value(log_.load_snapshot()); }
-
-  bool append_entries(RaftIndex            prev_log_idx,
-                      RaftTerm             prev_log_term,
-                      vector<Entry> const& entries,
-                      bool                 delete_entries) {
-    return value(log_.append_entries(prev_log_idx, prev_log_term, entries, delete_entries));
+  bool vote(RaftTerm term, RaftNodeId candidate) {
+    return value(term_file_.vote(term, candidate));
   }
 
-  Entry entry(RaftIndex idx) const {
-    // The entry is not in the log (it is not there, or it is before the first), or it is empty.
-    auto e = value(log_.entries_from(idx, 1)).value_or(vector<Entry>{});
-    if (e.empty())
-      system_error(system_error_code(EINVAL));
-
-    return std::move(e.at(0));
-  }
+  /// The leader's append of an entry, with the WAL bytes its command names.
+  RaftIndex append(Entry const& e, std::span<uint8_t const> wal);
 
   RaftIndex compaction_idx() const { return compaction_idx_.load(std::memory_order_relaxed); }
 
@@ -415,16 +443,29 @@ class RaftServer : public ClientConnectionApi,
   mutable map<LogSeqNumber, shared_ptr<WalSegment>> open_segments_;
 
   // Persistent state.
-  RaftLog log_;
+  TermFile term_file_;
+  Ledger   ledger_;
 
-  // The state machine.
+  // The state machine (under the lock), and the state at the last checkpoint: wal_dir is synced
+  // up to it, and the meta file holds it.
   RaftState state_;
+  RaftState checkpoint_state_;
+  uint64_t  install_gen_ = 0;  // bumped by an install: a checkpoint taken before it is void
 
-  /// A copy of state_ for applied_state() and of the boundary state for boundary_state(), under
-  /// published_mtx_ (a leaf lock).
+  // The segments of wal_dir open for writing, and those written since the last checkpoint.
+  std::mutex                                   wal_files_mtx_;
+  map<LogSeqNumber, shared_ptr<WalFile>>       wal_files_;
+  map<LogSeqNumber, shared_ptr<WalFile>>       dirty_;
+
+  // The checkpoint thread.
+  std::mutex              checkpoint_mtx_;
+  std::condition_variable checkpoint_cv_;
+  bool                    checkpoint_stop_{false};
+  std::thread             checkpoint_thread_;
+
+  /// A copy of state_ for applied_state(), under published_mtx_ (a leaf lock).
   mutable std::mutex published_mtx_;
   RaftState          published_;
-  RaftState          published_boundary_;
   void               publish_state();
 
   std::optional<LogSeqNumber> keep_from_;  // under the server lock

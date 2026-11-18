@@ -91,7 +91,7 @@ BOOST_AUTO_TEST_CASE(init_cluster_creates_the_first_backup, *boost::unit_test::t
     BOOST_REQUIRE(pg.start());
     BOOST_REQUIRE(pg.wait_ready(kRestorePort));
     BOOST_TEST(query(kRestorePort, "SELECT pg_is_in_recovery()::text") == "false");
-    BOOST_TEST(query(kRestorePort, "SHOW wal_sync_method") == "fsync");
+        BOOST_TEST(query(kRestorePort, "SHOW wal_sync_method") == "fdatasync");
     BOOST_TEST(query(kRestorePort, "SHOW max_connections") == "50");
     pg.stop(PgInstance::StopMode::Fast);
   }

@@ -7,12 +7,12 @@
 // entries on the leader, and stays local on a follower.
 //
 // Leader mode:
-//  - async_publish: the bytes go from PostgreSQL's segment (pg/pg_wal) into the same segment in
-//    raft's wal_dir (raft/wal), from which the peer connections send them, and their range is
-//    added to the segment's pending range. Once that reaches write_op_bytes it is sent at once,
-//    as a WriteOp (a large transaction streams its WAL before its commit); smaller writes wait
-//    for the next flush.
-//  - async_fsync: (with leader_sync, msync both copies,) then one FlushOp that carries what is
+//  - async_publish: the range is added to the segment's pending range. Once that reaches
+//    write_op_bytes it is sent at once, as a WriteOp (a large transaction streams its WAL before
+//    its commit); smaller writes wait for the next flush. An entry's WAL bytes go to exec() from
+//    PostgreSQL's segment (pg/pg_wal); its ledger record copies them, and every node writes them
+//    into raft/wal when it applies the entry.
+//  - async_fsync: one FlushOp that carries what is
 //    pending of the segment, the bytes written since its last WriteOp or flush; PostgreSQL's
 //    fsync (and its commit) returns when the FlushOp is committed on a quorum, and fails with
 //    kNoConsensus if the node is not, or stops being, the leader (PostgreSQL then PANICs, by
@@ -21,7 +21,12 @@
 //  Every command carries flushed_lsn: the primary's flush LSN, set by the status poller.
 //
 // Follower mode: publishes and timelines are ignored (the standby only writes WAL that is already
-// committed), and fsync is a local msync.
+// committed), and fsync succeeds at once.
+//
+// pg_wal is never synced (msync): it is a cache of the WAL. Raft keeps the committed WAL durably
+// (the ledger, and raft/wal derived from it); a standby whose pg_wal lost pages in a machine crash
+// finds an invalid record there and streams the rest from the WAL sender, and a deposed primary's
+// pg_wal is rebuilt from raft/wal (rebuild_pg_wal).
 //
 // Fenced mode: the node lost leadership and has killed its PostgreSQL; until it restarts as a
 // standby (follower mode), every fsync fails with kNoConsensus, so that a backend that outlives
@@ -32,17 +37,10 @@ class NodeWalTracker : public WalTracker {
  public:
   enum class Mode { kFollower, kLeader, kFenced };
 
-  /// |leader_sync|: msync before the FlushOp in leader mode; |follower_sync|: msync PostgreSQL's
-  /// fsync in follower mode (Config::leader_sync / follower_sync). |write_op_bytes|: the pending
-  /// writes of a segment are sent as a WriteOp once they reach it (Config::write_op_bytes).
-  explicit NodeWalTracker(shared_ptr<RaftServer> raft,
-                          bool                   leader_sync    = false,
-                          bool                   follower_sync  = false,
-                          size_t                 write_op_bytes = 64 * 1024)
-      : raft_(std::move(raft)),
-        leader_sync_(leader_sync),
-        follower_sync_(follower_sync),
-        write_op_bytes_(write_op_bytes) {}
+  /// |write_op_bytes|: the pending writes of a segment are sent as a WriteOp once they reach it
+  /// (Config::write_op_bytes).
+  explicit NodeWalTracker(shared_ptr<RaftServer> raft, size_t write_op_bytes = 64 * 1024)
+      : raft_(std::move(raft)), write_op_bytes_(write_op_bytes) {}
 
   void set_mode(Mode mode);
   Mode mode() const { return mode_.load(); }
@@ -62,8 +60,6 @@ class NodeWalTracker : public WalTracker {
   LogSeqNumber carry();
 
   shared_ptr<RaftServer> raft_;
-  bool const             leader_sync_;
-  bool const             follower_sync_;
   size_t const           write_op_bytes_;
   std::atomic<Mode>      mode_{Mode::kFollower};
 

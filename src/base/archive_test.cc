@@ -103,7 +103,7 @@ BOOST_AUTO_TEST_CASE(round_trips) {
   auto const o     = sample();
   auto const bytes = boost_bytes(o);
 
-  // From memory (as from an LMDB value), from a streambuf, and Boost reading ours.
+  // From memory, from a streambuf, and Boost reading ours.
   {
     Outer       r;
     RawIArchive ia(bytes.data(), bytes.size());

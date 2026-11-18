@@ -18,7 +18,15 @@ RaftServer::RaftServer(RaftNodeId                     id,
       dir_(std::move(dir)),
       wal_dir_(std::move(wal_dir)),
       cache_(make_shared<WalSegmentCache>()),
-      log_(dir_ / "log", options.sync_commits, options.no_sync),
+      term_file_(dir_ / "term", options.no_sync),
+      ledger_(dir_ / "ledger",
+              LedgerOptions{
+                  .file_size   = options.ledger_file_size,
+                  .sparse_step = LedgerOptions{}.sparse_step,
+                  .sync        = options.leader_sync,
+                  .no_sync     = options.no_sync,
+                  .spare       = true,
+              }),
       observer_(observer ? std::move(observer) : make_shared<RaftObserver>()),
       timer_(io_context()),
       match_indexes_(self_id_, config.servers.size()),
@@ -43,21 +51,20 @@ RaftServer::~RaftServer() {
 }
 
 void RaftServer::start() {
-  auto term = log_.open_term_db();
-  if (!term)
-    system_error(term.error());
-  current_term_ = term.value();
+  std::filesystem::create_directories(dir_);
+  current_term_ = value(term_file_.open()).term;
 
-  if (auto r = log_.open_logs_db(1U); !r)
-    system_error(r.error());
+  auto meta = value(read_meta_file(meta_path()));
+  ledger_.set_durable_callback([this](RaftIndex idx) { on_durable(idx); });
+  value(ledger_.open(meta.state.first_idx, meta.installing));
 
-  state_ = load_snapshot();
+  state_            = meta.state;
+  checkpoint_state_ = meta.state;
+  if (meta.installing)
+    save_meta();  // the install is finished
   publish_state();
-  {
-    auto lk             = std::unique_lock{published_mtx_};
-    published_boundary_ = value(log_.load_boundary());
-  }
-  gc_thread_ = std::thread([this] { wal_gc(); });
+  gc_thread_         = std::thread([this] { wal_gc(); });
+  checkpoint_thread_ = std::thread([this] { checkpoint_loop(); });
   {
     auto lk  = std::unique_lock{gc_mtx_};
     gc_wake_ = true;
@@ -171,7 +178,7 @@ shared_ptr<Connection> RaftServer::create_connection(string peer, socket_type so
   if (peer.starts_with("Raft:")) {
     connections_->reset_last_connect_attempts();
     return Connection::create<RaftFollowerConnection>(
-        self_id_, std::move(peer), std::move(socket), self<RaftServer>());
+        self_id_, std::move(peer), std::move(socket), self<RaftServer>(), options_.reader_threads);
   }
   return Connection::create<RaftClientConnection>(
       self<RaftServer>(), std::move(peer), std::move(socket));
@@ -180,14 +187,14 @@ shared_ptr<Connection> RaftServer::create_connection(string peer, socket_type so
 void RaftServer::on_connect(shared_ptr<RaftPeerConnection> const& conn) {
   if (is_leader()) {
     log(INFO, "{}Connected to node={}, send_append_entries", log_prefix_, conn->peer_id());
-    conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
+    conn->send_append_entries(ledger_, leadership_term(), commit_idx());
   } else if (is_candidate()) {
     if (has_votes()) {
       log(INFO,
           "{}Connected to node={}, send_append_entries (have enough votes as a candidate)",
           log_prefix_,
           conn->peer_id());
-      conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
+      conn->send_append_entries(ledger_, leadership_term(), commit_idx());
     } else {
       auto term = votes_.term();
       log(INFO,
@@ -195,11 +202,11 @@ void RaftServer::on_connect(shared_ptr<RaftPeerConnection> const& conn) {
           log_prefix_,
           conn->peer_id(),
           term);
-      conn->send_request_vote(raft_log(), term);
+      conn->send_request_vote(ledger_, term);
     }
   } else if (!can_vote()) {
     log(INFO, "{}Connected to node={}, send_ping", log_prefix_, conn->peer_id());
-    conn->send_ping(raft_log());
+    conn->send_ping(current_term());
   }
 }
 
@@ -214,7 +221,7 @@ void RaftServer::backup(SnapshotRequest request, BackupHandler handler) {
   provider(std::move(request), std::move(handler));
 }
 
-void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
+void RaftServer::exec(WalCommand cmd, std::span<uint8_t const> wal, ExecHandler handler) {
   assert(handler);
 
   auto not_leader = [&handler] { handler(make_error_code(ErrorCode::kNotLeader)); };
@@ -236,24 +243,32 @@ void RaftServer::exec(WalCommand cmd, ExecHandler handler) {
 
     last_entry_time_ = std::time(nullptr);
 
-    auto entries = vector{
+    auto const idx = append(
         Entry{
             .time = last_entry_time_,
             .term = current_term(),
             .cmd  = std::move(cmd),
         },
-    };
-
-    // Get the last entry.
-    auto [prev_log_term, prev_log_idx] = value(raft_log().last_entry());
-
-    while (!append_entries(prev_log_idx, prev_log_term, entries, false))
-      std::tie(prev_log_term, prev_log_idx) = value(raft_log().last_entry());
-
-    handlers_.emplace_back(prev_log_idx + 1U, std::move(handler), epoch_msec());
+        wal);
+    handlers_.emplace_back(idx, std::move(handler), epoch_msec());
   }
 
   send_append_entries(/*check_sync_flag=*/true, /*here=*/true);
+}
+
+RaftIndex RaftServer::append(Entry const& e, std::span<uint8_t const> wal) {
+  // The record gets its own copy of the bytes (its crc is of that copy): PostgreSQL writing on
+  // meanwhile doesn't matter.
+  return value(ledger_.append(e, wal));
+}
+
+void RaftServer::on_durable(RaftIndex idx) {
+  // Not usage_lock(): close() holds it exclusively while it stops the ledger's sync thread.
+  auto lk = std::shared_lock<std::shared_mutex>{usage_lock_, std::try_to_lock};
+  if (!lk || closed_.test())
+    return;
+  if (is_leader() || is_candidate())
+    update_match_index(self_id_, idx);
 }
 
 void RaftServer::set_needs_backup(bool needs_backup) {
@@ -263,8 +278,7 @@ void RaftServer::set_needs_backup(bool needs_backup) {
 
   log(INFO, "{}needs_backup = {}", log_prefix_, needs_backup);
   state_.needs_backup = needs_backup;
-  // Saving the state with a log size this large deletes no entry.
-  value(log_.save_snapshot(state_, std::numeric_limits<unsigned>::max()));
+  save_meta();
   publish_state();
 }
 
@@ -281,7 +295,7 @@ bool RaftServer::restored_backup(LogSeqNumber end) {
   if (state_.needs_backup) {
     log(INFO, "{}needs_backup = false (restored a backup ending at {})", log_prefix_, end);
     state_.needs_backup = false;
-    value(log_.save_snapshot(state_, std::numeric_limits<unsigned>::max()));
+    save_meta();
     publish_state();
   }
   return true;
@@ -295,26 +309,6 @@ void RaftServer::publish_state() {
 RaftState RaftServer::applied_state() const {
   auto lk = std::unique_lock{published_mtx_};
   return published_;
-}
-
-RaftState RaftServer::boundary_state() const {
-  auto lk = std::unique_lock{published_mtx_};
-  return published_boundary_;
-}
-
-std::optional<TimelineOp> RaftServer::latest_timeline() const {
-  auto timeline = latest_history_timeline(wal_dir_);
-  if (!timeline)
-    return std::nullopt;
-  auto content = read_history_file(wal_dir_, *timeline);
-  if (!content) {
-    elog(content.error(),
-         "{}Unable to read the history file of timeline {}",
-         log_prefix_,
-         *timeline);
-    return std::nullopt;
-  }
-  return TimelineOp{.timeline = *timeline, .content = std::move(*content)};
 }
 
 Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) const {
@@ -353,14 +347,105 @@ Result<shared_ptr<WalSegment>> RaftServer::segment(LogSeqNumber const& lsn) cons
   return seg;
 }
 
-void RaftServer::write_blocks(inplace_vector<MemBlock, 2> const& blocks, Bytes const& bytes) {
-  uint8_t const* data = bytes.data();
-  for (auto const& b : blocks) {
-    auto seg = value(segment(b.lsn));
-    seg->write(data, b.offset, b.size);
-    if (options_.follower_sync)
-      value(seg->fsync(b.offset, b.size));
-    data += b.size;
+Result<shared_ptr<RaftServer::WalFile>> RaftServer::wal_file(LogSeqNumber const& lsn) {
+  // With wal_files_mtx_ held.
+  if (auto pos = wal_files_.find(lsn); pos != wal_files_.end())
+    return pos->second;
+
+  // As segment(): X, or .X (renamed by an unlink, WalFuseOps), or a new X, zero filled.
+  auto const name = filename(lsn);
+  auto       path = wal_dir_ / name;
+  if (!std::filesystem::exists(path) && std::filesystem::exists(wal_dir_ / ("." + name)))
+    path = wal_dir_ / ("." + name);
+  auto f = make_shared<WalFile>();
+  f->fd  = ::open(path.c_str(), O_RDWR | O_CREAT, file_mode());
+  if (f->fd == -1)
+    return elog(system_error_code(errno), "{}Unable to open {}", log_prefix_, path);
+  struct stat st {};
+  if (::fstat(f->fd, &st) != 0)
+    return elog(system_error_code(errno), "{}Unable to stat {}", log_prefix_, path);
+  if (st.st_size < kWalSegmentSize && ::ftruncate(f->fd, kWalSegmentSize) != 0)
+    return elog(system_error_code(errno), "{}Unable to size {}", log_prefix_, path);
+
+  // Keep the last few open (the WAL moves forward); the dirty ones stay open in dirty_.
+  wal_files_.emplace(lsn, f);
+  while (wal_files_.size() > kOpenSegments)
+    wal_files_.erase(wal_files_.begin());
+  return f;
+}
+
+void RaftServer::write_wal(Entry const& e, std::span<uint8_t const> wal) {
+  auto const bytes = wal_bytes(e.cmd);
+  if (!bytes)
+    return;
+  auto const lsn = *e.cmd.segment;
+
+  auto lk = std::unique_lock{wal_files_mtx_};
+  auto f  = value(wal_file(lsn));
+  for (size_t done = 0; done < bytes->second;) {
+    auto n = ::pwrite(f->fd,
+                      wal.data() + done,
+                      bytes->second - done,
+                      bytes->first + static_cast<off_t>(done));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      system_error(elog(system_error_code(n < 0 ? errno : EIO),
+                        "{}Unable to write the WAL of {}",
+                        log_prefix_,
+                        lsn));
+    done += static_cast<size_t>(n);
+  }
+  dirty_.try_emplace(lsn, f);
+}
+
+void RaftServer::checkpoint() {
+  // The state applied, and the segments written before it.
+  RaftState                              state;
+  uint64_t                               gen = 0;
+  map<LogSeqNumber, shared_ptr<WalFile>> dirty;
+  {
+    auto lk = unique_lock();
+    state   = state_;
+    gen     = install_gen_;
+    auto wl = std::unique_lock{wal_files_mtx_};
+    dirty.swap(dirty_);
+  }
+
+  // Synced without the server lock: applying goes on meanwhile (into the next checkpoint).
+  if (!options_.no_sync)
+    for (auto const& [lsn, f] : dirty) {
+#ifdef __APPLE__
+      int rc = ::fsync(f->fd);
+#else
+      int rc = ::fdatasync(f->fd);
+#endif
+      if (rc != 0)
+        system_error(elog(system_error_code(errno), "{}Unable to sync the segment {}", log_prefix_, lsn));
+    }
+
+  auto lk = unique_lock();
+  if (gen != install_gen_ || state.log_idx <= checkpoint_state_.log_idx)
+    return;  // an install replaced the log meanwhile, or nothing new
+  checkpoint_state_ = state;
+  save_meta();
+  // Compaction (to the latest backup's segment) never goes past the last checkpoint: it may go
+  // further now. Without a keep_from (the raft tests) it waits for compaction_lag, as before.
+  if (keep_from_)
+    compact_log();
+}
+
+void RaftServer::checkpoint_loop() {
+  for (;;) {
+    {
+      auto lk = std::unique_lock{checkpoint_mtx_};
+      checkpoint_cv_.wait_for(lk, std::chrono::seconds(options_.checkpoint_secs), [this] {
+        return checkpoint_stop_;
+      });
+      if (checkpoint_stop_)
+        return;
+    }
+    checkpoint();
   }
 }
 
@@ -374,42 +459,34 @@ bool RaftServer::tick(bool force) {
 
   last_entry_time_.store(std::time(nullptr), std::memory_order_relaxed);
 
-  // Get the last entry.
-  auto [prev_log_term, prev_log_idx] = value(raft_log().last_entry());
-
-  // Create a tick entry.
-  auto entries = vector{
+  // A tick entry (the callers hold the lock).
+  auto const idx = append(
       Entry{
           .time = last_entry_time_,
           .term = current_term(),
           .cmd  = {},
       },
-  };
-
+      {});
   if (force)
-    log(INFO, "{}Adding an entry after {}", log_prefix_, prev_log_idx);
-
-  // Add to the local log. If it fails, the reason being another entry got added.
-  if (append_entries(prev_log_idx, prev_log_term, entries, false)) {
-    log(DEBUG, "{}Added a tick entry idx= {}", log_prefix_, (prev_log_idx + 1U));
-    send_append_entries(/*check_sync_flag=*/false);
-    return true;
-  }
-  return false;
+    log(INFO, "{}Added the entry {}", log_prefix_, idx);
+  else
+    log(DEBUG, "{}Added a tick entry idx= {}", log_prefix_, idx);
+  send_append_entries(/*check_sync_flag=*/false);
+  return true;
 }
 
 unsigned RaftServer::send_append_entries(bool check_sync_flag, bool here) {
   auto send = [this, self = self(), check_sync_flag](shared_ptr<RaftPeerConnection> conn) {
     if (check_sync_flag && !conn->in_sync())
       return;
-    conn->send_append_entries(raft_log(), leadership_term(), commit_idx());
+    conn->send_append_entries(ledger_, leadership_term(), commit_idx());
   };
   return here ? connections_->run(send) : connections_->post(send);
 }
 
 unsigned RaftServer::send_request_votes(RaftTerm term) {
   return connections_->post([this, s = self(), term](shared_ptr<RaftPeerConnection> conn) {
-    conn->send_request_vote(raft_log(), term);
+    conn->send_request_vote(ledger_, term);
   });
 }
 
@@ -514,7 +591,7 @@ void RaftServer::make_leader(RaftServer::UniqueLock lk) {
   stepdown_.clear();
   election_request_.clear();
 
-  auto last_entry = value(raft_log().last_entry());
+  auto last_entry = ledger_.last_entry();
   log(INFO,
       "{}Becoming a leader term={} with last_entry = ({}, {})",
       log_prefix_,
@@ -523,6 +600,7 @@ void RaftServer::make_leader(RaftServer::UniqueLock lk) {
       std::get<RaftIndex>(last_entry));
 
   match_indexes_.reset();
+  match_indexes_.match_index(self_id_, ledger_.durable_idx());
   leadership_term_.store(votes_.term());
 
   if (connections_->has_unconnected_peers())
@@ -541,7 +619,7 @@ std::tuple<RaftTerm, bool> RaftServer::set_current_term(RaftTerm term) {
     return {curr_term, true};
 
   // Update the stable state.
-  RaftTerm new_term = value(log_.set_current_term(term));
+  RaftTerm new_term = value(term_file_.set_current_term(term));
   assert(new_term >= curr_term);
 
   while (new_term > curr_term && !current_term_.compare_exchange_strong(/* &expected = */ curr_term,
@@ -618,7 +696,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId  candidate,
     };
   }
 
-  auto last_entry = value(raft_log().last_entry());
+  auto last_entry = ledger_.last_entry();
   if (last_entry > request.last_entry) {
     log(INFO,
         "{}Rejected because log is not upto date ({},{}) vs ({},{}) from node={}",
@@ -673,52 +751,77 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
 }
 
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
-                                             RaftTerm                           term,
-                                             InstallSnapshot                    request,
-                                             inplace_vector<MemBlock, 2> const& blocks,
-                                             Bytes const&                       bytes) {
+                                             RaftTerm        term,
+                                             InstallSnapshot request,
+                                             Bytes const&    bytes) {
   auto current_term = update_current_term(term);
 
   auto lk = unique_lock();
 
-  if (current_term > term || is_candidate() || is_leader() || request.entries.empty())
-    return RaftResponse{
-        .term = current_term,
-        .response =
-            InstallSnapshotResponse{
-                .idx     = RaftIndex{0},
-                .success = false,
-            },
-    };
+  auto const failed = RaftResponse{
+      .term = current_term,
+      .response =
+          InstallSnapshotResponse{
+              .idx     = RaftIndex{0},
+              .success = false,
+          },
+  };
+  if (current_term > term || is_candidate() || is_leader())
+    return failed;
 
   update_last_ping(true);
 
-  // The segments of the latest entries, the latest timeline history file, then the entries: the
-  // log starts after request.log_idx and the WAL before the segments is missing until a
-  // PostgreSQL backup restores it.
-  write_blocks(blocks, bytes);
-  if (request.timeline)
-    value(write_history_file(wal_dir_, u4(request.timeline->timeline), request.timeline->content));
+  // A chunk of the leader's first ledger file, into the install file.
+  if (auto r = ledger_.install_chunk(request.offset, bytes); !r)
+    return failed;
+  if (request.offset + bytes.size() < request.size)
+    return RaftResponse{
+        .term     = current_term,
+        .response = InstallSnapshotResponse{.idx = RaftIndex{0}, .success = true, .done = false},
+    };
 
-  // The leader's state at request.log_idx: the follower's state before it applies the entries,
-  // and its boundary state.
-  auto boundary      = request.state;
-  boundary.log_idx   = request.log_idx;
-  auto state         = boundary;
-  state.needs_backup = true;
-  state.first_idx    = request.log_idx + 1U;
-  if (auto pos = std::ranges::find_if(request.entries,
-                                      [](Entry const& e) { return e.cmd.segment.has_value(); });
-      pos != request.entries.end())
-    state.first_segment = *pos->cmd.segment;
-  value(log_.install_snapshot(request.log_idx, request.entries, state, boundary));
+  // The last one: the file is checked whole, then replaces the ledger.
+  auto info = ledger_.prepare_install();
+  if (!info || info->header.first != request.first)
+    return failed;
+  install(*info);
 
-  state_ = state;
-  publish_state();
+  return RaftResponse{
+      .term = current_term,
+      .response =
+          InstallSnapshotResponse{
+              .idx     = std::get<RaftIndex>(ledger_.last_entry()),
+              .success = true,
+              .done    = true,
+          },
+  };
+}
+
+void RaftServer::install(InstallInfo const& info) {
+  auto const first = info.header.first;
+
+  // The state at the entry before the file's first record (its header); the WAL before its
+  // records is missing until a PostgreSQL backup restores it.
+  auto state          = info.header.state;
+  state.needs_backup  = true;
+  state.first_idx     = first;
+  state.first_segment = info.first_segment.value_or(state.first_segment);
+
+  // The meta file names the install, the install file replaces the ledger (a crash in between:
+  // Ledger::open finishes it), and the meta file no longer names it. The records are applied as
+  // they commit, which writes their WAL into wal_dir; nothing of them is there before.
+  state_            = state;
+  checkpoint_state_ = state;
+  ++install_gen_;
   {
-    auto lk             = std::unique_lock{published_mtx_};
-    published_boundary_ = boundary;
+    auto wl = std::unique_lock{wal_files_mtx_};
+    dirty_.clear();
   }
+  save_meta(first);
+  value(ledger_.finish_install(first));
+  save_meta();
+
+  publish_state();
   {
     auto lk  = std::unique_lock{gc_mtx_};
     gc_wake_ = true;
@@ -730,17 +833,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
   observer_->installed(state_);
 
   update_last_ping(true);
-
-  log(INFO, "{}Installed snapshot {}", log_prefix_, state_);
-
-  return RaftResponse{
-      .term = current_term,
-      .response =
-          InstallSnapshotResponse{
-              .idx     = std::get<RaftIndex>(value(raft_log().last_entry())),
-              .success = true,
-          },
-  };
+  log(INFO, "{}Installed {} … {}: {}", log_prefix_, first, info.last, state_);
 }
 
 void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
@@ -751,20 +844,26 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
   if (req_term != update_current_term(peer_term))
     return;
 
-  if (response.success) {
-    update_match_index(conn->peer_id(), response.idx);
-    if (auto lk = conn->should_send_append_entries(); lk) {
-      conn->set_next_idx(response.idx + 1U, lk);
-      conn->send_append_entries(std::move(lk), raft_log(), leadership_term(), commit_idx());
-    }
-  }
+  auto lk = conn->should_send_append_entries();
+  if (!lk)
+    return;
+  if (!response.success)
+    return conn->end_snapshot(lk);  // the next one starts over
+  if (!response.done)
+    return conn->send_snapshot_chunk(std::move(lk), ledger_, leadership_term());
+
+  conn->end_snapshot(lk);
+  conn->set_next_idx(response.idx + 1U, lk);
+  lk.unlock();
+  update_match_index(conn->peer_id(), response.idx);
+  if (auto lk2 = conn->should_send_append_entries(); lk2)
+    conn->send_append_entries(std::move(lk2), ledger_, leadership_term(), commit_idx());
 }
 
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
-                                             RaftTerm                           term,
-                                             AppendEntries                      request,
-                                             inplace_vector<MemBlock, 2> const& blocks,
-                                             Bytes const&                       bytes) {
+                                             RaftTerm      term,
+                                             AppendEntries request,
+                                             Bytes const&  bytes) {
   auto current_term = update_current_term(term);
 
   // The peer is no longer a leader.
@@ -785,35 +884,47 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
 
   auto lk = unique_lock();
 
-  bool success = request.prev_log_idx >= commit_idx() && append_entries(request.prev_log_idx,
-                                                                        request.prev_log_term,
-                                                                        request.entries,
-                                                                        /*delete_entries=*/true);
-  if (success) [[likely]] {
-    // The WAL bytes of the entries, once they are accepted: a request of a leader that has been
-    // deposed does not get here.
-    write_blocks(blocks, bytes);
+  // The leader's records, checked (crc, indexes, terms, chain) before anything is written.
+  auto decoded = decode_records(bytes);
+  if (!decoded || decoded->size() != request.n)
+    log(ERROR,
+        "{}Invalid records after {}: {} bytes, {} records expected",
+        log_prefix_,
+        request.prev_log_idx,
+        bytes.size(),
+        request.n);
+
+  std::optional<Appended> appended;
+  if (decoded && decoded->size() == request.n && request.prev_log_idx >= commit_idx())
+    appended = value(ledger_.append_records(
+        request.prev_log_idx, request.prev_log_term, *decoded, options_.follower_sync));
+
+  if (appended) [[likely]] {
+    // Their WAL goes into wal_dir when they are applied (committed). With follower_sync the
+    // records were written with RWF_DSYNC; a full sync only when that didn't cover everything up
+    // to the answer (records this ledger already had, e.g. from its time as the leader).
+    if (options_.follower_sync && ledger_.synced_idx() < appended->last)
+      value(ledger_.sync());
 
     update_last_ping(false);
-    set_commit_idx(std::min(request.commit_idx, request.prev_log_idx + request.entries.size()));
+    set_commit_idx(std::min(request.commit_idx, appended->last));
 
     return RaftResponse{
         .term = current_term,
         .response =
             AppendEntriesResponse{
                 .success = true,
-                .idx     = request.prev_log_idx + request.entries.size(),
+                .idx     = appended->last,
             },
     };
   }
   update_last_ping(true);
 
   // Logs don't match.
-  auto [_, last_idx] = value(raft_log().last_entry());
+  auto [_, last_idx] = ledger_.last_entry();
 
   auto log_idx = std::min(last_idx, request.prev_log_idx);
-  auto log_term =
-      log_idx > commit_idx() ? value(raft_log().get_term(log_idx)) : std::optional<RaftTerm>{};
+  auto log_term = log_idx > commit_idx() ? ledger_.term(log_idx) : std::optional<RaftTerm>{};
 
   auto n = count(log_idx, log_term.value_or(RaftTerm{0}));
   assert(log_term.has_value() == (n > 0));
@@ -855,7 +966,7 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
       // The type changes under the lock: a vote that comes now finds a candidate and makes it a
       // leader with the lock held, and the state machine is changed only with it.
       auto lk         = unique_lock();
-      auto last_entry = value(raft_log().last_entry());
+      auto last_entry = ledger_.last_entry();
 
       if (!is_candidate() || leadership_term() != req_term) {
         // A follower now, or a candidate of a newer term.
@@ -879,11 +990,11 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
     }
 
     if (stepping_down(/*acquire_lock=*/true) &&
-        response.idx == std::get<RaftIndex>(value(raft_log().last_entry()))) {
+        response.idx == std::get<RaftIndex>(ledger_.last_entry())) {
       // The node is a leader and the logs are synced, so send the election request to the first
       // candidate.
       if (is_leader() && should_send_election_request())
-        conn->send_request_election(raft_log(), leadership_term());
+        conn->send_request_election(ledger_, leadership_term());
     }
 
   } else if (auto lk = conn->should_send_append_entries(); lk) {
@@ -892,12 +1003,12 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
       // The follower's log ends at response.idx, within what it has committed: those entries match
       // ours (log matching), so it continues right after them, if we still have that entry. Only
       // when we compacted it away does it need a snapshot.
-      if (value(raft_log().get_term(response.idx))) {
+      if (ledger_.term(response.idx)) {
         conn->set_next_idx(response.idx + 1U, lk);
         return conn->send_append_entries(
-            std::move(lk), raft_log(), leadership_term(), commit_idx());
+            std::move(lk), ledger_, leadership_term(), commit_idx());
       }
-      return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
+      return conn->send_install_snapshot(std::move(lk), ledger_, leadership_term());
     }
 
     if (!response.n)
@@ -907,25 +1018,25 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
     RaftIndex idx = response.idx;
 
     while (true) {
-      std::optional<RaftTerm> log_term = value(raft_log().get_term(idx));
+      std::optional<RaftTerm> log_term = ledger_.term(idx);
 
       // We got a log match.
       if (log_term && response.term.value() == log_term.value()) {
         conn->set_next_idx(idx + 1U, lk);
         return conn->send_append_entries(
-            std::move(lk), raft_log(), leadership_term(), commit_idx());
+            std::move(lk), ledger_, leadership_term(), commit_idx());
       }
 
-      // Entry doesn't exist in the raft_log, so send a snapshot.
+      // The entry was compacted away: send a snapshot.
       if (!log_term)
-        return conn->send_install_snapshot(std::move(lk), raft_log(), leadership_term());
+        return conn->send_install_snapshot(std::move(lk), ledger_, leadership_term());
 
       if (nth == 0 || idx == RaftIndex{1}) {
         // Probe from idx next. Not below 1: the (0, 0) sentinel at index 0 is in every log, so
         // prev_log_idx = 0 always matches (next_idx = 0 would make prev_log_idx underflow).
         conn->set_next_idx(std::max(idx, RaftIndex{1}), lk);
         return conn->send_append_entries(
-            std::move(lk), raft_log(), leadership_term(), commit_idx());
+            std::move(lk), ledger_, leadership_term(), commit_idx());
       }
 
       --idx;
@@ -941,7 +1052,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
                                              RequestElection request) {
   RaftTerm const curr_term = update_current_term(term);
 
-  if (curr_term == term && value(raft_log().last_entry()) == request.last_entry &&
+  if (curr_term == term && ledger_.last_entry() == request.last_entry &&
       !applied_state().needs_backup) {
     make_candidate();
 
@@ -973,6 +1084,8 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection>,
 
 void RaftServer::update_match_index(RaftNodeId node_id, RaftIndex idx) {
   match_indexes_.match_index(node_id, idx);
+  // The leader counts itself once its ledger has the entries on disk (at once without syncs).
+  match_indexes_.match_index(self_id_, ledger_.durable_idx());
   if (auto n_commit_idx = match_indexes_.commit_index(commit_idx()); n_commit_idx > commit_idx()) {
     set_commit_idx(n_commit_idx);
     apply_entries(true);
@@ -983,10 +1096,21 @@ RaftIndex RaftServer::apply_entries(bool check_delay) {
   auto lk   = unique_lock();
   auto idx  = state_.log_idx;
   auto cidx = commit_idx();
+  vector<LedgerEntry> batch;
+  size_t              next = 0;
   while (cidx > idx) {
     ++idx;
 
-    Entry e = entry(idx);
+    if (next == batch.size()) {
+      auto r = value(ledger_.entries(idx, std::min<size_t>(4096, INT(cidx) - INT(idx) + 1U)));
+      if (!r || r->empty() || r->front().idx != idx)
+        system_error(system_error_code(EINVAL));  // a committed entry is not in the ledger
+      batch = std::move(*r);
+      next  = 0;
+    }
+    Entry const& e = batch.at(next++).entry;
+    // The WAL bytes into wal_dir first: the observer advances the WAL sender over them.
+    write_wal(e, *batch.at(next - 1).wal);
     state_.apply(idx, e);
     publish_state();
 
@@ -1016,6 +1140,7 @@ RaftIndex RaftServer::apply_entries(bool check_delay) {
     }
     cidx = commit_idx();
   }
+  ledger_.release(idx);  // the entries up to idx no longer need to be kept in memory
   return idx;
 }
 
@@ -1072,8 +1197,10 @@ void RaftServer::set_wal_keep_from(LogSeqNumber keep_from) {
 }
 
 void RaftServer::compact_log() {
-  RaftIndex const first        = std::get<RaftIndex>(value(raft_log().first_entry()));
-  RaftIndex const last_applied = state_.log_idx;
+  RaftIndex const first = ledger_.first_idx();
+  // Never past the last checkpoint: the entries after it are applied again after a crash, so they
+  // stay (docs/ledger.md §9.2).
+  RaftIndex const last_applied = std::min(state_.log_idx, checkpoint_state_.log_idx + 1U);
   if (last_applied == RaftIndex{0})
     return;
 
@@ -1082,12 +1209,13 @@ void RaftServer::compact_log() {
   // which stays (AppendEntries needs its term).
   RaftIndex target = last_applied;
   if (keep_from_) {
-    for (RaftIndex idx = std::max(first, RaftIndex{1}); idx < last_applied;) {
-      auto batch = value(raft_log().entries_from(idx, 4096));
+    for (RaftIndex idx = first; idx < last_applied;) {
+      auto batch = value(ledger_.entries(idx, 4096));
       if (!batch || batch->empty())
         break;
       bool found = false;
-      for (auto const& e : *batch) {
+      for (auto const& le : *batch) {
+        auto const& e = le.entry;
         if (idx >= last_applied)
           break;
         if (e.cmd.segment && !(*e.cmd.segment < *keep_from_)) {
@@ -1105,40 +1233,22 @@ void RaftServer::compact_log() {
       return;
     target = last_applied - options_.keep_old_logs;
   }
+  // Whole files: the first index of the file that holds the target (its header holds the state
+  // before it, the boundary state).
+  target = ledger_.compaction_point(target);
   if (target <= first)
     return;
-
-  // The state at target - 1: the previous boundary, with the entries being deleted applied.
-  auto            boundary = value(log_.load_boundary());
-  RaftIndex const from     = boundary.log_idx + 1U;
-  if (from < std::max(first, RaftIndex{1})) {
-    log(ERROR,
-        "{}No boundary state to compact from: {} vs first entry {}",
-        log_prefix_,
-        boundary,
-        first);
-    return;
-  }
-  for (RaftIndex idx = from; idx < target;) {
-    auto batch =
-        value(raft_log().entries_from(idx, std::min<size_t>(4096, INT(target) - INT(idx))));
-    if (!batch || batch->empty())
-      break;
-    for (auto const& e : *batch)
-      if (idx < target)
-        boundary.apply(idx++, e);
-  }
 
   // The segment of the first entry, from target on, that has one.
   auto first_segment = state_.first_segment;
   for (RaftIndex idx = target;;) {
-    auto batch = value(raft_log().entries_from(idx, 4096));
+    auto batch = value(ledger_.entries(idx, 4096));
     if (!batch || batch->empty())
       break;
-    auto pos =
-        std::ranges::find_if(*batch, [](Entry const& e) { return e.cmd.segment.has_value(); });
+    auto pos = std::ranges::find_if(
+        *batch, [](LedgerEntry const& e) { return e.entry.cmd.segment.has_value(); });
     if (pos != batch->end()) {
-      first_segment = *pos->cmd.segment;
+      first_segment = *pos->entry.cmd.segment;
       break;
     }
     idx = idx + batch->size();
@@ -1150,14 +1260,13 @@ void RaftServer::compact_log() {
       target,
       first_segment,
       last_applied);
+  // The meta file first: after a crash between the two, Ledger::open drops the files before
+  // first_idx.
   state_.first_idx     = target;
   state_.first_segment = first_segment;
-  value(log_.compact(target, state_, boundary));
+  save_meta();
+  value(ledger_.drop_before(target));
   publish_state();
-  {
-    auto lk             = std::unique_lock{published_mtx_};
-    published_boundary_ = boundary;
-  }
   {
     auto lk  = std::unique_lock{gc_mtx_};
     gc_wake_ = true;
@@ -1191,6 +1300,14 @@ void RaftServer::wal_gc() {
       std::erase_if(open_segments_, [&first](auto const& kv) {
         return kv.first.lsn + kWalSegmentSize <= first.lsn;
       });
+    }
+    {
+      auto lk  = std::unique_lock{wal_files_mtx_};
+      auto before = [&first](auto const& kv) {
+        return kv.first.lsn + kWalSegmentSize <= first.lsn;
+      };
+      std::erase_if(wal_files_, before);
+      std::erase_if(dirty_, before);
     }
     for (auto const& p : old) {
       std::filesystem::remove(p, ec);
@@ -1249,7 +1366,7 @@ void RaftServer::on_shutdown() {
 unsigned RaftServer::count(RaftIndex idx, RaftTerm term) const {
   unsigned result = 0;
   while (idx > commit_idx()) {
-    if (auto t = value(raft_log().get_term(idx)); t && *t == term) {
+    if (auto t = ledger_.term(idx); t && *t == term) {
       ++result;
       --idx;
     } else {
@@ -1292,6 +1409,16 @@ void RaftServer::close() {
   if (gc_thread_.joinable() && gc_thread_.get_id() != std::this_thread::get_id())
     gc_thread_.join();
 
+  {
+    auto lk          = std::unique_lock{checkpoint_mtx_};
+    checkpoint_stop_ = true;
+  }
+  checkpoint_cv_.notify_all();
+  if (checkpoint_thread_.joinable() && checkpoint_thread_.get_id() != std::this_thread::get_id())
+    checkpoint_thread_.join();
+  // A last checkpoint, so that a restart applies little again.
+  checkpoint();
+
   auto lk = std::unique_lock<std::shared_mutex>{usage_lock_};
-  log_.close();
+  ledger_.close();
 }
