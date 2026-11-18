@@ -79,8 +79,10 @@ bool PgInstance::init(std::vector<std::string> initdb_args) {
 
 // ── configuration ─────────────────────────────────────────────────────────────
 
+// fdatasync reaches the FUSE layer as an fsync with datasync set, which WalFuseOps handles like
+// fsync (the raft round).
 static std::map<std::string, std::string> const kDefaultConfig = {
-    {"wal_sync_method", "fsync"},
+    {"wal_sync_method", "fdatasync"},
     {"wal_recycle", "off"},
     {"wal_init_zero", "off"},
     {"wal_level", "replica"},

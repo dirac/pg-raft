@@ -68,7 +68,7 @@ caller overrides them.
 
 | Setting | Why |
 |---|---|
-| `wal_sync_method = fsync` | The FUSE layer sees `fsync`. It does not see `fdatasync`/`O_DSYNC`, or `F_FULLFSYNC` on macOS. Commit durability goes through `op_fsync`, so this setting is required. |
+| `wal_sync_method = fdatasync` | Commit durability goes through `op_fsync`. `fdatasync` reaches it as an fsync with `datasync` set, handled the same way, and skips the file's metadata. The FUSE layer never sees `open_sync`/`open_datasync` (no call) or macOS's `F_FULLFSYNC`. |
 | `wal_recycle = off` | Recycled segments would be renamed and overwritten in place. pg-raft wants every segment to be written once with fresh content. |
 | `wal_init_zero = off` | With `wal_recycle = off` every segment switch creates a new file, and zero-filling it writes 16 MiB through FUSE (about 2,000 writes) while `WALWriteLock` is held: every commit stalled ~85 ms at each switch. Off, PostgreSQL writes one byte at the segment's end. |
 | `wal_level = replica` | Lets standbys stream. |
