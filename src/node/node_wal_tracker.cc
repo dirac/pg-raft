@@ -103,6 +103,26 @@ void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
   if (auto p = take_pending(segment->lsn()); p)
     flush = FlushOp{.offset = p->first, .size = p->second};
 
+  if (!wait_commit_) {
+    // Appended (exec() appends before it returns): the fsync completes now, the commit waits in
+    // PostgreSQL's synchronous replication. Not leader (the handler runs at once): it fails.
+    auto failed = make_shared<std::atomic<bool>>(false);
+    raft_->exec(
+        WalCommand{
+            .flushed_lsn = carry(),
+            .segment     = segment->lsn(),
+            .command     = flush,
+        },
+        std::span<uint8_t const>(segment->mapping() + flush.offset, flush.size),
+        [failed](Result<RaftIndex> r) {
+          if (!r)
+            failed->store(true);
+        });
+    lk.unlock();
+    return completion(failed->load() ? Result<void>{system_error_code(WalSegment::kNoConsensus)}
+                                     : ok());
+  }
+
   // The handler runs with the server lock held: it only completes PostgreSQL's fsync.
   raft_->exec(
       WalCommand{

@@ -187,8 +187,8 @@ Result<void> Node::start() {
                                      raft_wal_dir_,
                                      raft_options,
                                      make_shared<Observer>(weak_from_this()));
-  tracker_                   = make_shared<NodeWalTracker>(
-      raft_, config_.write_op_bytes);
+  sync_rep_ = config_.commit_wait == "sync_rep";
+  tracker_  = make_shared<NodeWalTracker>(raft_, config_.write_op_bytes, !sync_rep_);
 
   bool restored = false;
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
@@ -331,6 +331,9 @@ Result<void> Node::write_standby_config(uint16_t wal_sender_port) {
                         wal_sender_port,
                         id_)
          << "recovery_target_timeline = 'latest'\n";
+    // The node is the primary's synchronous standby (SyncAcker): a commit waits for raft there.
+    if (sync_rep_)
+      conf << "synchronous_standby_names = 'pg_raft'\n";
     if (!conf.flush())
       return elog(system_error_code(EIO), "Unable to write {}", data_dir_ / "pg_raft.conf");
   }
@@ -345,6 +348,8 @@ Result<void> Node::write_standby_config(uint16_t wal_sender_port) {
 // ── raft hooks (the server lock is held) ─────────────────────────────────────
 
 void Node::on_applied(RaftState const& state) {
+  if (auto a = acker_.load(); a)
+    a->ack(state.wal_end.lsn);
   auto lk    = std::unique_lock{senders_mtx_};
   committed_ = state.flushed_lsn;
   for (auto const& w : senders_)
@@ -374,6 +379,9 @@ void Node::on_stepped_down(RaftTerm term) {
   log(INFO, "Node {}: lost leadership of term {}: fencing and killing PostgreSQL", id_, term);
   if (tracker_)
     tracker_->set_mode(NodeWalTracker::Mode::kFenced);
+  // No more acknowledgements; stopped (joined) off the raft lock.
+  if (auto a = acker_.exchange(nullptr); a)
+    std::thread([a] { a->stop(); }).detach();
   if (pg_)
     pg_->kill();
   needs_restart_.store(true);
@@ -552,6 +560,19 @@ void Node::promote(RaftTerm term) {
           deposed)) {
     log(ERROR, "Node {}: timeline {} was not committed", id_, tli);
     return;
+  }
+
+  // 4. commit_wait = "sync_rep": the synchronous standby the commits wait for, before clients come.
+  if (sync_rep_) {
+    auto a = make_shared<SyncAcker>(pg_port());
+    if (auto r = a->start(); !r) {
+      log(ERROR, "Node {}: the synchronous standby connection failed: stepping down", id_);
+      if (!deposed())
+        raft_->stepdown();
+      return;
+    }
+    a->ack(raft_->applied_state().wal_end.lsn);
+    acker_.store(a);
   }
 
   if (deposed())
@@ -852,6 +873,10 @@ void Node::shutdown() {
     }
     stopped.get();
   }
+
+  // PostgreSQL is stopped: no commit waits for the synchronous standby any more.
+  if (auto a = acker_.exchange(nullptr); a)
+    a->stop();
 
   // Then raft hands the leadership over (stepped_down finds nothing left to kill).
   if (raft_)

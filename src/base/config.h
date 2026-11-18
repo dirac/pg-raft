@@ -62,6 +62,15 @@ struct Config {
   /// flush (one raft entry per fsync), or as soon as this much of a segment is pending (a WriteOp
   /// of its own), so that a large transaction streams its WAL before its commit.
   uint64_t write_op_bytes = 64 * 1024;
+  /// commit_wait: what a commit on the primary waits for the quorum in.
+  ///  "fsync"    PostgreSQL's WAL fsync (through FUSE) returns when the flush is committed by raft:
+  ///             nothing is visible before a quorum has it. The flushes, and so the raft rounds,
+  ///             are serial (WALWriteLock).
+  ///  "sync_rep" the fsync returns once the flush is in the leader's ledger, and the commit waits in
+  ///             PostgreSQL's synchronous replication for the node (application_name pg_raft), which
+  ///             acknowledges the raft-committed WAL: rounds overlap, but a commit whose wait is
+  ///             cancelled is visible before a quorum has it. For measurement.
+  string commit_wait = "fsync";
   /// io_threads: the node's io_context threads (connections other than raft's leader-to-follower
   /// ones, which read on threads of their own; write completions, timers, the client channel).
   unsigned io_threads = 2;
