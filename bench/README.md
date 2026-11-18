@@ -102,7 +102,8 @@ on the client.
 
 `multi/` does all of this from the client machine over ssh, for one client, one proxy machine and
 five node machines (3- or 5-node clusters). The machines are listed in `~/machines.txt`: the proxy
-first, then the nodes; the machine running the scripts is the client. Each machine has its local
+first, then the nodes; the machine running the scripts is the client. A file of just three
+addresses is three node machines, for 3-node clusters only, with the proxy on the client. Each machine has its local
 files in `/data/bench`, and the binaries, backups and results are in `~/shared/pg_raft`, a directory
 every machine mounts:
 

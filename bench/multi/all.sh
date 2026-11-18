@@ -6,7 +6,11 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 setups=("$@")
-(( ${#setups[@]} )) || setups=("solo" "std 3" "std 5" "raft 3" "raft 5")
+if (( ${#setups[@]} == 0 )); then
+  setups=("solo")
+  for n in "${NODE_SIZES[@]}"; do setups+=("std $n"); done
+  for n in "${NODE_SIZES[@]}"; do setups+=("raft $n"); done
+fi
 failed=()
 for s in "${setups[@]}"; do
   log "######## $s"

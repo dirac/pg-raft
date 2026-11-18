@@ -38,12 +38,12 @@ excludes=(--exclude=/data/ --exclude=/raft/data/ --exclude=/std/data/ --exclude=
 log "copying bench/ to $REMOTE_DIR on every machine"
 mkdir -p "$REMOTE_DIR"
 rsync -a "${excludes[@]}" "$MULTI_DIR/../" "$REMOTE_DIR/"
-for host in "$PROXY_HOST" "${NODE_HOSTS[@]}"; do
+for host in "${OTHER_PROXY[@]}" "${NODE_HOSTS[@]}"; do
   rsync -a -e "ssh -i $SSH_KEY -o BatchMode=yes" "${excludes[@]}" "$MULTI_DIR/../" "$host:$REMOTE_DIR/" &
 done
 wait
 
 log "installing the binaries"
-on_each "CONFIG=$(raft_config 5) ./raft/install_bins.sh --keep --from $SHARED/bin > /dev/null && echo ok" \
-  "$CLIENT_HOST" "$PROXY_HOST" "${NODE_HOSTS[@]}"
+on_each "CONFIG=$(raft_config "$MAX_NODES") ./raft/install_bins.sh --keep --from $SHARED/bin > /dev/null && echo ok" \
+  "$CLIENT_HOST" "${OTHER_PROXY[@]}" "${NODE_HOSTS[@]}"
 log "deployed: client $CLIENT_HOST, proxy $PROXY_HOST, nodes ${NODE_HOSTS[*]}"
