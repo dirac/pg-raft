@@ -67,8 +67,9 @@ pg_port  = 5443
 ha_port  = 7003
 
 # Written into postgresql.conf when the cluster is created (init.sh), so changes need a new
-# cluster. Keep these the same as ../std/postgresql.std.conf. pg-raft adds wal_sync_method = fsync,
-# wal_recycle = off, wal_level = replica, synchronous_commit = on, fsync = on.
+# cluster. Keep these the same as ../std/postgresql.std.conf (except the WAL file settings, which
+# pg-raft forces and std leaves at PostgreSQL's defaults). pg-raft adds wal_sync_method = fsync,
+# wal_recycle = off, wal_init_zero = off, wal_level = replica, synchronous_commit = on, fsync = on.
 # Values are written verbatim: quote anything with spaces as '...' inside the string.
 [pg_config]
 shared_buffers     = "4GB"

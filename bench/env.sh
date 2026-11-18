@@ -30,7 +30,7 @@ RESULTS_DIR="${RESULTS_DIR:-$TESTING_DIR/results}"
 # actually in effect next to every result. pg-raft forces wal_sync_method = fsync and
 # wal_recycle = off (its FUSE layer needs them), so std uses them too.
 COMPARED_SETTINGS="shared_buffers max_connections max_wal_size checkpoint_timeout wal_sync_method \
-wal_recycle synchronous_commit fsync full_page_writes wal_compression wal_buffers \
+wal_recycle wal_init_zero synchronous_commit fsync full_page_writes wal_compression wal_buffers \
 synchronous_standby_names data_checksums server_version"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }

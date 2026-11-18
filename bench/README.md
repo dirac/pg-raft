@@ -11,10 +11,11 @@ baseline, all with the same PostgreSQL settings, and run the same pgbench worklo
 | Backups | none | none | pg-raft's backup store (`backup_store` in `raft/config.toml`) |
 | Data | `solo/data/pg` | `std/data/pg{0,1,2}` | `raft/data/node{0,1,2}` (`dir` in `raft/config.toml`) |
 
-Both setups use what pg-raft forces on its PostgreSQL (`wal_sync_method = fsync`,
-`wal_recycle = off`), data checksums, and the shared settings in `raft/config.toml`'s
-`[pg_config]`, `std/postgresql.std.conf` and `solo/postgresql.solo.conf` (keep them the same). Every result records the
-settings actually in effect.
+All three use data checksums and the shared settings in `raft/config.toml`'s
+`[pg_config]`, `std/postgresql.std.conf` and `solo/postgresql.solo.conf` (keep them the same). The WAL file settings differ, each the better one for its setup: pg-raft
+forces `wal_sync_method = fsync`, `wal_recycle = off` and `wal_init_zero = off` (its FUSE layer);
+std and solo keep PostgreSQL's defaults (`fdatasync`, `on`, `on`).
+Every result records the settings actually in effect.
 
 ## Setup
 
