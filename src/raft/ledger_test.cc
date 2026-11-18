@@ -314,6 +314,68 @@ BOOST_AUTO_TEST_CASE(append_and_reopen) {
   BOOST_TEST(!l.append(wrong.e, wrong.wal).has_value());
 }
 
+// records() serves the leader's latest records from the window (append() keeps their bytes):
+// the same bytes, counts and limits as the read from the files, across file boundaries; a
+// released entry, or one a follower appended, is read from the files.
+BOOST_AUTO_TEST_CASE(records_from_the_window) {
+  TmpDir base;
+  Dir    tmp(base, "tmp1");
+  Ledger l(tmp(), small());
+  BOOST_REQUIRE(l.open().has_value());
+  append_n(l, 120, RaftTerm{1}, 7);
+  BOOST_TEST(l.file_count() > 3U);
+
+  // From the window, then (everything released) from the files.
+  auto read = [&l](RaftIndex idx, size_t count, size_t max_bytes) {
+    auto b = l.records(idx, count, max_bytes);
+    BOOST_REQUIRE(b.has_value());
+    BOOST_REQUIRE(b->has_value());
+    return std::tuple{(*b)->first, (*b)->last, concat(**b)};
+  };
+  struct Q {
+    size_t idx, count, max_bytes;
+  };
+  vector<Q> const queries = {
+      {1, 120, size_t{1} << 30U}, {1, 7, size_t{1} << 30U}, {50, 1000, 2000}, {50, 1000, 1},
+      {119, 5, size_t{1} << 30U}, {120, 1, 10},             {121, 5, 1000},   {37, 0, 1000}};
+  vector<std::tuple<RaftIndex, RaftIndex, Bytes>> window;
+  for (auto const& q : queries)
+    window.push_back(read(RaftIndex{q.idx}, q.count, q.max_bytes));
+  l.release(RaftIndex{120});
+  for (size_t i = 0; i < queries.size(); ++i) {
+    auto const& q = queries.at(i);
+    auto        f = read(RaftIndex{q.idx}, q.count, q.max_bytes);
+    // The files' read stops after two files; the window's doesn't: the same records up to there.
+    auto const& w = window.at(i);
+    BOOST_TEST(std::get<0>(f) == std::get<0>(w));
+    BOOST_TEST(std::get<1>(f) <= std::get<1>(w));
+    BOOST_TEST((std::get<1>(f) == std::get<1>(w) || q.count > 7));
+    auto const& fb = std::get<2>(f);
+    auto const& wb = std::get<2>(w);
+    BOOST_REQUIRE(fb.size() <= wb.size());
+    BOOST_TEST(std::equal(fb.begin(), fb.end(), wb.begin()));
+  }
+  // A whole run decodes and chains, in one buffer.
+  BOOST_TEST(std::get<1>(window.at(0)) == RaftIndex{120});
+  BOOST_TEST(decode_records(std::get<2>(window.at(0))).has_value());
+
+  // A follower's appends carry no bytes in the window: read from its files.
+  Dir    tmp2(base, "tmp2");
+  Ledger f(tmp2(), small());
+  BOOST_REQUIRE(f.open().has_value());
+  replicate(l, f, RaftIndex{0});
+  Bytes copy;
+  for (RaftIndex idx{1}; idx <= RaftIndex{120};) {
+    auto b = f.records(idx, 120, size_t{1} << 30U);
+    BOOST_REQUIRE(b.has_value() && b->has_value());
+    BOOST_REQUIRE((*b)->count() > 0U);
+    auto bytes = concat(**b);
+    copy.insert(copy.end(), bytes.begin(), bytes.end());
+    idx = (*b)->last + 1U;
+  }
+  BOOST_TEST((copy == std::get<2>(window.at(0))));
+}
+
 BOOST_AUTO_TEST_CASE(end_marker_and_full_file) {
   TmpDir base;
   auto const s = tick_size();

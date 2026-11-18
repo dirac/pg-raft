@@ -114,9 +114,14 @@ struct LedgerEntry {
   Entry                   entry;
   shared_ptr<Bytes const> wal;  // never null; empty without WAL bytes
   uint32_t                crc = 0;
+  // The encoded record, as written: kept for the records this ledger appended itself (append(),
+  // the leader's), so that records() sends them from memory while they are in the window. Null
+  // for the others (a follower's append_records(), entries read back from the files).
+  shared_ptr<string const> record;
 };
 
-/// Whole records, as stored: at most two buffers (a run crosses at most one file boundary).
+/// Whole records, as stored: at most two buffers (a run read from the files crosses at most one
+/// file boundary; one from the window is a single buffer).
 struct RecordBatch {
   RaftIndex                first{0};  // the index of the first record
   RaftIndex                last{0};   // the index of the last record; first - 1 when empty
@@ -237,7 +242,9 @@ class Ledger {
                                                      size_t    count,
                                                      size_t    max_bytes = 8U << 20U) const;
 
-  /// The records themselves, for sending: as entries(), at most two files.
+  /// The records themselves, for sending: as entries(), at most two files. The leader's latest
+  /// records (in the window with their bytes, LedgerEntry::record) come from memory instead, in
+  /// one buffer and not limited to two files.
   ///
   /// The reads don't hold the ledger's lock (only to find where to read): a file is read before
   /// its written offset, which the writer publishes after writing the bytes before it.

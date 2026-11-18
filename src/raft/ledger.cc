@@ -930,14 +930,18 @@ Result<RaftIndex> Ledger::append(Entry const& e, std::span<uint8_t const> wal) {
     return elog(system_error_code(EINVAL), "ledger {}: term {} after term {}", dir_, e.term, *t);
 
   auto const idx = last + 1U;
-  string     buf;
-  auto const crc = encode_record(buf, idx, e, wal, files_.empty() ? base_crc_ : files_.rbegin()->second->last_crc);
+  auto       buf = make_shared<string>();
+  auto const crc = encode_record(
+      *buf, idx, e, wal, files_.empty() ? base_crc_ : files_.rbegin()->second->last_crc);
 
   vector<Pending> p;
   p.push_back(Pending{
-      .bytes = std::span<uint8_t const>(reinterpret_cast<uint8_t const*>(buf.data()), buf.size()),
-      .entry = LedgerEntry{
-          .idx = idx, .entry = e, .wal = make_shared<Bytes const>(wal.begin(), wal.end()), .crc = crc}});
+      .bytes = std::span<uint8_t const>(reinterpret_cast<uint8_t const*>(buf->data()), buf->size()),
+      .entry = LedgerEntry{.idx    = idx,
+                           .entry  = e,
+                           .wal    = make_shared<Bytes const>(wal.begin(), wal.end()),
+                           .crc    = crc,
+                           .record = buf}});
   if (auto r = write_records(p); !r)
     return r.error();
   return idx;
@@ -1414,12 +1418,28 @@ Result<std::optional<RecordBatch>> Ledger::records(RaftIndex idx,
   // Where to read, under the lock; the reads, without it (each file before its written offset).
   inplace_vector<Cursor, 2> cursors;
   RaftIndex                 last{0};
+  vector<shared_ptr<string const>> recent;  // the records from the window, when it has them
   {
     auto lk = std::shared_lock{mtx_};
     if (idx <= base_idx_)
       return std::optional<RecordBatch>{};
     last = last_locked();
-    if (idx <= last && count > 0) {
+
+    // The leader's latest records are in the window with their bytes (append()): no seek, no read.
+    if (idx <= last && count > 0 && !window_.empty() && idx >= window_.front().idx) {
+      size_t bytes = 0;
+      for (auto i = INT(idx) - INT(window_.front().idx); i < window_.size() && recent.size() < count;
+           ++i) {
+        auto const& e = window_.at(i);
+        if (!e.record || e.idx != idx + recent.size())
+          break;
+        if (bytes + e.record->size() > max_bytes && !recent.empty())
+          break;
+        bytes += e.record->size();
+        recent.push_back(e.record);
+      }
+    }
+    if (recent.empty() && idx <= last && count > 0) {
       auto c = cursor_locked(idx);
       if (!c)
         return elog(system_error_code(EBADMSG), "ledger {}: no file holds index {}", dir_, idx);
@@ -1430,8 +1450,20 @@ Result<std::optional<RecordBatch>> Ledger::records(RaftIndex idx,
   }
 
   RecordBatch batch{.first = idx, .last = idx - 1U};
-  size_t      bytes = 0;
-  auto        cur   = idx;
+  if (!recent.empty()) {
+    size_t total = 0;
+    for (auto const& r : recent)
+      total += r->size();
+    Bytes buf;
+    buf.reserve(total);
+    for (auto const& r : recent)
+      buf.insert(buf.end(), r->begin(), r->end());
+    batch.last = idx + recent.size() - 1U;
+    batch.buffers.push_back(std::move(buf));
+    return std::optional<RecordBatch>{std::move(batch)};
+  }
+  size_t bytes = 0;
+  auto   cur   = idx;
   for (auto& c : cursors) {
     LedgerReader r(c.f->fd, options_.file_size, c.limit);
     if (auto s = seek(c, r, cur); !s)
