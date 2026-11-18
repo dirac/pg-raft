@@ -43,7 +43,7 @@ esac
 ./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl \
              --without-icu \
             --with-includes=${prefix}/include \
-            --with-libraries=${prefix}/lib \
+	    --with-libraries=${prefix}/lib:${prefix}/lib64 \
             --without-readline --without-zlib
 exit_on_error $? ${LINENO} "./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl --with-includes=${INCLUDES} --with-libraries=${LIBRARIES} --without-readline --without-zlib"
 
