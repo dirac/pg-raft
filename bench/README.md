@@ -524,9 +524,12 @@ about 43k tps.
 
 ## pg-raft notes
 
-- **Commit-path syncs.** `raft/config.toml` has `leader_sync`, `follower_sync` and `log_sync`, all
-  `false`: a commit is durable once a majority has the WAL in its page cache (durability by
-  replication). Set them to `true` to measure the cost of syncing to disk as well.
+- **Commit-path syncs.** `raft/config.toml` has `leader_sync` and `follower_sync`, both `false`:
+  a commit is durable once a majority has its ledger records in the page cache (durability by
+  replication). Set them to `true` (`RAFT_SYNC=1` with `multi/` sets both) to measure the cost of
+  syncing the ledger to disk as well: the leader's sync runs during the round, a follower's before
+  it answers. (In the results above, from before the ledger, `docs/ledger.md`, the same names
+  were msyncs of the WAL, and `log_sync` synced LMDB.)
 - **Use a fresh cluster per run** (`install_bins.sh`, `init.sh`). Restarting a stopped pg-raft
   cluster can leave a standby unable to rejoin ("requested timeline N is not a child of this
   server's history"); `wait.sh` then fails and names the node. That is a known pg-raft bug

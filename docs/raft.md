@@ -38,7 +38,9 @@ and the meta file; `wal_dir` the WAL segments (`raft/wal` in a node). `raft_log(
 | `log_req_response` | false | log every request and response |
 | `ledger_file_size` | 1 GiB | each ledger file's size (the node passes `Config::ledger_file_size`) |
 | `max_request_bytes` | 8 MiB | the records of an AppendEntries, the chunk of an InstallSnapshot |
-| `sync_commits` | false | sync the ledger before an entry counts as held (the leader: during the round; a follower: before it answers), rather than in the background within a second |
+| `leader_sync` | false | the leader counts itself in the quorum only once its ledger has the entry on disk (the sync runs during the round) |
+| `follower_sync` | false | a follower syncs its ledger before it answers an AppendEntries |
+|  |  | (without them the ledger is synced in the background, within a second) |
 | `checkpoint_secs` | 10 | how often the WAL written into `wal_dir` on apply is synced and the applied state saved (a checkpoint) |
 | `no_sync` | false | tests only: never sync (a machine crash loses the term, vote and log) |
 
@@ -73,7 +75,7 @@ ledger only **after** it has accepted the request (term current, log matching), 
 a deposed leader never touches its log. `wal_dir` gets an entry's WAL bytes when the entry is
 applied, on every node ([ledger.md](ledger.md) §9): it holds committed WAL only. A successful
 `AppendEntriesResponse` means the records are in that follower's ledger (on its disk with
-`sync_commits`).
+`follower_sync`).
 
 ### 2.3 State machine (`raft_state.h`)
 

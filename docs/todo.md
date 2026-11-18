@@ -39,16 +39,15 @@ Found in the second review (2026-11-12), not fixed yet:
   `first_segment` (they are committed).
 - [ ] **node**: `restore_latest_backup` ignores a failed `copy_file` into `raft/wal` (the `ec` is
   overwritten by the next `rename`), and renames entries out of `data/pg_wal` while iterating it.
-- [ ] **raft**: `compact_log` runs under the server lock and, when `keep_from` moves, reads and
-  applies every entry since the previous boundary (a whole backup interval of entries) and deletes
-  them in one LMDB transaction: commits stall meanwhile, and at high write rates the delete can
-  hit `MDB_TXN_FULL`, which aborts the process.
-- [ ] **raft**: `send_install_snapshot` reads the first entry and `boundary_state()` separately;
-  a compaction in between pairs the entries with a later boundary state.
-
-- [ ] **raft**: `RaftLog::install_snapshot` runs three transactions (delete every entry, append the
-  new ones, save the states); a crash in between leaves a log that doesn't match its stored state.
-  Do it in one transaction. ([raft.md §8](raft.md#8-open-items))
+- [ ] **node**: a node that restarts after crashing as the primary starts its PostgreSQL as a
+  standby on the `pg_wal` it has, which can hold WAL that never committed (an fsync that failed);
+  only a demotion rebuilds `pg_wal` from `raft/wal`. The node should rebuild `pg_wal` (as
+  `restart_as_standby` does) on every start that follows an unclean shutdown. (`pg_wal` is never
+  synced, [ledger.md §11](ledger.md#11-node-and-configuration); that makes no difference here.)
+- [ ] **raft**: `compact_log` runs under the server lock and, when `keep_from` moves, scans the
+  entries from the first one to find the target (reading the ledger files): commits stall
+  meanwhile. (It no longer applies them, nor deletes them in one transaction: the boundary state
+  is the new first file's header, and whole files are deleted.)
 - [ ] **wal_fuse**: `op_write` always returns `size`, hiding real I/O errors such as a failed mmap.
   ([wal_fuse.md §6](wal_fuse.md#6-open-items))
 - [ ] **wal_fuse**: `WalState` doesn't range-check a corrupt `xl_tot_len` / `xlp_rem_len` and
@@ -61,28 +60,14 @@ Found in the second review (2026-11-12), not fixed yet:
 
 ## Robustness
 
-- [ ] **raft**: `raft_ensemble_leader_stopped_test` crashes about half the time when four copies
-  run at once (segfaults, `get_entries`' assertion that the entries it read are consecutive, once
-  "stack smashing detected"): a read of the raft log sees inconsistent data. It passes alone. Not
-  a regression: the first Linux build (`0c13337`) crashes 7 of 8 such runs. The crashing thread's
-  stack is corrupt in the core dump; an ASAN or TSAN build is the next step. Suspects: a server's
-  log closed (or reopened) while an io thread still reads it, as the test stops the leader.
-- [ ] **raft**: `RaftLog::resize_logs()` calls `mdb_env_set_mapsize` holding the writer's mutex
-  only; LMDB requires that no transaction be active in the process. Readers (`rmtx_`, shared) can
-  be inside a read transaction: take `rmtx_` exclusively around the resize. (The 1 GiB map is not
-  outgrown in the tests, so it hasn't shown.)
-
-- [ ] **raft**: run `RaftLog::verify()` when a node starts, after a clean or an unclean shutdown.
-  The log's values carry a CRC-32C of their key and object (the logs database has no LMDB page
-  checksums), which reads don't check; `verify()` checks every value, and that the indexes
-  follow each other and the terms never decrease. On a failure the node should treat its log as
-  lost and recover like a wiped node (`needs_backup`, InstallSnapshot, the latest backup), rather
-  than serve or vote from it. LMDB with `MDB_NOSYNC` can be corrupted by a power loss or a kernel
-  crash (not by a process crash), and a damaged branch page can make LMDB itself fail before a CRC
-  is checked: a failed open counts as a failed `verify()`. (`verify()` checks that the log starts at the
-  saved `first_idx` and that no index is missing after it; a tail lost to a power loss can't be
-  detected from the log itself, as anything recording the last index in the same transactions is
-  rolled back with them.)
+- [ ] **raft**: `raft_ensemble_leader_stopped_test` crashed about half the time when four copies
+  ran at once on Linux (a read of the LMDB raft log saw inconsistent data). LMDB is gone (the
+  ledger, [ledger.md](ledger.md)); run it again on Linux, four at a time.
+- [ ] **raft**: when the ledger doesn't open (a file header, or a file other than the last, that
+  doesn't check out: `Ledger::open` fails), the node should treat its log as lost and recover like
+  a wiped node (`needs_backup`, InstallSnapshot, the latest backup) instead of exiting. Startup
+  checks every file header, every record of the last file (crc and chain) and the record headers
+  of the others; `Ledger::verify()` (every crc) runs only on demand.
 
 - [ ] **process**: `Process` derives the process name with `strrchr(executable, '/') + 1`, which
   crashes for a bare executable name. ([process.md §5](process.md#5-open-items))

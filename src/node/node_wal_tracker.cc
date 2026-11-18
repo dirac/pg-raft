@@ -86,19 +86,13 @@ void NodeWalTracker::async_publish(shared_ptr<WalSegment> segment, off_t offset,
 
 void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
                                  off_t                             offset,
-                                 size_t                            size,
+                                 size_t /*size*/,
                                  std::function<void(Result<void>)> completion) {
   if (mode() == Mode::kFenced)
     return completion(system_error_code(WalSegment::kNoConsensus));
 
-  // With leader_sync / follower_sync, local durability first, in pg_wal. Without it the bytes are
-  // in the page cache (written through the mmap) and a commit is durable by replication.
-  bool const leader = mode() == Mode::kLeader;
-  if (leader ? leader_sync_ : follower_sync_)
-    if (auto r = segment->fsync(offset, size); !r)
-      return completion(r);
-
-  if (!leader)
+  // pg_wal is a cache of the WAL (raft keeps it durably): no msync. A standby's fsync is done.
+  if (mode() != Mode::kLeader)
     return completion(ok());
 
   // The writes since the segment's last WriteOp or flush travel with this flush (wal_bytes());

@@ -17,10 +17,13 @@ struct Options {
   size_t ledger_file_size = size_t{1} << 30U;
   // The most bytes of records in an AppendEntries (at least one record is sent).
   size_t max_request_bytes = size_t{8} << 20U;
-  // Sync the ledger before an entry counts as held by this node (the leader: its sync runs during
-  // the round; a follower: before it answers), so that an entry is on the disk of a majority before
-  // it is committed. Otherwise the ledger is synced in the background, within a second.
-  bool sync_commits = false;
+  // The ledger's syncs on the commit path (docs/ledger.md §6.2); without them it is synced in the
+  // background, within a second, and a commit is durable by replication.
+  // leader_sync: the leader counts itself in the quorum only once its ledger has the entry on disk
+  // (its fdatasync runs during the network round).
+  bool leader_sync = false;
+  // follower_sync: a follower fdatasyncs its ledger before it acknowledges an AppendEntries.
+  bool follower_sync = false;
   // How often the WAL written into wal_dir on apply is synced and the applied state saved (a
   // checkpoint, docs/ledger.md §9.2): after a crash the entries after it are applied again.
   unsigned checkpoint_secs = 10;

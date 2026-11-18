@@ -160,7 +160,8 @@ Result<void> Node::start() {
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);
   // The disk syncs on the commit path (config.h): off unless the config (or the caller) asks.
   auto raft_options          = options_.raft;
-  raft_options.sync_commits  = raft_options.sync_commits || config_.log_sync;
+  raft_options.leader_sync   = raft_options.leader_sync || config_.leader_sync;
+  raft_options.follower_sync = raft_options.follower_sync || config_.follower_sync;
   raft_options.ledger_file_size = options_.ledger_file_size_for_test != 0
                                       ? options_.ledger_file_size_for_test
                                       : config_.ledger_file_size;
@@ -172,7 +173,7 @@ Result<void> Node::start() {
                                      raft_options,
                                      make_shared<Observer>(weak_from_this()));
   tracker_                   = make_shared<NodeWalTracker>(
-      raft_, config_.leader_sync, config_.follower_sync, config_.write_op_bytes);
+      raft_, config_.write_op_bytes);
 
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
     raft_->set_needs_backup(true);  // no elections until there is something to promote

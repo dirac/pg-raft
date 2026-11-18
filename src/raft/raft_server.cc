@@ -23,7 +23,7 @@ RaftServer::RaftServer(RaftNodeId                     id,
               LedgerOptions{
                   .file_size   = options.ledger_file_size,
                   .sparse_step = LedgerOptions{}.sparse_step,
-                  .sync        = options.sync_commits,
+                  .sync        = options.leader_sync,
                   .no_sync     = options.no_sync,
                   .spare       = true,
               }),
@@ -900,7 +900,7 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
 
   if (appended) [[likely]] {
     // Their WAL goes into wal_dir when they are applied (committed).
-    if (options_.sync_commits)
+    if (options_.follower_sync)
       value(ledger_.sync());
 
     update_last_ping(false);

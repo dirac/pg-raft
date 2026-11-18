@@ -26,16 +26,14 @@ void parse_node(T& data, Config& config) {
     config.socket_dir = toml::find<string>(data, "socket_dir");
   if (data.contains("pg_hba"))
     config.pg_hba = toml::find<vector<string>>(data, "pg_hba");
-  if (data.contains("leader_sync"))
-    config.leader_sync = toml::find<bool>(data, "leader_sync");
-  if (data.contains("follower_sync"))
-    config.follower_sync = toml::find<bool>(data, "follower_sync");
   if (data.contains("write_op_bytes"))
     config.write_op_bytes = toml::find<uint64_t>(data, "write_op_bytes");
   if (data.contains("frame_checksums"))
     config.frame_checksums = toml::find<bool>(data, "frame_checksums");
-  if (data.contains("log_sync"))
-    config.log_sync = toml::find<bool>(data, "log_sync");
+  if (data.contains("leader_sync"))
+    config.leader_sync = toml::find<bool>(data, "leader_sync");
+  if (data.contains("follower_sync"))
+    config.follower_sync = toml::find<bool>(data, "follower_sync");
   if (data.contains("ledger_file_size")) {
     config.ledger_file_size = toml::find<uint64_t>(data, "ledger_file_size");
     if (!Config::valid_ledger_file_size(config.ledger_file_size))

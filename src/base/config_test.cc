@@ -19,7 +19,6 @@ backup_pending_timeout_secs = 60
 socket_dir = "/tmp/pgr"
 leader_sync = true
 follower_sync = true
-log_sync = true
 write_op_bytes = 131072
 frame_checksums = true
 ledger_file_size = 268435456
@@ -50,7 +49,6 @@ max_connections = 100
   BOOST_TEST(c.socket_dir == "/tmp/pgr");
   BOOST_TEST(c.leader_sync);
   BOOST_TEST(c.follower_sync);
-  BOOST_TEST(c.log_sync);
   BOOST_TEST(c.write_op_bytes == 131072U);
   BOOST_TEST(c.frame_checksums);
   BOOST_TEST(c.ledger_file_size == uint64_t{256} << 20U);
@@ -78,7 +76,6 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   // No disk syncs on the commit path unless asked: durability by replication.
   BOOST_TEST(!c.leader_sync);
   BOOST_TEST(!c.follower_sync);
-  BOOST_TEST(!c.log_sync);
   BOOST_TEST(c.write_op_bytes == 64U * 1024U);
   BOOST_TEST(!c.frame_checksums);
   BOOST_TEST(c.ledger_file_size == uint64_t{1} << 30U);

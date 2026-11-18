@@ -4,8 +4,8 @@ Status: steps 1–4 of §15 are done, and the part of step 5 that step 4 needs. 
 (`src/raft/ledger.{h,cc}`, `ledger_test`) is `RaftServer`'s log; LMDB and `RaftLog` are gone;
 AppendEntries and InstallSnapshot carry ledger records and files; `raft/wal` is written when an
 entry is applied, and checkpoints sync it; `exec()` takes the WAL bytes, which `NodeWalTracker`
-passes from PostgreSQL's `pg_wal`. Still to come (step 5): `leader_sync` and `follower_sync`
-(`NodeWalTracker`'s msyncs of `pg_wal`), then measuring.
+passes from PostgreSQL's `pg_wal`, which is never synced; `leader_sync` and `follower_sync` sync
+the ledger. Still to come: measuring (step 6).
 
 ## 1. Why
 
@@ -121,7 +121,7 @@ from. That is the boundary state compaction keeps (§6.5) and what an InstallSna
   on xfs both leave extents that the first write must convert, and then every `fdatasync` also
   commits a metadata journal transaction. With the zeros already written, an append's `fdatasync`
   flushes data only. The zeros also mark the end of the log: a header with magic 0.
-- **Rotation.** The old file gets its marker and is `fdatasync`ed (always, even with `log_sync`
+- **Rotation.** The old file gets its marker and is `fdatasync`ed (always, even with the syncs
   off), the spare is renamed to `<idx>.ledger`, its header is written, and the directory is
   `fsync`ed. Then the thread prepares the next spare. If the spare is not ready yet, the new file is created with `ftruncate`
   (a warning is logged when spares are on).
@@ -171,15 +171,14 @@ until the entry is applied (§9.1); peers send the records from the ledger files
 
 ### 6.2 Syncs
 
-`log_sync` is the only commit-path sync (§11).
+The commit-path syncs are `leader_sync` and `follower_sync` (§11), separate flags.
 
-- **`log_sync = true`.**
-  - Leader: a sync thread loops: take the append offset, `fdatasync`, set `durable_idx` to the
+- **`leader_sync = true`.** A sync thread loops: take the append offset, `fdatasync`, set `durable_idx` to the
     last record below that offset, and wake the commit. The leader counts itself in the quorum at
     `durable_idx` (§10.3), so its sync runs in parallel with the network round instead of before
     it. Rounds that arrive while a sync is in flight are covered by the next one (group commit).
-  - Follower: after the `pwrite`, it calls `fdatasync` and then responds.
-- **`log_sync = false`.** `durable_idx` is the appended index. A background thread `fdatasync`s the
+- **`follower_sync = true`.** A follower, after the `pwrite`, calls `fdatasync` and then responds.
+- **Off.** `durable_idx` is the appended index. A background thread `fdatasync`s the
   last file once a second. A machine crash can lose the last
   second of a node's acknowledged entries; commits survive through replication, as they do today.
 - `no_sync` (tests only): nothing is synced.
@@ -199,7 +198,7 @@ The request's attached bytes are whole records (§10.1). For each record, the fo
 
 A record whose index the follower already holds with the same CRC is skipped. At the first one
 whose CRC differs, the follower truncates (§6.4) and appends the rest with one `pwrite` per file,
-then answers (after an `fdatasync` with `log_sync`). The WAL bytes go into its `raft/wal` when the
+then answers (after an `fdatasync` with `follower_sync`). The WAL bytes go into its `raft/wal` when the
 entries are applied (§9.1).
 
 ### 6.4 Truncation
@@ -302,7 +301,7 @@ Two small files, each written as a whole: write `<name>.tmp`, `fdatasync` it, re
 `<name>`, and `fsync` the directory. Each holds a version and a CRC-32C of its contents.
 
 - `term`: `{current_term, voted_for}`, written on every term change and vote. It is always synced,
-  whatever `log_sync` says (except under `no_sync`).
+  whatever the syncs say (except under `no_sync`).
 - `meta`: `{RaftState state, optional<RaftIndex> installing}`, written at compaction, on
   `needs_backup` changes and by an install (with step 4, by checkpoints too, §9.2). The boundary
   state is not in it: it is the first ledger file's header.
@@ -384,24 +383,26 @@ history file it carried before are gone.
 `MatchIndexes` counted the peers only, with quorum `n/2`, because the leader's copy was
 implicit. The leader's copy now becomes durable asynchronously, so the leader is counted as a
 member at its ledger's `durable_idx` (quorum `n/2 + 1` of all `n` nodes), updated with every
-response and by the ledger's sync thread (`on_durable`). With `log_sync` off, `durable_idx` is the
+response and by the ledger's sync thread (`on_durable`). With `leader_sync` off, `durable_idx` is the
 last appended index, and the result is the same as before.
 
 ## 11. Node and configuration
 
-Done: `ledger_file_size` in `Config` (§4); `log_sync` syncs the ledger (raft's `sync_commits`);
-`NodeWalTracker::async_publish` no longer copies into raft's segment (it only extends the
-segment's pending range), and `exec` gets the pending range's bytes from the `pg_wal` segment's
-mapping; raft's `Options::follower_sync` is gone (raft no longer writes WAL on the commit path).
-Step 5:
-
-- **`NodeWalTracker`.** Leader-mode `async_fsync` no longer msyncs anything (`leader_sync` msyncs
-  `pg_wal` only now).
-- **Config.** `leader_sync` and `follower_sync` are removed: the mmap'ed copies they synced are
-  gone, and `pg_wal` is rebuilt from `raft/wal` (`rebuild_pg_wal`). `log_sync` now means "a commit
-  is acknowledged only after the ledger's `fdatasync`" on every node. `RAFT_SYNC=1` in
-  `bench/multi` sets `log_sync` only.
-- `rebuild_pg_wal`: same algorithm. Its comment about uncommitted bytes in `raft/wal` goes away.
+- **`NodeWalTracker`.** `async_publish` only extends the segment's pending range; `exec` gets the
+  pending range's bytes from the `pg_wal` segment's mapping; nothing is copied into `raft/wal`
+  (raft writes it on apply). `async_fsync` never msyncs `pg_wal`: in leader mode it appends the
+  `FlushOp` and completes on commit, in follower mode it completes at once.
+- **`pg_wal` is a cache of the WAL.** Raft keeps the committed WAL durably: the ledger, and
+  `raft/wal` derived from it. A standby whose `pg_wal` lost pages in a machine crash finds an
+  invalid record there and streams the rest from the WAL sender; a deposed primary's `pg_wal` is
+  rebuilt from `raft/wal` (`rebuild_pg_wal`) before it restarts as a standby.
+- **Config.** `leader_sync` and `follower_sync` are the ledger's syncs now (§6.2): they used to
+  msync `pg_wal` and raft's copy, and `log_sync` synced LMDB (gone). `RAFT_SYNC=1` in
+  `bench/multi` sets both.
+  `ledger_file_size` sets the files' size (§4).
+- Raft's `Options`: `ledger_file_size`, `max_request_bytes` (8 MiB), `checkpoint_secs` (10),
+  `leader_sync`, `follower_sync`.
+- `rebuild_pg_wal`: same algorithm; `raft/wal` holds committed WAL only now.
 
 ## 12. Concurrency
 
@@ -423,7 +424,7 @@ Step 5:
 
 ## 13. Expected effect
 
-With `log_sync` on, per round:
+With `leader_sync` and `follower_sync` on, per round:
 
 | | Today | Ledger |
 |---|---|---|
@@ -479,16 +480,16 @@ These are estimates from the raw costs in the bench README. They will be measure
    (`NodeWalTracker` passes them from `pg_wal` and no longer copies them into `raft/wal`).
    `raft_ensemble_rematerialize_test`: a follower that loses its `raft/wal` and its `meta`
    applies its ledger again and has every byte back.
-5. `NodeWalTracker`'s msyncs and the config (`leader_sync`, `follower_sync`). Update the docs: `raft.md`, `base.md`, `node.md`, `CLAUDE.md`
-   and `bench/README.md`.
+5. Done: `NodeWalTracker`'s msyncs removed (`pg_wal` is a cache of the WAL, §11);
+   `leader_sync` / `follower_sync` sync the ledger, separately per role.
 6. Benchmark with `bench/multi`, syncs on and off, 3 and 5 nodes.
 
 ## 16. Open items
 
-1. **Follower-mode fsync.** On a follower, the standby's own WAL fsyncs still msync `pg/pg_wal`
-   (`NodeWalTracker` in follower mode). This is off the commit path, but costly on the follower.
-   Since `pg_wal` is rebuilt from `raft/wal`, it could be a no-op, provided the node rebuilds
-   `pg_wal` on every start after a crash.
+1. **A restart after a crash as the primary.** The node starts its PostgreSQL as a standby on the
+   `pg_wal` it has, which can hold WAL that never committed; only a demotion rebuilds `pg_wal`
+   from `raft/wal`. (This predates the ledger: an unsynced `pg_wal` makes it no worse.) The node
+   should rebuild `pg_wal` on every start that follows an unclean shutdown. In `docs/todo.md`.
 2. **The view instead of the copy** (§9.3).
 3. **Writes.** `O_DIRECT` or io_uring for the ledger's appends and syncs, if the `fdatasync`
    remains the commit's largest cost.

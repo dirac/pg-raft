@@ -102,7 +102,7 @@ BOOST_AUTO_TEST_CASE(writes_batched_until_flush_or_threshold, *boost::unit_test:
   auto     lsn    = LogSeqNumber{.timeline = 1, .lsn = 0x4000000};
   auto     seg    = make_segment(e.dir() / "pg_wal", lsn);
 
-  NodeWalTracker tracker{e.service.server(leader), false, false, /*write_op_bytes=*/16384};
+  NodeWalTracker tracker{e.service.server(leader), /*write_op_bytes=*/16384};
   tracker.set_mode(NodeWalTracker::Mode::kLeader);
   auto bytes = random_bytes(30000);
   seg->write(bytes.data(), 0, bytes.size());

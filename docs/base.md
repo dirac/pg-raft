@@ -42,11 +42,10 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 | `backup_pending_timeout_secs` | how long a backup lease counts without a refresh | `120` |
 | `socket_dir` | the WAL sender's Unix socket directory (macOS limits socket paths to 104 bytes) | `/tmp` |
 | `proxy_pg_port`, `proxy_http_port` | the proxy's primary port and admin port ([proxy.md](proxy.md)) | `5432`, `8080` |
-| `leader_sync` | the leader msyncs PostgreSQL's `pg_wal` before appending the `FlushOp` (raft's durable copy is the ledger, see `log_sync`) | `false` |
-| `follower_sync` | a standby's fsync (through FUSE) msyncs its `pg_wal` (`NodeWalTracker` in follower mode); raft writes `raft/wal` on apply and syncs it at checkpoints | `false` |
 | `write_op_bytes` | on the leader, the WAL written since the last flush goes with the next flush (one raft entry per fsync), or as a `WriteOp` of its own as soon as this many bytes of a segment are pending | `65536` |
 | `frame_checksums` | xxhash32 of every network frame raft sends; TCP checksums the segments already (the raft log's records carry a CRC-32C of their own, [ledger.md](ledger.md)) | `false` |
-| `log_sync` | the raft log (the ledger) is synced before an entry counts as held by a node (raft `Options::sync_commits`); off, it is synced in the background within a second | `false` |
+| `leader_sync` | the leader counts itself in the quorum only once its ledger has the entry on disk (its `fdatasync` runs during the round; raft `Options::leader_sync`) | `false` |
+| `follower_sync` | a follower `fdatasync`s its ledger before it acknowledges an AppendEntries (raft `Options::follower_sync`) | `false` |
 | `ledger_file_size` | each raft ledger file: a power of 2, larger than 32 MiB, at most 2 GiB ([ledger.md](ledger.md) §4) | 1 GiB |
 
 With the three syncs off (the default), a commit is durable once a majority has the WAL in its

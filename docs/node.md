@@ -62,8 +62,8 @@ raft ensemble (`node_wal_tracker_test`).
   `exec(WalCommand{flushed_lsn, seg.lsn, WriteOp{range}}, bytes, …)`, with the range's bytes from
   the FUSE segment (in `pg/pg_wal`), so that a large transaction streams its WAL before its
   commit. Smaller writes wait for the flush. The entry's ledger record copies the bytes.
-- `async_fsync(seg, off, size, cb)` → with `leader_sync`, a local `msync` of `pg/pg_wal`, then
-  `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{pending range}}, bytes, h)`: the flush carries the
+- `async_fsync(seg, off, size, cb)` → `exec(WalCommand{flushed_lsn, seg.lsn, FlushOp{pending
+  range}}, bytes, h)` (no `msync` of `pg/pg_wal`, which is a cache of the WAL): the flush carries the
   writes since the segment's last `WriteOp` or flush (an empty `FlushOp` when there are none, still
   the barrier). Usually one entry and one raft round per fsync. `h` calls `cb(ok)` when the entry
   commits, or `cb(kNoConsensus)` when it gets `kNotLeader`. Taking the pending range and

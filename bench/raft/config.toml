@@ -21,16 +21,16 @@ backup_interval_secs        = 86400
 backup_wal_size             = 1099511627776   # 1 TiB
 backup_pending_timeout_secs = 120
 
-# Disk syncs on the commit path (read by each node at start). All off: a commit is durable once a
-# majority has the WAL in its page cache, so durability comes from replication, and the kernel
-# writes the pages back on its own. Only a power loss of a majority at once loses commits.
-#   leader_sync    the leader msyncs its WAL (pg_wal and raft's copy) before the commit round
-#   follower_sync  a follower msyncs the WAL it receives before acknowledging it
-#   log_sync       the raft log (the ledger, docs/ledger.md) is synced before an entry counts as
-#                  held by a node (off: synced in the background within a second)
+# The disk syncs on the commit path (read by each node at start), of the raft log (the ledger,
+# docs/ledger.md). Off: a commit is durable once a majority has it in its page cache, so
+# durability comes from replication, and the ledger is synced in the background within a second.
+# Only a power loss of a majority at once loses commits. (PostgreSQL's pg_wal is never synced:
+# raft keeps the committed WAL.)
+#   leader_sync    the leader counts itself in the quorum once its ledger has the entry on disk
+#                  (its fdatasync runs during the network round)
+#   follower_sync  a follower fdatasyncs its ledger before acknowledging an AppendEntries
 leader_sync   = false
 follower_sync = false
-log_sync      = false
 
 # Each raft ledger file (docs/ledger.md): a power of 2, larger than 32 MiB, at most 2 GiB. Each
 # node also keeps a zero-filled spare of this size.

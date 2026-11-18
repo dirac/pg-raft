@@ -148,7 +148,7 @@ struct Appended {
 struct LedgerOptions {
   size_t file_size   = 1ULL << 30U;  // each file's size
   size_t sparse_step = 64U << 10U;   // a sparse index point at least every this many bytes
-  bool   sync        = false;        // log_sync: the sync thread syncs every append at once
+  bool   sync        = false;        // leader_sync: the sync thread syncs every append at once
   bool   no_sync     = false;        // tests only: nothing is ever synced
   bool   spare       = true;         // prepare the next file (zero-filled) in the background
 };
