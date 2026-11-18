@@ -65,6 +65,13 @@ One setup at a time, on a fresh cluster each time:
 (`raft/reset.sh --yes`, `std/reset.sh --yes` and `solo/reset.sh --yes` also delete a cluster
 without rebuilding.)
 
+`./matrix.sh` does all three on one machine, each with the disk syncs on and off (solo and std:
+`fsync`; pg-raft: `leader_sync` and `follower_sync`), on a fresh cluster each, at each client count
+in `SWEEP` (default `50 100`; pg-raft through the proxy and direct), then writes
+`results/summary.md`. It builds pg-raft from `PG_RAFT_REPO` (default `~/pg-raft`) and writes its
+config variants into `variants/`. On a machine without the NFS mount, point `backup_store` in
+`raft/config.toml` at a local directory first.
+
 ## A run on several machines
 
 Three node machines and a client machine (proxy and pgbench), all with the same `config.toml` /
@@ -172,6 +179,8 @@ per-statement latencies) and `summary.txt`.
 | `run.sh solo \| std N \| raft N \| stop` | one setup on a fresh cluster, pgbench at each client count in `SWEEP` (pg-raft: through the proxy and direct), then stop it and copy the results to `~/shared/pg_raft/results`; `VARIANT=name` tags the results (`raft-direct-sync-n3-c10-…`) |
 | `all.sh [setups]` | every setup in turn, then `summary.sh` |
 | `summary.sh [dir]` | one table (`summary.md`, `summary.csv`) from the results' `run.log`s |
+
+`matrix.sh` (top level): one machine, solo / std / raft, each with syncs on and off, over `SWEEP`.
 
 ## Results
 
@@ -521,6 +530,62 @@ fsync, under PostgreSQL's `WALWriteLock`; the other backends wait and find their
 pg-raft as one stream, one batch per fsync, and a multithreaded FUSE loop gains nothing. What
 matters is the latency of each fsync round: a 300 µs fsync alone caps one PostgreSQL here at
 about 43k tps.
+
+### 2026-11-18: one large machine, syncs on and off
+
+One EC2 machine, 96 cores (aarch64), ~740 GB, the data on its local NVMe instance store (write-through:
+no volatile cache, so `fdatasync` sends no cache flush), Amazon Linux 2023. PostgreSQL 17.9, pg-raft at
+`9bfe187` (the ledger), release build, gcc 14. Everything local: 3 nodes, the proxy, pgbench.
+`./matrix.sh`: scale 100, TPC-B-like, 16 pgbench threads, 30 s warm-up, 120 s measured, a fresh cluster
+per setup and syncs setting.
+
+tps:
+
+| Setup | syncs on, 50 | syncs on, 100 | syncs off, 50 | syncs off, 100 |
+|---|---|---|---|---|
+| solo | 228,099 | 234,826 | 271,694 | 253,796 |
+| streaming replication, 3 nodes | 175,530 | 190,420 | 237,185 | 224,341 |
+| pg-raft direct | 122,075 | 128,850 | 143,499 | 145,201 |
+| pg-raft through the proxy | 86,893 | 99,540 | 96,809 | 113,658 |
+
+pg-raft direct against streaming replication, same syncs: on 70% / 68%, off 61% / 65%. Commit (`END`)
+in ms, 50 / 100 clients: solo 0.063 / 0.118 (off 0.025 / 0.068), streaming replication 0.119 / 0.188
+(off 0.053 / 0.121), pg-raft direct 0.216 / 0.352 (off 0.170 / 0.299). pg-raft's latency stddev is
+1.3–2.2 ms against 0.07–0.6 ms.
+
+- **pg-raft peaks at about 145k tps**: with syncs off it gains 1% from 50 to 100 clients.
+- **The syncs cost pg-raft less than they cost streaming replication** here: 15% / 11% against
+  26% / 15% (solo 16% / 7%): the ledger's `pwrite` + `fdatasync`, not the msyncs of the earlier runs.
+- **The proxy costs 22–33%**, less with more clients.
+
+Experiments on pg-raft (syncs on, 50 clients, direct; steady 10 s intervals 126k–134k throughout):
+
+| Change | tps | `END` |
+|---|---|---|
+| baseline | 122,075 | 0.216 ms |
+| a follower writes its records with `pwritev2(RWF_DSYNC)` instead of `pwrite` + `fdatasync` | 123,286 | 0.214 ms |
+| + send to both followers in parallel (one inline, one posted) — reverted | 123,681 | 0.212 ms |
+| + exact offsets of the records after the last sparse point (branch `ledger-recent-offsets`) | 123,384 | 0.213 ms |
+
+None moves throughput. What the measurements show:
+
+- **A follower almost never has more than one AppendEntries waiting** (its raft sockets, sampled:
+  nothing queued 91% of the time). PostgreSQL's WAL arrives one flush at a time, so grouping the
+  followers' syncs can't help. A follower's `RWF_DSYNC` write takes ~30 µs: the disk write.
+- **Thread wake-ups are cheap**: `perf sched timehist` shows a scheduling delay of ~1 µs (p99 2–3 µs)
+  for every thread. The I/O threads wake far more often than needed (~8 per round on the leader, a few
+  µs each), but that is CPU, not commit latency; simplifying `net` (its queues) wouldn't shorten a round.
+- **The leader's FUSE thread** runs ~33 µs of CPU per round (37–49% busy; ~10k rounds/s, ~12 commits
+  each). With frame pointers (`-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer`, `perf record -g`;
+  DWARF unwinding fails through static glibc and libfuse): `op_fsync` 58% — sending the AppendEntries
+  45% (`Ledger::records` 19%, of it `Ledger::seek` parsing from the sparse point 12.6%; the socket write
+  13.5%; serialization and queueing 11%), the ledger append 10%; `op_write` 16%; reading `/dev/fuse` 11%,
+  replying 7%; `malloc`/`free` ~10% overall.
+- **It waits for PostgreSQL a quarter of the time**: its waits are 2–10 µs (between a write and its
+  fsync), 30–50 µs (the commit: a follower's sync and the round trip), and >150 µs gaps averaging
+  ~800 µs (26% of the time) in which pg-raft has nothing to do. So cutting the FUSE thread's CPU doesn't
+  raise tps; what PostgreSQL's backends do in those gaps (group commit, `WALWriteLock`) is the next
+  thing to measure.
 
 ## pg-raft notes
 
