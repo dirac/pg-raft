@@ -27,13 +27,10 @@ struct Options {
   // How often the WAL written into wal_dir on apply is synced and the applied state saved (a
   // checkpoint, docs/ledger.md §9.2): after a crash the entries after it are applied again.
   unsigned checkpoint_secs = 10;
-  // The leader reads each follower's replies on a thread of its own (Connection's reader thread),
-  // busy-polling the socket from |spin_margin_usecs| before a reply is expected (the last
-  // AppendEntries' send plus the moving average of the follower's round trips) for at most
-  // |spin_max_usecs|.
-  bool     peer_reader_threads = true;
-  unsigned spin_margin_usecs   = 80;
-  unsigned spin_max_usecs      = 400;
+  // Both ends of each leader-to-follower connection read on a thread of their own (Connection's
+  // reader thread): the leader its follower's replies, the follower the leader's requests. The
+  // other connections stay on the io_context.
+  bool reader_threads = true;
   // Testing only: nothing is synced to the disk, so a machine crash loses the term, the vote and
   // the log. A process crash loses nothing.
   bool no_sync = false;

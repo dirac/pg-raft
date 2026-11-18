@@ -12,17 +12,6 @@ uint64_t steady_ns() {
 
 }  // namespace
 
-Connection::SpinWindow RaftPeerConnection::spin_window() const {
-  if (append_entries() <= 0)
-    return {};
-  auto const sent = ae_sent_ns_.load(std::memory_order_relaxed);
-  if (sent == 0)
-    return {};
-  auto const rtt    = rtt_ns_.load(std::memory_order_relaxed);
-  auto const margin = uint64_t{options_.spin_margin_usecs} * 1000U;
-  auto const from   = rtt > margin ? sent + rtt - margin : sent;
-  return {.from = from, .until = from + uint64_t{options_.spin_max_usecs} * 1000U};
-}
 
 void RaftPeerConnection::send_ping(RaftTerm current_term) {
   std::unique_lock<std::mutex> lk{mtx_};
@@ -115,7 +104,6 @@ void RaftPeerConnection::send_append_entries(std::unique_lock<std::mutex> lk,
                    .request = std::move(append_entries),
                },
                attached);
-  wake_reader();  // its reply is due in a round trip: the reader spins from just before
 }
 
 void RaftPeerConnection::send_install_snapshot(std::unique_lock<std::mutex> lk,
@@ -213,7 +201,7 @@ void RaftPeerConnection::response_handler(Result<Data> msg) {
     log(INFO, "{}{}", log_prefix(), r.value());
 
   // A round trip to the follower: from the latest AppendEntries' send (with several in flight, a
-  // little short, which only starts the spin earlier).
+  // little short).
   if (std::holds_alternative<AppendEntriesResponse>(r.value().response))
     if (auto const sent = ae_sent_ns_.load(std::memory_order_relaxed); sent != 0) {
       auto const sample = steady_ns() - sent;

@@ -113,14 +113,14 @@ Consumers call:
 - `read_data(handler)` for messages that have no attached bytes.
 - `read_file(handler)`.
 
-**Reader thread** (`threaded_reader()`, TCP only; raft's leader-to-follower connections): instead of
-the asio loop, a thread of the connection's own reads frames from a dup of the socket (`recvmsg`
-with `MSG_DONTWAIT`, data and status frames; a file frame closes the connection) and hands each to
-its handler on that thread. When a reply is due (`spin_window()`, steady-clock ns) it busy-polls the
-socket instead of sleeping in `ppoll`: it sleeps until the window opens (timer slack 1 ns), and a
-sender's `wake_reader()` (an eventfd, written only while the reader sleeps) makes it recompute the
-window. It also sets `SO_BUSY_POLL` (the kernel then polls the NIC queue in each `recvmsg`; it
-needs `CAP_NET_ADMIN` to exceed `net.core.busy_read`). Writes stay on the io_context.
+**Reader thread** (`threaded_reader()`, TCP only; both ends of raft's leader-to-follower
+connections): instead of the asio loop, a thread of the connection's own reads frames from a dup of
+the socket (`recvmsg` with `MSG_DONTWAIT`, data and status frames; a file frame closes the
+connection), sleeping in `ppoll` until data arrives (asio's sockets are non-blocking, and a dup
+shares the flag), and hands each frame to its handler on that thread: no hand-off to an io thread,
+and no second read for the body. Writes stay on the io_context: they are queued, so a slow peer
+never blocks the thread that sends (raft sends with its lock held). The thread holds the connection
+and ends when the socket is shut down.
 
 Each call takes a queued item or parks the handler until one arrives. Handlers are **posted**,
 never invoked inline, so a handler can safely call `read_*` again. The queue elements are wrapped

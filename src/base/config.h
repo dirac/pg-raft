@@ -62,6 +62,9 @@ struct Config {
   /// flush (one raft entry per fsync), or as soon as this much of a segment is pending (a WriteOp
   /// of its own), so that a large transaction streams its WAL before its commit.
   uint64_t write_op_bytes = 64 * 1024;
+  /// io_threads: the node's io_context threads (connections other than raft's leader-to-follower
+  /// ones, which read on threads of their own; write completions, timers, the client channel).
+  unsigned io_threads = 2;
   /// frame_checksums: xxhash32 of every network frame raft sends (TCP checksums the segments
   /// already; the ledger's records carry a CRC-32C of their own, always).
   bool frame_checksums = false;

@@ -120,24 +120,11 @@ class Connection : public std::enable_shared_from_this<Connection> {
   bool ssl_enabled() const { return socket_.index() == 1; }
 
  protected:
-  /// When a reply is expected (steady_clock nanoseconds): the reader thread busy-polls the socket
-  /// from |from| until |until| instead of sleeping until the kernel wakes it. {0, 0}: no reply
-  /// expected soon.
-  struct SpinWindow {
-    uint64_t from  = 0;
-    uint64_t until = 0;
-  };
-
-  /// A thread of the connection's own reads it (TCP only), instead of the io_context: a frame is
-  /// handled on that thread as soon as it is in, without a hand-off to an io thread, and around
-  /// spin_window() it polls the socket busily (with SO_BUSY_POLL when the process may set it, the
-  /// NIC's queue too). Writes stay on the io_context. Decided once, at start().
+  /// A thread of the connection's own reads it (TCP only), instead of the io_context: it sleeps
+  /// until a frame arrives and handles it on that thread, without a hand-off to an io thread.
+  /// Writes stay on the io_context (queued: a slow peer never blocks the writer). Decided once, at
+  /// start().
   virtual bool threaded_reader() const { return false; }
-  virtual SpinWindow spin_window() const { return {}; }
-
-  /// After a send that opens a spin window: wakes the reader thread if it sleeps, so that it
-  /// sleeps again only until the window starts. Cheap when it is awake (an atomic load).
-  void wake_reader();
 
  private:
   static constexpr unsigned kHeaderWords = 6U;
@@ -240,11 +227,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
   // The reader thread (threaded_reader()): reads frames from |fd| (a dup of the socket's, closed
   // when the thread ends) until the connection closes.
   void read_loop(int fd);
-  int               wake_fd_ = -1;  // an eventfd: wake_reader() -> the reader's ppoll
-  std::atomic<bool> reader_sleeping_{false};
   // Reads exactly the bytes of |buffs|; false (the connection shut down) on an error or the end.
   bool read_full(int fd, std::span<boost::asio::mutable_buffer const> buffs);
-  // Until |fd| is readable, the connection closes, or the spin window starts: false if closed.
+  // Until |fd| is readable or the connection closes: false if closed.
   bool wait_readable(int fd);
 
   void cleanup(std::error_code ec, int fd, std::filesystem::path const& file);

@@ -28,6 +28,8 @@ void parse_node(T& data, Config& config) {
     config.pg_hba = toml::find<vector<string>>(data, "pg_hba");
   if (data.contains("write_op_bytes"))
     config.write_op_bytes = toml::find<uint64_t>(data, "write_op_bytes");
+  if (data.contains("io_threads"))
+    config.io_threads = toml::find<unsigned>(data, "io_threads");
   if (data.contains("frame_checksums"))
     config.frame_checksums = toml::find<bool>(data, "frame_checksums");
   if (data.contains("leader_sync"))

@@ -178,7 +178,7 @@ shared_ptr<Connection> RaftServer::create_connection(string peer, socket_type so
   if (peer.starts_with("Raft:")) {
     connections_->reset_last_connect_attempts();
     return Connection::create<RaftFollowerConnection>(
-        self_id_, std::move(peer), std::move(socket), self<RaftServer>());
+        self_id_, std::move(peer), std::move(socket), self<RaftServer>(), options_.reader_threads);
   }
   return Connection::create<RaftClientConnection>(
       self<RaftServer>(), std::move(peer), std::move(socket));

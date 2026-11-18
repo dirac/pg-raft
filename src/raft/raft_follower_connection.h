@@ -40,12 +40,20 @@ class RaftFollowerConnection : public Connection {
   RaftFollowerConnection(RaftNodeId                               self_id,
                          string                                   peer,
                          socket_type                              socket,
-                         shared_ptr<FollowerConnectionApi> const& server)
-      : Connection(std::move(peer), std::move(socket)), self_id_(self_id), server_(server) {
+                         shared_ptr<FollowerConnectionApi> const& server,
+                         bool                                     threaded = false)
+      : Connection(std::move(peer), std::move(socket)),
+        self_id_(self_id),
+        server_(server),
+        threaded_(threaded) {
     set_log_prefix(std::format("({0} <- {1}) ", INT(self_id_), Connection::peer()));
   }
 
   void start() final;
+
+ protected:
+  /// The leader's requests are read on a thread of the connection's own (Options::reader_threads).
+  bool threaded_reader() const override { return threaded_; }
 
  private:
   std::tuple<std::shared_lock<std::shared_mutex>, shared_ptr<FollowerConnectionApi>> lock() {
@@ -63,4 +71,5 @@ class RaftFollowerConnection : public Connection {
 
   RaftNodeId const                      self_id_;
   weak_ptr<FollowerConnectionApi> const server_;
+  bool const                            threaded_;
 };

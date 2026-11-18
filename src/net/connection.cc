@@ -1,8 +1,6 @@
 #include "src/net/connection.h"
 
 #include <poll.h>
-#include <sys/eventfd.h>
-#include <sys/prctl.h>
 #include <sys/socket.h>
 
 #include "src/base/logger.h"
@@ -69,8 +67,6 @@ Connection::Connection(string peer, socket_type socket, std::chrono::millisecond
 }
 
 Connection::~Connection() {
-  if (wake_fd_ != -1)
-    ::close(wake_fd_);
   if (test_and_set(closed_))
     return;
 
@@ -94,11 +90,9 @@ void Connection::start() {
   assert(!started);
 
   int fd = -1;
-  if (threaded_reader() && socket_.index() == 0) {
-    fd       = ::dup(std::get<0>(socket_).native_fd());
-    wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  }
-  if (fd != -1 && wake_fd_ != -1)
+  if (threaded_reader() && socket_.index() == 0)
+    fd = ::dup(std::get<0>(socket_).native_fd());
+  if (fd != -1)
     std::thread([this, s = self(), fd] {
       read_loop(fd);
       ::close(fd);
@@ -271,31 +265,7 @@ void Connection::do_read_header() {
 
 // ── the reader thread ─────────────────────────────────────────────────────────
 
-namespace {
-
-uint64_t steady_ns() {
-  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now().time_since_epoch())
-                                   .count());
-}
-
-}  // namespace
-
 void Connection::read_loop(int fd) {
-  // The sleep until a spin window opens must end on time: a thread's timers may expire up to
-  // 50 us late by default (timer slack), and a reply that lands while it sleeps costs a wake-up.
-  ::prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
-
-  // The kernel polls the NIC's queue in the reader's recv()s too (it needs CAP_NET_ADMIN to raise
-  // it above net.core.busy_read); without it the spin is on the socket only.
-  static std::once_flag logged;
-  int                   usecs = 50;
-  if (::setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usecs, sizeof(usecs)) != 0)
-    std::call_once(logged, [] {
-      log(INFO, "SO_BUSY_POLL not set ({}): the reader threads spin on their sockets only",
-          strerror(errno));
-    });
-
   std::array<uint32_t, kHeaderWords> header{};
   while (!closed()) {
     std::array const hb{boost::asio::mutable_buffer(header.data(), sizeof(header))};
@@ -398,51 +368,13 @@ bool Connection::read_full(int fd, std::span<boost::asio::mutable_buffer const> 
   return true;
 }
 
-void Connection::wake_reader() {
-  if (wake_fd_ == -1)
-    return;
-  // Pairs with the reader's fence: either it sees the send's state, or this sees it asleep.
-  std::atomic_thread_fence(std::memory_order_seq_cst);
-  if (reader_sleeping_.load(std::memory_order_relaxed)) {
-    uint64_t one = 1;
-    [[maybe_unused]] auto n = ::write(wake_fd_, &one, sizeof(one));
-  }
-}
-
 bool Connection::wait_readable(int fd) {
-  // Asleep at most this long (the closing of the connection is noticed then).
-  static constexpr uint64_t kMaxSleepNs = 100'000'000;
+  // The socket is non-blocking (asio's, and a dup shares the flag): wait in ppoll, waking every
+  // 100 ms to notice a close.
   while (!closed()) {
-    auto window = [this] {
-      auto const now = steady_ns();
-      auto const w   = spin_window();
-      return std::tuple{now, w, w.from != 0 && now >= w.from && now < w.until};
-    };
-    auto [now, w, spin] = window();
-    if (spin)
-      return true;  // spinning: the caller reads again at once
-
-    reader_sleeping_.store(true, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    std::tie(now, w, spin) = window();  // a send just before the flag was set
-    if (spin) {
-      reader_sleeping_.store(false, std::memory_order_relaxed);
-      return true;
-    }
-    uint64_t sleep = kMaxSleepNs;
-    if (w.from > now)
-      sleep = std::min(sleep, w.from - now);
-    timespec ts{.tv_sec  = static_cast<time_t>(sleep / 1'000'000'000U),
-                .tv_nsec = static_cast<long>(sleep % 1'000'000'000U)};
-    std::array p{pollfd{.fd = fd, .events = POLLIN, .revents = 0},
-                 pollfd{.fd = wake_fd_, .events = POLLIN, .revents = 0}};
-    auto const n = ::ppoll(p.data(), p.size(), &ts, nullptr);
-    reader_sleeping_.store(false, std::memory_order_relaxed);
-    if (n > 0 && (p[1].revents & POLLIN)) {
-      uint64_t v = 0;
-      [[maybe_unused]] auto r = ::read(wake_fd_, &v, sizeof(v));
-    }
-    if (n > 0 && p[0].revents != 0)
+    timespec ts{.tv_sec = 0, .tv_nsec = 100'000'000};
+    pollfd   p{.fd = fd, .events = POLLIN, .revents = 0};
+    if (::ppoll(&p, 1, &ts, nullptr) > 0)
       return true;
   }
   return false;

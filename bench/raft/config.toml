@@ -40,6 +40,10 @@ ledger_file_size = 1073741824   # 1 GiB
 # fsync), or as an entry of its own once this many bytes of a segment are pending.
 write_op_bytes = 65536
 
+# The node's io_context threads. Raft's leader-to-follower connections read on threads of their
+# own on both ends; the rest (write completions, timers, the client channel) shares these.
+io_threads = 2
+
 # xxhash32 of every network frame raft sends (TCP checksums the segments already). The raft log's
 # records carry a CRC-32C of their own, always.
 frame_checksums = false
