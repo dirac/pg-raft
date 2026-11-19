@@ -24,8 +24,8 @@ static constexpr char kTextPath[] = "/readme.txt";
 template <typename C>
 static void fill_wal_page(C* page) {
   memset(page, 0, kWalBlockSize);
-  page[0]          = 0x16;
-  page[1]          = 0xD1;  // xlp_magic = 0xD116 LE
+  page[0]          = static_cast<C>(0x16);
+  page[1]          = static_cast<C>(0xD1);  // xlp_magic = 0xD116 LE
   uint32_t tot_len = 24;
   memcpy(page + 40, &tot_len, 4);  // xl_tot_len of first XLogRecord
 }

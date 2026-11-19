@@ -14,6 +14,10 @@ void parse_dir(T& data, Config& config) {
 
 template <typename T>
 void parse_node(T& data, Config& config) {
+  if (data.contains("install_dir"))
+    config.install_dir = toml::find<string>(data, "install_dir");
+  if (data.contains("pg_major_version"))
+    config.pg_major_version = toml::find<unsigned>(data, "pg_major_version");
   if (data.contains("backup_store"))
     config.backup_store = toml::find<string>(data, "backup_store");
   if (data.contains("backup_interval_secs"))

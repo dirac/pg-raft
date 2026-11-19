@@ -7,7 +7,7 @@
 #include "src/process/pg_instance.h"
 #include "src/process/process.h"
 
-static std::string const  kPgBin = "/opt/pg_raft/postgresql/17/bin";
+static std::string const kPgBin = kPgTestBin;
 static constexpr uint16_t kPort  = 15436;
 
 static bool pg_available() {

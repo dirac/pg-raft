@@ -6,7 +6,7 @@
 #include "src/wal_fuse/fuse.h"
 #include "src/wal_fuse/wal_fuse_ops.h"
 
-static std::string const  kPgBin = "/opt/pg_raft/postgresql/17/bin";
+static std::string const kPgBin = kPgTestBin;
 static constexpr uint16_t kPort  = 15439;
 
 static bool pg_available() {

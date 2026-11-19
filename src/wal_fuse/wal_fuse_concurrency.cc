@@ -20,7 +20,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <fstream>
 
-static char const* const kPgBin = "/opt/pg_raft/postgresql/17/bin";
+static char const* const kPgBin = "/opt/pg_raft/postgresql/18/bin";
 
 namespace {
 

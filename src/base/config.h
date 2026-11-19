@@ -16,7 +16,7 @@ struct Config {
 
   /// The desired pg_version. If the data directory belongs to a previous version, then the leader
   /// is going to upgrade.
-  unsigned pg_major_version = 17;
+  unsigned pg_major_version = 18;
 
   struct Server {
     string hostname;

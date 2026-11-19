@@ -6,7 +6,7 @@
 #include "src/status/pg_client.h"
 #include "src/wal_sender/wal_sender_server.h"
 
-static constexpr char const* kPgBin       = "/opt/pg_raft/postgresql/17/bin";
+static std::string const kPgBin       = kPgTestBin;
 static constexpr uint16_t    kPrimaryPort = 15445;
 static constexpr uint16_t    kStandbyPort = 15446;
 

@@ -169,6 +169,8 @@ Result<void> Node::start() {
 
   // The network frames' checksums (process-wide; TCP checksums the segments already).
   Connection::set_frame_checksums(config_.frame_checksums);
+  // The version the WAL sender reports to the standby (process-wide).
+  WalSender::set_pg_major_version(config_.pg_major_version);
 
   // Raft first: it knows whether the node needs a backup (an InstallSnapshot replaced its log).
   auto endpoint =

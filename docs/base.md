@@ -32,7 +32,7 @@ Source: `src/base/`. Every other module depends on `base`; `base` depends on not
 |---|---|---|
 | `dir` | `wdir`: the nodes' directories go under it | |
 | | `install_dir` | `/opt/pg_raft/postgresql` |
-| | `pg_major_version` (the binaries are `install_dir/<version>/bin`) | `17` |
+| | `pg_major_version` (the binaries are `install_dir/<version>/bin`; the WAL sender reports it as `server_version`) | `18` |
 | `[[server]]` `hostname`, `pg_port`, `ha_port` | `servers[i]`: node `i` | |
 | `[pg_config]` | `pg_config`: settings written into `postgresql.conf` by `pg_raft_initdb` | |
 | `pg_hba` | lines written into `pg_hba.conf` by `pg_raft_initdb`, ahead of pg-raft's defaults (loopback trusted, other addresses `scram-sha-256`), e.g. `["host all all 10.0.0.0/16 trust"]` | `[]` |

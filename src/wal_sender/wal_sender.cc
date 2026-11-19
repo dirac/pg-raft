@@ -284,7 +284,8 @@ void WalSender::handle_startup_body(Bytes /*body*/) {
   Bytes resp;
   auto app = [&resp](Bytes b) { resp.insert(resp.end(), b.begin(), b.end()); };
   app(auth_ok());
-  app(param_status("server_version", "17.0"));
+  auto const version = std::format("{}.0", pg_major_version_.load());
+  app(param_status("server_version", version.c_str()));
   app(param_status("integer_datetimes", "on"));
   app(param_status("server_encoding", "UTF8"));
   app(backend_key_data());

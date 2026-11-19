@@ -5,7 +5,7 @@
 #include "src/wal_fuse/fuse.h"
 #include "src/wal_fuse/wal_fuse_ops.h"
 
-static char const* const kPgBin    = "/opt/pg_raft/postgresql/17/bin";
+static char const* const kPgBin    = "/opt/pg_raft/postgresql/18/bin";
 static constexpr int     kScale    = 10;   // pgbench scale factor (10 → 1M rows)
 static constexpr int     kDuration = 30;   // seconds per run
 static constexpr int     kClients  = 4;    // concurrent pgbench clients

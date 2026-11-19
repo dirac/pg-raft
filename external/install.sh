@@ -33,7 +33,7 @@ rm -f ${prefix}/lib/*.dylib
 rm -f ${prefix}/lib64/*.dylib
 
 ${DIR}/install-openssl.sh
-${DIR}/install-postgresql.sh 17.9 78
+${DIR}/install-postgresql.sh 18.7 78
 
 cd ${DIR}
 

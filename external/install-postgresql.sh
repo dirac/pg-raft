@@ -44,7 +44,7 @@ esac
              --without-icu \
             --with-includes=${prefix}/include \
 	    --with-libraries=${prefix}/lib:${prefix}/lib64 \
-            --without-readline --without-zlib
+            --without-readline --without-zlib --with-lz4 --with-zstd
 exit_on_error $? ${LINENO} "./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl --with-includes=${INCLUDES} --with-libraries=${LIBRARIES} --without-readline --without-zlib"
 
 make

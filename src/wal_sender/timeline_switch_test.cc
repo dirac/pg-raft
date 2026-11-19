@@ -21,7 +21,7 @@
 // holds the switch point; WalSender reads the bytes before the switch point from timeline 1's
 // segment, never from timeline 2's (which, in pg-raft, has zeros there).
 
-static constexpr char const* kPgBin   = "/opt/pg_raft/postgresql/17/bin";
+static std::string const kPgBin   = kPgTestBin;
 static constexpr uint16_t    kPPort   = 15460;
 static constexpr uint16_t    kS2Port  = 15461;
 static constexpr uint16_t    kS1Port  = 15462;

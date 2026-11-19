@@ -7,7 +7,7 @@
 
 TESTING_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PG_BIN="${PG_BIN:-/opt/pg_raft/postgresql/17/bin}"
+PG_BIN="${PG_BIN:-/opt/pg_raft/postgresql/18/bin}"
 
 # The backups (NFS). pg-raft's backup store lives here; std takes no backups.
 BACKUP_ROOT="${BACKUP_ROOT:-/mnt/efs/fs1/pg_raft}"

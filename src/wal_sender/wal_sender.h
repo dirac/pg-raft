@@ -27,6 +27,10 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   using stream_socket = asio::generic::stream_protocol::socket;
   using StatusCb      = std::function<void(StandbyStatus const&)>;
 
+  /// The PostgreSQL major version reported to standbys (server_version), process-wide:
+  /// Config::pg_major_version, set by the node. 18 by default.
+  static void set_pg_major_version(unsigned v) { pg_major_version_.store(v); }
+
   static shared_ptr<WalSender> create(
       stream_socket          socket,
       std::filesystem::path  wal_dir,
@@ -103,6 +107,8 @@ class WalSender : public std::enable_shared_from_this<WalSender> {
   void close_socket();
 
   // Protocol message builders.
+  static inline std::atomic<unsigned> pg_major_version_{18};
+
   static Bytes build_msg(char type, Bytes body);
   static Bytes auth_ok();
   static Bytes param_status(char const* name, char const* value);

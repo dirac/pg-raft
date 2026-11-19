@@ -54,7 +54,7 @@ it, so they are safe from any thread.
 - `SSLRequest (80877103)` gets the reply `'N'`, and the sender reads the startup message again.
 - `CancelRequest (80877102)` closes the connection.
 - For a StartupMessage, it replies with `AuthenticationOk`, `ParameterStatus` for
-  `server_version=17.0`, `integer_datetimes=on`, and `server_encoding=UTF8`, then
+  `server_version=<major>.0` (`WalSender::set_pg_major_version`, from `Config::pg_major_version`), `integer_datetimes=on`, and `server_encoding=UTF8`, then
   `BackendKeyData` and `ReadyForQuery('I')`. **No authentication** is done, because the socket
   is local and protected by filesystem permissions.
 
@@ -146,7 +146,7 @@ StatusCb(standby flushed) ──▶ the promotion waits until the standby has fl
 2. **Message size.** A single `XLogData` can carry up to 16 MiB, and each `advance` allocates a
    new `Bytes`. The chunk size should be capped (PostgreSQL uses 128 KiB) to bound memory and
    latency.
-3. `server_version` is hardcoded to `17.0`. It should come from `Config::pg_major_version`.
+3. (Done: `server_version` comes from `Config::pg_major_version`, `WalSender::set_pg_major_version`.)
 4. Some errors close the socket without notifying the owner, which still holds the
    `shared_ptr<WalSender>`. A close callback is needed so the owner can drop it (the node keeps
    weak pointers, so they just expire).

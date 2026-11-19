@@ -12,6 +12,8 @@ BOOST_AUTO_TEST_CASE(node_settings) {
   auto   file = tmp() / "config.toml";
   std::ofstream(file) << R"(
 dir = "/var/pg_raft"
+install_dir = "/usr/local/pg"
+pg_major_version = 17
 backup_store = "/backups/cluster1"
 backup_interval_secs = 18000
 backup_wal_size = 5368709120
@@ -44,6 +46,8 @@ max_connections = 100
 
   auto c = Config{file.string()};
   BOOST_TEST(c.wdir == "/var/pg_raft");
+  BOOST_TEST(c.install_dir == "/usr/local/pg");
+  BOOST_TEST(c.pg_major_version == 17U);
   BOOST_TEST(c.backup_store == "/backups/cluster1");
   BOOST_TEST(c.backup_interval_secs == 18000U);
   BOOST_TEST(c.backup_wal_size == 5368709120ULL);
@@ -72,6 +76,8 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   std::ofstream(file) << "dir = \"/x\"\n";
 
   auto c = Config{file.string()};
+  BOOST_TEST(c.install_dir == "/opt/pg_raft/postgresql");
+  BOOST_TEST(c.pg_major_version == 18U);
   BOOST_TEST(c.backup_store.empty());
   BOOST_TEST(c.backup_interval_secs == 6U * 3600U);
   BOOST_TEST(c.backup_wal_size == uint64_t{4} << 30U);

@@ -5,6 +5,11 @@
 
 char const* top_dir();
 
+/// The PostgreSQL binaries the integration tests run (Config's default major version); the tests
+/// skip themselves when they are absent.
+inline std::string const kPgTestBin =
+    std::format("/opt/pg_raft/postgresql/{}/bin", Config{}.pg_major_version);
+
 /// Load the config from config.toml. Load S3 info is loaded from
 /// $HOME/.pg_raft/testing.toml"
 Config test_config();

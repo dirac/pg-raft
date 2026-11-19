@@ -77,8 +77,8 @@ Found in the second review (2026-11-12), not fixed yet:
 - [ ] **wal_sender**: cap `XLogData` at 128 KiB (as PostgreSQL does) instead of up to 16 MiB per
   advance. ([wal_sender.md](wal_sender.md))
 - [ ] **wal_sender**: a close callback, so that the owner learns when a sender closes on an error.
-- [ ] **wal_sender**: `server_version` is hardcoded to `17.0`; take it from
-  `Config::pg_major_version`.
+- [x] **wal_sender**: `server_version` comes from `Config::pg_major_version`
+  (`WalSender::set_pg_major_version`).
 - [ ] **wal_sender**: `do_advance` opens `X` only, never `.X` (only matters when reading a live
   `pg_wal`, as the tests do); reading through the shared `WalSegment` cache would also avoid an
   open/pread/close per advance.
