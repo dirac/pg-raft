@@ -18,6 +18,12 @@
 ///    end inside an incomplete record (the FUSE layer does not check CRCs), which PostgreSQL
 ///    discards when it promotes. It is a maximum: a rewritten part of a page is sent again over
 ///    earlier offsets.
+///  - timeline, history: the latest timeline a TimelineOp applied started, and its history file's
+///    content (which lists every earlier timeline and where it ended), as the TimelineOp carried
+///    it; 1 and empty before the first. With them a ledger file's header (the state before its
+///    first record) has the history of the timeline its records continue on, so a node that has
+///    only that file (compaction, an InstallSnapshot) writes the history files from it
+///    (RaftServer::write_history), without the backup or the compacted TimelineOps.
 ///  - first_idx, first_segment: the node's own (each node compacts on its own schedule, so they
 ///    are not compared across nodes): the first entry of the log, and the segment of the first
 ///    entry that has one. Every entry in the log has its WAL in wal_dir, so the segments wholly
@@ -32,6 +38,8 @@ struct RaftState {
   LogSeqNumber wal_end{};
   RaftIndex    first_idx{0};
   LogSeqNumber first_segment{};
+  uint64_t     timeline{1};
+  string       history;
 
   bool operator==(RaftState const&) const = default;
 
@@ -51,10 +59,16 @@ struct RaftState {
       if (wal_end < end)
         wal_end = end;
     }
+    if (auto const* t = std::get_if<TimelineOp>(&e.cmd.command); t && t->timeline >= timeline) {
+      timeline = t->timeline;
+      history  = t->content;
+    }
   }
 
+  // Version 1 added timeline and history: a state saved before (a meta file, a ledger file's
+  // header) reads as timeline 1 with no history.
   template <class Archive>
-  void serialize(Archive& ar, unsigned int const /*version*/) {
+  void serialize(Archive& ar, unsigned int const version) {
     ar& log_idx;
     ar& timestamp;
     ar& flushed_lsn;
@@ -62,21 +76,49 @@ struct RaftState {
     ar& wal_end;
     ar& first_idx;
     ar& first_segment;
+    if (version >= 1) {
+      ar& timeline;
+      ar& history;
+    }
   }
 };
+
+BOOST_CLASS_VERSION(RaftState, 1)
+
+/// The history files of |s|'s timeline and of its ancestors, (timeline, content), oldest first:
+/// a history file lists, in order, each ancestor timeline and where it ended, so the file of an
+/// ancestor (other than timeline 1, which has none) is the lines before its own. Empty on
+/// timeline 1.
+inline vector<std::pair<uint32_t, string>> history_files(RaftState const& s) {
+  vector<std::pair<uint32_t, string>> out;
+  if (s.timeline <= 1 || s.history.empty())
+    return out;
+  for (size_t pos = 0; pos < s.history.size();) {
+    auto const eol = s.history.find('\n', pos);
+    auto const end = eol == string::npos ? s.history.size() : eol + 1;
+    unsigned   tli = 0;
+    if (sscanf(s.history.c_str() + pos, "%u", &tli) == 1 && tli > 1)
+      out.emplace_back(tli, s.history.substr(0, pos));
+    pos = end;
+  }
+  out.emplace_back(static_cast<uint32_t>(s.timeline), s.history);
+  return out;
+}
 
 template <>
 struct std::formatter<RaftState> : public parse_fn {
   auto format(RaftState const& s, std::format_context& ctx) const {
     return std::format_to(ctx.out(),
                           "RaftState {{ log_idx = {} timestamp = {} flushed_lsn = {} "
-                          "needs_backup = {} wal_end = {} first_idx = {} first_segment = {} }}",
+                          "needs_backup = {} wal_end = {} first_idx = {} first_segment = {} "
+                          "timeline = {} }}",
                           s.log_idx,
                           s.timestamp,
                           s.flushed_lsn,
                           s.needs_backup,
                           s.wal_end,
                           s.first_idx,
-                          s.first_segment);
+                          s.first_segment,
+                          s.timeline);
   }
 };

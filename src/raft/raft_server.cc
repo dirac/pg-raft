@@ -62,6 +62,7 @@ void RaftServer::start() {
   checkpoint_state_ = meta.state;
   if (meta.installing)
     save_meta();  // the install is finished
+  write_history(state_);
   publish_state();
   gc_thread_         = std::thread([this] { wal_gc(); });
   checkpoint_thread_ = std::thread([this] { checkpoint_loop(); });
@@ -820,6 +821,7 @@ void RaftServer::install(InstallInfo const& info) {
   save_meta(first);
   value(ledger_.finish_install(first));
   save_meta();
+  write_history(state_);  // the timeline the file's records continue on, from its header
 
   publish_state();
   {
@@ -1194,6 +1196,16 @@ void RaftServer::set_wal_keep_from(LogSeqNumber keep_from) {
   log(INFO, "{}Keeping the entries from segment {} on", log_prefix_, keep_from);
   keep_from_ = keep_from;
   compact_log();
+}
+
+void RaftServer::write_history(RaftState const& s) {
+  for (auto const& [tli, content] : history_files(s)) {
+    std::error_code ec;
+    if (std::filesystem::exists(wal_dir_ / history_filename(tli), ec))
+      continue;
+    log(INFO, "{}Writing the history file of timeline {} from the state", log_prefix_, tli);
+    value(write_history_file(wal_dir_, tli, content));
+  }
 }
 
 void RaftServer::compact_log() {

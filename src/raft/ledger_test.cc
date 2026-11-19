@@ -1,6 +1,9 @@
 #define BOOST_TEST_MODULE ledger
 #include "src/raft/ledger.h"
 
+#include "src/base/archive.h"
+
+#include <fstream>
 #include <random>
 
 #include "src/base/testing.h"
@@ -374,6 +377,169 @@ BOOST_AUTO_TEST_CASE(records_from_the_window) {
     idx = (*b)->last + 1U;
   }
   BOOST_TEST((copy == std::get<2>(window.at(0))));
+}
+
+namespace {
+
+Item timeline_op(RaftTerm term, uint64_t tli, string content) {
+  return Item{.e   = Entry{.time = 1700000000,
+                           .term = term,
+                           .cmd  = WalCommand{.command = TimelineOp{.timeline = tli,
+                                                                     .content  = std::move(content)}}},
+              .wal = {}};
+}
+
+/// Each ledger file's header, in order.
+vector<FileHeader> headers_of(fs::path const& dir) {
+  vector<FileHeader> out;
+  for (auto const& p : ledger_files(dir)) {
+    std::ifstream in(p, std::ios::binary);
+    Bytes         buf(4096);
+    in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    auto h = decode_file_header(std::span<uint8_t const>(buf.data(), buf.size()));
+    BOOST_REQUIRE(h.has_value());
+    out.push_back(h->first);
+  }
+  return out;
+}
+
+/// The state before version 1 of RaftState (without timeline and history).
+struct RaftStateV0 {
+  RaftIndex    log_idx{0};
+  std::time_t  timestamp{0};
+  LogSeqNumber flushed_lsn{};
+  bool         needs_backup{false};
+  LogSeqNumber wal_end{};
+  RaftIndex    first_idx{0};
+  LogSeqNumber first_segment{};
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar& log_idx;
+    ar& timestamp;
+    ar& flushed_lsn;
+    ar& needs_backup;
+    ar& wal_end;
+    ar& first_idx;
+    ar& first_segment;
+  }
+};
+
+}  // namespace
+
+// A timeline's history file gives its ancestors' (the lines before each one's own line).
+BOOST_AUTO_TEST_CASE(history_files_from_the_state) {
+  RaftState s;
+  BOOST_TEST(history_files(s).empty());
+
+  string const h4 = "1\t0/3000000\tno recovery target specified\n"
+                    "2\t0/5000000\tno recovery target specified\n"
+                    "3\t0/7000000\tno recovery target specified\n";
+  s.timeline = 4;
+  s.history  = h4;
+  auto files = history_files(s);
+  BOOST_REQUIRE_EQUAL(files.size(), 3U);
+  BOOST_TEST(files.at(0).first == 2U);
+  BOOST_TEST(files.at(0).second == h4.substr(0, h4.find('\n') + 1));
+  BOOST_TEST(files.at(1).first == 3U);
+  BOOST_TEST(files.at(1).second == h4.substr(0, h4.find('\n', h4.find('\n') + 1) + 1));
+  BOOST_TEST(files.at(2).first == 4U);
+  BOOST_TEST(files.at(2).second == h4);
+
+  // Timeline 3 branched from 1 (timeline 2 abandoned): no file for 2.
+  s.timeline = 3;
+  s.history  = "1\t0/3000000\tno recovery target specified\n";
+  files      = history_files(s);
+  BOOST_REQUIRE_EQUAL(files.size(), 1U);
+  BOOST_TEST(files.at(0).first == 3U);
+}
+
+// A state saved before RaftState's version 1 (a meta file, a ledger file's header) reads as
+// timeline 1 without a history.
+BOOST_AUTO_TEST_CASE(state_version_0) {
+  auto const old = RaftStateV0{.log_idx      = RaftIndex{42},
+                               .timestamp    = 1700000000,
+                               .flushed_lsn  = LogSeqNumber{2, 0x5000000},
+                               .needs_backup = true,
+                               .wal_end      = LogSeqNumber{2, 0x5001000},
+                               .first_idx    = RaftIndex{7},
+                               .first_segment = LogSeqNumber{1, 0x1000000}};
+  string bytes;
+  {
+    RawOArchive oa(bytes);
+    oa << old;
+  }
+  RaftState s;
+  {
+    RawIArchive ia(reinterpret_cast<uint8_t const*>(bytes.data()), bytes.size());
+    ia >> s;
+  }
+  BOOST_TEST(s.log_idx == RaftIndex{42});
+  BOOST_TEST(s.wal_end == (LogSeqNumber{2, 0x5001000}));
+  BOOST_TEST(s.needs_backup);
+  BOOST_TEST(s.timeline == 1U);
+  BOOST_TEST(s.history.empty());
+
+  // And the current version round-trips with them.
+  s.timeline = 3;
+  s.history  = "1\t0/3000000\tx\n2\t0/4000000\tx\n";
+  string b2;
+  {
+    RawOArchive oa(b2);
+    oa << s;
+  }
+  RaftState t;
+  {
+    RawIArchive ia(reinterpret_cast<uint8_t const*>(b2.data()), b2.size());
+    ia >> t;
+  }
+  BOOST_TEST((t == s));
+}
+
+// Each ledger file's header carries the timeline and history of the records before it; a
+// truncation of the TimelineOp takes them back out of the files written after it.
+BOOST_AUTO_TEST_CASE(file_headers_carry_the_history) {
+  TmpDir base;
+  Dir    tmp(base, "tmp1");
+  string const history = "1\t0/3000000\tno recovery target specified\n";
+  RaftIndex    tl_idx{0};
+  {
+    Ledger l(tmp(), small());
+    BOOST_REQUIRE(l.open().has_value());
+    append_n(l, 30, RaftTerm{1}, 1);
+    auto tl = timeline_op(RaftTerm{1}, 2, history);
+    auto i  = l.append(tl.e, tl.wal);
+    BOOST_REQUIRE(i.has_value());
+    tl_idx = *i;
+    append_n(l, 60, RaftTerm{1}, 100);
+  }
+  auto check = [&](vector<FileHeader> const& headers) {
+    BOOST_REQUIRE(headers.size() > 3U);
+    bool after = false;
+    for (auto const& h : headers) {
+      after = h.first > tl_idx;
+      BOOST_TEST(h.state.timeline == (after ? 2U : 1U));
+      BOOST_TEST(h.state.history == (after ? history : string{}));
+    }
+    BOOST_TEST(after);
+  };
+  check(headers_of(tmp()));
+
+  // Reopened: the same, and the appends after it too.
+  Ledger l(tmp(), small());
+  BOOST_REQUIRE(l.open().has_value());
+  append_n(l, 20, RaftTerm{1}, 500);
+  check(headers_of(tmp()));
+  BOOST_TEST(l.verify().has_value());
+
+  // Truncated before the TimelineOp: the files written from there on are on timeline 1 again.
+  BOOST_REQUIRE(l.truncate_after(tl_idx - 1U).has_value());
+  append_n(l, 60, RaftTerm{2}, 900);
+  for (auto const& h : headers_of(tmp())) {
+    BOOST_TEST(h.state.timeline == 1U);
+    BOOST_TEST(h.state.history.empty());
+  }
+  BOOST_TEST(l.verify().has_value());
 }
 
 BOOST_AUTO_TEST_CASE(end_marker_and_full_file) {

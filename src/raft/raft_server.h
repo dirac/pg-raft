@@ -338,6 +338,11 @@ class RaftServer : public ClientConnectionApi,
   /// ledger; then wakes the WAL deletion thread.
   void compact_log();
 
+  /// The history files of |s|'s timeline and of its ancestors (each the lines of the latest one
+  /// before its own) into wal_dir, where missing: at startup and after an install, the TimelineOps
+  /// before the state are not applied again (compacted, or never received).
+  void write_history(RaftState const& s);
+
   /// The WAL deletion thread: deletes the segments of wal_dir wholly before first_segment (by
   /// address: the parent timeline's copy of the segment where a timeline starts is kept, the WAL
   /// sender reads the start of the new timeline's first segment from it).

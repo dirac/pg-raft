@@ -91,14 +91,20 @@ Each file starts with a header, followed by its records:
 
 `first` is the file's first index, `prev_term` and `prev_crc` are the term and crc of the record
 before it (0 for the first file of a fresh ledger), and `state` is the `RaftState` at that record,
-of the records only (`entry_state()`: `log_idx`, `timestamp`, `flushed_lsn`, `wal_end`; the node's
-own `needs_backup`, `first_idx` and `first_segment` cleared). The ledger keeps the state at its
+of the records only (`entry_state()`: `log_idx`, `timestamp`, `flushed_lsn`, `wal_end`, and the
+latest `TimelineOp`'s `timeline` and `history`, the content of its history file; the node's own
+`needs_backup`, `first_idx` and `first_segment` cleared). The ledger keeps the state at its
 last record as it appends (`RaftState::apply`), and recomputes it from the file's header after a
 truncation; a rotation writes it into the new file's header.
 
 So a file is self-contained: its records, where they continue from, and the state they continue
-from. That is the boundary state compaction keeps (§6.5) and what an InstallSnapshot carries
-(§6.6): nothing else is needed.
+from, including the timeline its WAL continues on and that timeline's history file. A history file
+lists every ancestor timeline and where it ended, so the ancestors' files follow from it
+(`history_files()`: each is the lines before its own). That is the boundary state compaction keeps
+(§6.5) and what an InstallSnapshot carries (§6.6): nothing else is needed. `RaftServer` writes the
+history files of its state into `raft/wal` where missing at startup and after an install, since the
+`TimelineOp`s before the state are not applied again. (`RaftState` version 1 added `timeline` and
+`history`; a state saved before reads as timeline 1 without a history.)
 
 ## 4. Ledger files
 
@@ -262,9 +268,9 @@ On the follower:
    The installed records' WAL goes into `raft/wal` as they are applied (§9.1), from the header's
    state on; the checkpoint state is the header's too.
 
-The WAL before the file's records, and the history files of the timelines before them, come from
-the latest backup, which the node then restores (`needs_backup`; the restore copies the backup's
-segments and history files into `raft/wal` where missing). Compaction keeps the ledger from the
+The WAL before the file's records comes from the latest backup, which the node then restores
+(`needs_backup`; the restore copies the backup's segments into `raft/wal` where missing, and its
+history files too, which `raft/wal` already has: raft writes them from the header's state, §3.1). Compaction keeps the ledger from the
 file that holds the latest backup's segment, so the backup and the file meet.
 
 Startup finishes step 4 when `meta` names an install and `.install.ledger` exists. It deletes
