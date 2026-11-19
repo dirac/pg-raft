@@ -681,6 +681,93 @@ At 100 clients, syncs off, two runs each with `io_threads` 8 and 2: 17,370 and 1
 16,985 and 17,001 tps (the two runs of the same setting differ by up to 2%). The simpler code costs
 nothing measurable, and 2 io threads are enough.
 
+### 2026-11-18: more clients, the commit in synchronous replication, scale 1000
+
+Same machines and method as above: three nodes in three AZs, pgbench in a fourth, threads
+`min(clients, 30)`, 30 s warm-up, 120 s measured, a fresh cluster per setup and syncs setting
+(the client counts of a sweep one after another on the same tables), pg-raft direct to the
+primary. `max_connections = 400` for the runs above 100 clients.
+
+**150 to 300 clients, scale 100** (`ac34721`), tps and `END`:
+
+| Setup | Syncs | 150 | 200 | 300 |
+|---|---|---|---|---|
+| solo | on | 31,107 | 38,057 | 44,362 |
+| streaming replication | on | 25,607 (1.264 ms) | 30,107 (1.306 ms) | 35,137 (1.372 ms) |
+| pg-raft | on | 22,389 (87%, 1.694 ms) | 26,205 (87%, 1.738 ms) | 29,199 (83%, 1.857 ms) |
+| solo | off | 32,300 | 39,686 | 47,715 |
+| streaming replication | off | 26,334 (1.158 ms) | 31,713 (1.176 ms) | 37,188 (1.240 ms) |
+| pg-raft | off | 22,461 (85%, 1.664 ms) | 26,095 (82%, 1.729 ms) | 29,433 (79%, 1.832 ms) |
+
+Profiled at 300 clients (syncs off): the leader's node used about 0.4 of a core; its FUSE thread,
+the busiest at 18%, spent ~92% of its time waiting inside `op_fsync` for the round (~1,450 flushes
+a second, ~20 commits each). The leader machine was half busy with PostgreSQL's backends; the
+client 91% idle. Of the 300 backends, on average 117 waited for another transaction's row lock
+(`Lock:transactionid`) and 23 for a tuple lock, 105 for their client, 40 for `WALWrite` (queued
+behind the flush in flight), and 13 ran. TPC-B at scale 100 updates one of 100 branch rows in
+every transaction and holds its lock until the commit returns, so a longer commit queues more
+transactions on the hot rows: the widening gap at high client counts is largely that. Run-queue
+latency (`runqlat`): on the follower 99% of wake-ups within 3 µs; on the leader 74% within 1 µs
+but ~12% after 8–127 µs (node threads behind backends). No cpuidle driver is active on these
+instances (`current_driver: none`).
+
+**The commit in PostgreSQL's synchronous replication** (`commit_wait = "sync_rep"`, `fb98218`, not
+the default). The serial rounds come from PostgreSQL holding `WALWriteLock` across the WAL fsync,
+which in pg-raft is a raft round. With `commit_wait = "sync_rep"` the FUSE fsync returns once the
+flush is in the leader's ledger, and the commit waits in `SyncRepWaitForLSN` instead, outside the
+lock: the node is its PostgreSQL's synchronous standby (`SyncAcker`, `application_name` `pg_raft`),
+reporting the raft-committed WAL end as its flush position, and the rounds of successive flushes
+overlap. Stock PostgreSQL, but with its trade-off: a commit whose wait is cancelled
+(`pg_cancel_backend`, `statement_timeout`) or terminated is visible before a quorum has it. What
+PostgreSQL would need to change to remove that is in `docs/todo.md`. Scale 100, tps (% of
+streaming replication with the same syncs) and `END`:
+
+| Syncs | Clients | streaming replication | pg-raft, `fsync` | pg-raft, `sync_rep` |
+|---|---|---|---|---|
+| on | 25 | 5,333 (1.183 ms) | 4,976 (93%, 1.457 ms) | **5,480 (103%, 1.165 ms)** |
+| on | 50 | 10,206 (1.199 ms) | 9,666 (95%, 1.479 ms) | **10,398 (102%, 1.182 ms)** |
+| on | 100 | 18,684 (1.246 ms) | 16,794 (90%, 1.625 ms) | **18,538 (99%, 1.267 ms)** |
+| on | 150 | 25,607 (1.264 ms) | 22,389 (87%, 1.694 ms) | **25,045 (98%, 1.313 ms)** |
+| on | 200 | 30,107 (1.306 ms) | 26,205 (87%, 1.738 ms) | **29,385 (98%, 1.368 ms)** |
+| on | 300 | 35,137 (1.372 ms) | 29,199 (83%, 1.857 ms) | **33,651 (96%, 1.494 ms)** |
+| off | 25 | 5,590 (1.053 ms) | 5,171 (93%, 1.405 ms) | **5,499 (98%, 1.110 ms)** |
+| off | 50 | 10,743 (1.066 ms) | 9,648 (90%, 1.484 ms) | **10,497 (98%, 1.140 ms)** |
+| off | 100 | 19,640 (1.097 ms) | 16,825 (86%, 1.601 ms) | **18,766 (96%, 1.205 ms)** |
+| off | 150 | 26,334 (1.158 ms) | 22,461 (85%, 1.664 ms) | **25,491 (97%, 1.250 ms)** |
+| off | 200 | 31,713 (1.176 ms) | 26,095 (82%, 1.729 ms) | **30,211 (95%, 1.299 ms)** |
+| off | 300 | 37,188 (1.240 ms) | 29,433 (79%, 1.832 ms) | **34,443 (93%, 1.415 ms)** |
+
+(The `fsync` column: `360da07` up to 100 clients, `ac34721` above, the same code.) With the rounds
+overlapping, pg-raft reaches 96–103% of streaming replication with the syncs on and 93–98% with
+them off, 6–17% more than with the commit in the fsync, gaining more as the clients grow; its
+commit grows with the load as streaming replication's does. With the syncs on it is level with or
+ahead of streaming replication, whose primary flushes locally before the standby's round, while
+pg-raft's leader syncs its ledger during the round.
+
+**Scale 1000** (`5d20443`, 1,000 branch rows, the load generated on the server with
+`PGBENCH_INIT_ARGS="-I dtGvp"`), tps (% of streaming replication) and `END`:
+
+| Syncs | Clients | solo | streaming replication | pg-raft, `fsync` | pg-raft, `sync_rep` |
+|---|---|---|---|---|---|
+| on | 150 | 33,762 (0.757 ms) | 27,321 (1.722 ms) | 20,440 (75%, 3.442 ms) | 22,762 (83%, 2.757 ms) |
+| on | 200 | 43,394 (0.803 ms) | 34,719 (1.889 ms) | 25,073 (72%, 3.745 ms) | 28,578 (82%, 2.949 ms) |
+| on | 300 | 50,484 (1.264 ms) | 40,907 (2.639 ms) | 29,338 (72%, 5.008 ms) | 31,158 (76%, 4.522 ms) |
+| off | 150 | 35,414 (0.583 ms) | 30,264 (1.209 ms) | 23,844 (79%, 2.496 ms) | 27,070 (89%, 1.785 ms) |
+| off | 200 | 45,551 (0.613 ms) | 39,206 (1.269 ms) | 29,189 (74%, 2.806 ms) | 33,656 (86%, 2.012 ms) |
+| off | 300 | 53,068 (0.924 ms) | 47,209 (1.728 ms) | 33,298 (71%, 3.956 ms) | 36,103 (76%, 3.353 ms) |
+
+- **Less contention, more throughput for solo and streaming replication** (7–27% more than at
+  scale 100), **but not for pg-raft**: with the syncs on it does 3–9% less at 150–200 clients
+  (both commit modes), with them off 5–13% more.
+- **But pg-raft falls further behind**: 71–79% of streaming replication with the commit in the
+  fsync, 76–89% in synchronous replication (93–103% at scale 100). Every commit is longer than at
+  scale 100, pg-raft's most.
+- **Streaming replication's own syncs cost more**: its commit takes 1.72 ms with them on against
+  1.21 ms off at 150 clients (10% at scale 100). Both point to much more WAL per commit at scale
+  1000 (the accounts table, ~13 GB, is far larger than `shared_buffers`, so after a checkpoint
+  most updates write a full page image), which every round of pg-raft carries and copies. Being
+  measured.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync` and `follower_sync`, both `false`:
