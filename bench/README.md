@@ -765,8 +765,40 @@ pg-raft's leader syncs its ledger during the round.
 - **Streaming replication's own syncs cost more**: its commit takes 1.72 ms with them on against
   1.21 ms off at 150 clients (10% at scale 100). Both point to much more WAL per commit at scale
   1000 (the accounts table, ~13 GB, is far larger than `shared_buffers`, so after a checkpoint
-  most updates write a full page image), which every round of pg-raft carries and copies. Being
-  measured.
+  most updates write a full page image), which every round of pg-raft carries and copies. Measured
+  in the next section.
+
+### 2026-11-19: full page images, `max_wal_size` and WAL compression, scale 1000
+
+Same machines and method, PostgreSQL 17.9, scale 1000 (`-I dtGvp`), 300 clients, syncs on (pg-raft
+with `RAFT_SYNC=1`: `leader_sync` and `follower_sync`), and for every setup `max_wal_size = 64GB`
+(16GB above) and `max_connections = 400`; the code of `54f7aaa`. Each setting varies
+`wal_compression` and `full_page_writes` on all three setups. tps (% of streaming replication with
+the same setting) and `END`; where a row was run twice (`lz4`, `zstd`), both runs:
+
+| WAL setting | solo | streaming replication | pg-raft, `fsync` | pg-raft, `sync_rep` |
+|---|---|---|---|---|
+| `wal_compression = off` | 54,514 (1.111 ms) | 47,120 (1.981 ms) | 38,398 (81%, 3.325 ms) | 37,944 (81%, 3.216 ms) |
+| `lz4` | 55,739 (1.047 ms) | 49,278 (1.784 ms) | 46,020 / 46,200 (94%, 2.330 ms) | 47,298 / 47,143 (96%, 1.942 ms) |
+| `zstd` | 54,810 (1.066 ms) | 48,949 (1.773 ms) | 46,379 / 46,021 (94%, 2.298 ms) | 44,503 / 44,383 (91%, 2.213 ms) |
+| `pglz` | | | 45,762 (2.327 ms) | 46,218 (1.999 ms) |
+| `off`, `full_page_writes = off` | 54,756 (1.080 ms) | 49,166 (1.787 ms) | 46,669 (95%, 2.287 ms) | 45,379 (92%, 2.168 ms) |
+
+- **`max_wal_size = 64GB` alone** (compression off, against the 300-client syncs-on row above):
+  solo +8%, streaming replication +15%, pg-raft +31% (`fsync`) and +22% (`sync_rep`), from 72% to
+  81% of streaming replication. Checkpoints come less often, so fewer updates write a full page
+  image.
+- **The full page images are pg-raft's gap.** With any compressor, or without the images, pg-raft
+  is at 91–96% of streaming replication, as at scale 100, against 81% with the images
+  uncompressed. lz4, zstd and pglz all compress them enough (45.8–46.4k with the commit in the
+  fsync); solo and streaming replication gain at most 5% from them, since only pg-raft copies the
+  WAL into its ledger and sends it in the commit's round.
+- **`sync_rep` no longer gains much**: +2.5% with lz4, −1% with compression off, −3% to −4% with
+  zstd and without full page images (where at scale 100 it gained 15% at 300 clients), and its
+  latency stddev is 4.6–12.5 ms against 1.4–4.1 ms with the commit in the fsync. Not yet
+  understood.
+- **The repeated rows agree within 0.8%** (zstd with `fsync`) and less, so differences of a few
+  percent are real. Solo varies by 2% across all the settings.
 
 ## pg-raft notes
 
