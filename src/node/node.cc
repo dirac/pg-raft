@@ -437,7 +437,12 @@ Result<void> Node::write_standby_config(uint16_t wal_sender_port) {
                         config_.socket_dir,
                         wal_sender_port,
                         id_)
-         << "recovery_target_timeline = 'latest'\n";
+         << "recovery_target_timeline = 'latest'\n"
+         // A crash restart replays the local pg_wal, which can hold WAL raft never committed (a
+         // flush that failed or never completed; with sync_rep, one only in the leader's ledger):
+         // a commit no quorum has would become visible. PostgreSQL exits instead, and the status
+         // poller steps down (primary) or restarts it on a rebuilt pg_wal (standby).
+         << "restart_after_crash = off\n";
     // commit_wait = "sync_rep": a commit waits for raft in PostgreSQL's synchronous replication
     // wait. With FUSE, the node is the primary's synchronous standby (SyncAcker); with the hooks,
     // the extension's sync_rep_wait_hook asks the hook server, and the wait is not interrupted.

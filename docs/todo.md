@@ -113,8 +113,8 @@ Found in the second review (2026-11-12), not fixed yet:
   atomic rename, a shared mtime and a durable fsync.
 - [ ] **PostgreSQL patch for an overlapping commit wait** (hook mode done: `sync_rep_wait_hook` in
   `SyncRepWaitForLSN`, served by `pg_raft_wal` and `NodeWalTracker::async_commit`; the wait ignores
-  cancel and terminate requests and PANICs on failure. Left: `restart_after_crash = off` below,
-  shared with the flush hook's PANIC; a session's `SET synchronous_commit = local` (or `off`) still
+  cancel and terminate requests and PANICs on failure; `pg_raft.conf` sets
+  `restart_after_crash = off`. Left: a session's `SET synchronous_commit = local` (or `off`) still
   skips the wait; FUSE mode still uses stock synchronous replication.) Today a commit waits for the
   quorum inside the WAL fsync, under `WALWriteLock`, so the raft rounds are serial (the cost
   against streaming replication, `bench/README.md` 2026-11-18). Waiting instead as PostgreSQL's
@@ -130,7 +130,7 @@ Found in the second review (2026-11-12), not fixed yet:
     without the commit becoming visible: PANIC, since a committed transaction can't be aborted.
   - Postmaster death: already exits without the commit becoming visible (the process dies).
   - A PANIC restarts every backend and replays the local WAL, which would bring the unreplicated
-    commit back: pg-raft would also force `restart_after_crash = off`, so that the node restarts
+    commit back: done, `pg_raft.conf` forces `restart_after_crash = off`, so that the node restarts
     PostgreSQL as a standby on a `pg_wal` rebuilt from raft (as after any unclean end).
   - `synchronous_standby_names` emptied or changed by a reload (`ALTER SYSTEM`) releases every
     waiter (`SyncRepUpdateSyncStandbysDefined`): the node must own it (reject or rewrite changes).
