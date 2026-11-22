@@ -3,7 +3,6 @@
 source "$(dirname -- "$0")/install-functions.sh"
 
 VERSION=$1
-ICU_VERSION=$2
 
 MAJOR_VERSION=$(echo $VERSION | sed 's/\..*$//')
 
@@ -23,10 +22,6 @@ exit_on_error $? ${LINENO} "cd postgresql-${VERSION}"
 patch src/interfaces/libpq/Makefile < ../../patch_files/postgresql.patch
 exit_on_error $? ${LINENO} "patch src/interfaces/libpq/Makefile < ../../postgresql.patch"
 
-ICU_CFG_PATH=/opt/pg_raft/icu/78/lib/pkgconfig
-ICU_CFLAGS=$(PKG_CONFIG_PATH=${ICU_CFG_PATH} pkg-config --cflags icu-uc icu-i18n)
-ICU_LIBS=$(PKG_CONFIG_PATH=${ICU_CFG_PATH} pkg-config --libs icu-uc icu-i18n)
-
 u=$(uname)
 
 case $u in
@@ -42,9 +37,8 @@ esac
 
 ./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl \
              --without-icu \
-            --with-includes=${prefix}/include \
-	    --with-libraries=${prefix}/lib:${prefix}/lib64 \
-            --without-readline --without-zlib --with-lz4 --with-zstd
+	          --with-libraries=${prefix}/lib:${prefix}/lib64 \
+            --without-readline --without-zlib --with-lz4
 exit_on_error $? ${LINENO} "./configure --prefix=${prefix}/postgresql/${MAJOR_VERSION} --with-ssl=openssl --with-includes=${INCLUDES} --with-libraries=${LIBRARIES} --without-readline --without-zlib"
 
 make

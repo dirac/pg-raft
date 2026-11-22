@@ -21,6 +21,7 @@ ${DIR}/install-pkg-config.sh
 ${DIR}/install-b2.sh
 ${DIR}/install-boost.sh
 ${DIR}/install-toml.sh
+${DIR}/install-lz4.sh
 ${DIR}/install-cxxoptions.sh
 
 
@@ -33,7 +34,7 @@ rm -f ${prefix}/lib/*.dylib
 rm -f ${prefix}/lib64/*.dylib
 
 ${DIR}/install-openssl.sh
-${DIR}/install-postgresql.sh 18.7 78
+${DIR}/install-postgresql.sh 18.7
 
 cd ${DIR}
 
