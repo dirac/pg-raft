@@ -44,5 +44,5 @@ bin
 tmp
 reports
 
-# In-repo PostgreSQL build and install (build/postgresql-18.7, build/postgresql/<major>)
+# pg-raft's PostgreSQL: patched source and build, and install (external/build-pg-raft-postgresql.sh)
 /build/

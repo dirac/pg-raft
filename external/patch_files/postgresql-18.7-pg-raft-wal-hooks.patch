@@ -1,0 +1,167 @@
+pg-raft's WAL hooks for PostgreSQL 18.7: what the pg_raft_wal extension (src/pg_raft_wal) needs.
+
+  wal_write_hook     after each pg_pwrite in XLogWrite: the newly valid WAL (segment, offset, size)
+  wal_flush_hook     at both flush points of XLogWrite; returns true to skip the local fsync
+  wal_timeline_hook  in writeTimeLineHistory, once a new timeline's history file is in pg_wal
+
+Apply in a PostgreSQL 18.7 source tree:   patch -p1 < postgresql-18.7-pg-raft-wal-hooks.patch
+(external/build-pg-raft-postgresql.sh downloads PostgreSQL 18.7, applies it, and builds it.)
+
+diff --git a/src/backend/access/transam/timeline.c b/src/backend/access/transam/timeline.c
+index a27f27c..0af8aa1 100644
+--- a/src/backend/access/transam/timeline.c
++++ b/src/backend/access/transam/timeline.c
+@@ -444,6 +444,10 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
+ 	Assert(access(path, F_OK) != 0 && errno == ENOENT);
+ 	durable_rename(tmppath, path, ERROR);
+ 
++	/* pg-raft: the new timeline's history file is in place */
++	if (wal_timeline_hook)
++		wal_timeline_hook(newTLI);
++
+ 	/* The history file can be archived immediately. */
+ 	if (XLogArchivingActive())
+ 	{
+diff --git a/src/backend/access/transam/xlog.c b/src/backend/access/transam/xlog.c
+index b6864f8..bc68d73 100644
+--- a/src/backend/access/transam/xlog.c
++++ b/src/backend/access/transam/xlog.c
+@@ -143,6 +143,11 @@ bool		XLOG_DEBUG = false;
+ 
+ int			wal_segment_size = DEFAULT_XLOG_SEG_SIZE;
+ 
++/* pg-raft: hooks on the WAL written and flushed by XLogWrite (see xlog.h) */
++wal_write_hook_type wal_write_hook = NULL;
++wal_flush_hook_type wal_flush_hook = NULL;
++wal_timeline_hook_type wal_timeline_hook = NULL;
++
+ /*
+  * Number of WAL insertion locks to use. A higher value allows more insertions
+  * to happen concurrently, but adds some CPU overhead to flushing the WAL,
+@@ -2309,6 +2314,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 	int			npages;
+ 	int			startidx;
+ 	uint32		startoffset;
++	XLogRecPtr	hooked;			/* pg-raft: WAL passed to wal_write_hook */
+ 
+ 	/* We should always be inside a critical section here */
+ 	Assert(CritSectionCount > 0);
+@@ -2317,6 +2323,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 	 * Update local LogwrtResult (caller probably did this already, but...)
+ 	 */
+ 	RefreshXLogWriteResult(LogwrtResult);
++	hooked = LogwrtResult.Write;
+ 
+ 	/*
+ 	 * Since successive pages in the xlog cache are consecutively allocated,
+@@ -2458,6 +2465,33 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 				startoffset += written;
+ 			} while (nleft > 0);
+ 
++			/*
++			 * pg-raft: the WAL just written, up to the write request (not the
++			 * rest of a partial last page), and none passed before.
++			 */
++			if (wal_write_hook)
++			{
++				XLogRecPtr	group_end;
++				XLogRecPtr	group_start;
++				XLogRecPtr	valid_end;
++				XLogRecPtr	valid_start;
++
++				XLogSegNoOffsetToRecPtr(openLogSegNo, startoffset,
++										wal_segment_size, group_end);
++				group_start = group_end - nbytes;
++				valid_end = Min(group_end, WriteRqst.Write);
++				valid_start = Max(group_start, hooked);
++				if (valid_end > valid_start)
++				{
++					wal_write_hook(tli, openLogSegNo,
++								   XLogSegmentOffset(valid_start, wal_segment_size),
++								   (uint32) (valid_end - valid_start),
++								   XLogCtl->pages + startidx * (Size) XLOG_BLCKSZ +
++								   (valid_start - group_start));
++					hooked = valid_end;
++				}
++			}
++
+ 			npages = 0;
+ 
+ 			/*
+@@ -2475,7 +2509,10 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 			 */
+ 			if (finishing_seg)
+ 			{
+-				issue_xlog_fsync(openLogFile, openLogSegNo, tli);
++				/* pg-raft: the hook may make the segment durable instead */
++				if (!(wal_flush_hook &&
++					  wal_flush_hook(tli, openLogSegNo, wal_segment_size)))
++					issue_xlog_fsync(openLogFile, openLogSegNo, tli);
+ 
+ 				/* signal that we need to wakeup walsenders later */
+ 				WalSndWakeupRequest();
+@@ -2525,12 +2562,29 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
+ 	if (LogwrtResult.Flush < WriteRqst.Flush &&
+ 		LogwrtResult.Flush < LogwrtResult.Write)
+ 	{
++		bool		hook_flushed = false;
++
++		/*
++		 * pg-raft: the hook may make the WAL durable instead of the local
++		 * fsync (of the segment holding the last byte written).
++		 */
++		if (wal_flush_hook)
++		{
++			XLogSegNo	flush_segno;
++
++			XLByteToPrevSeg(LogwrtResult.Write, flush_segno, wal_segment_size);
++			hook_flushed = wal_flush_hook(tli, flush_segno,
++										  XLogSegmentOffset(LogwrtResult.Write - 1,
++															wal_segment_size) + 1);
++		}
++
+ 		/*
+ 		 * Could get here without iterating above loop, in which case we might
+ 		 * have no open file or the wrong one.  However, we do not need to
+ 		 * fsync more than one file.
+ 		 */
+-		if (wal_sync_method != WAL_SYNC_METHOD_OPEN &&
++		if (!hook_flushed &&
++			wal_sync_method != WAL_SYNC_METHOD_OPEN &&
+ 			wal_sync_method != WAL_SYNC_METHOD_OPEN_DSYNC)
+ 		{
+ 			if (openLogFile >= 0 &&
+diff --git a/src/include/access/xlog.h b/src/include/access/xlog.h
+index f20f5ed..ac039be 100644
+--- a/src/include/access/xlog.h
++++ b/src/include/access/xlog.h
+@@ -206,6 +206,29 @@ extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata,
+ 								   bool topxid_included);
+ extern void XLogFlush(XLogRecPtr record);
+ extern bool XLogBackgroundFlush(void);
++
++/*
++ * pg-raft: hooks on the WAL a primary writes (XLogWrite), for a library that replicates it before
++ * a flush returns. All are called with WALWriteLock held (except the timeline hook), inside a
++ * critical section: they must not ereport(ERROR) or palloc, and a failure must be a PANIC (as a
++ * failed fsync is).
++ *
++ * wal_write_hook: |size| bytes of WAL were written at |offset| of segment |segno| of timeline
++ * |tli| (in the file and in the WAL buffers at |data|). Only WAL up to the write request: the
++ * rest of a partial last page is not passed. A rewritten partial page passes only its new bytes.
++ *
++ * wal_flush_hook: the WAL of segment |segno| of timeline |tli| up to |end_offset| must become
++ * durable. Returns true if the hook made it durable (the local fsync is then skipped).
++ *
++ * wal_timeline_hook: the history file of timeline |tli| was installed (on promotion), in pg_wal.
++ */
++typedef void (*wal_write_hook_type) (TimeLineID tli, XLogSegNo segno, uint32 offset, uint32 size,
++									 const char *data);
++typedef bool (*wal_flush_hook_type) (TimeLineID tli, XLogSegNo segno, uint32 end_offset);
++typedef void (*wal_timeline_hook_type) (TimeLineID tli);
++extern PGDLLIMPORT wal_write_hook_type wal_write_hook;
++extern PGDLLIMPORT wal_flush_hook_type wal_flush_hook;
++extern PGDLLIMPORT wal_timeline_hook_type wal_timeline_hook;
+ extern bool XLogNeedsFlush(XLogRecPtr record);
+ extern int	XLogFileInit(XLogSegNo logsegno, TimeLineID logtli);
+ extern int	XLogFileOpen(XLogSegNo segno, TimeLineID tli);

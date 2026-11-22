@@ -73,7 +73,7 @@ struct Config {
   string commit_wait = "fsync";
   /// wal_capture: how the node sees the WAL its PostgreSQL writes as a primary.
   ///  "fuse"  a FUSE mount over pg_wal (stock PostgreSQL).
-  ///  "hook"  PostgreSQL's WAL hooks (pg-raft's patch of XLogWrite, postgresql-18.7) and the
+  ///  "hook"  PostgreSQL's WAL hooks (pg-raft's patch of XLogWrite: external/patch_files) and the
   ///          pg_raft_wal extension, over a Unix socket: needs that build (install_dir; built by
   ///          external/build-pg-raft-postgresql.sh). pg_wal is a plain directory (a link to pg/pg_wal).
   string wal_capture = "fuse";

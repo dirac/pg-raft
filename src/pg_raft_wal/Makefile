@@ -1,5 +1,6 @@
-# pg_raft_wal: built with PGXS against pg-raft's patched PostgreSQL (postgresql-18.7, built and
-# installed by external/build-pg-raft-postgresql.sh into build/postgresql/<major>):
+# pg_raft_wal: built with PGXS against pg-raft's patched PostgreSQL (PostgreSQL 18.7 and
+# external/patch_files/postgresql-18.7-pg-raft-wal-hooks.patch, built and installed by
+# external/build-pg-raft-postgresql.sh into build/postgresql/<major>, which also builds this):
 #   make -C src/pg_raft_wal PG_CONFIG=build/postgresql/18/bin/pg_config install
 MODULE_big = pg_raft_wal
 OBJS = pg_raft_wal.o
