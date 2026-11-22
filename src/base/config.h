@@ -71,6 +71,12 @@ struct Config {
   ///             acknowledges the raft-committed WAL: rounds overlap, but a commit whose wait is
   ///             cancelled is visible before a quorum has it. For measurement.
   string commit_wait = "fsync";
+  /// wal_capture: how the node sees the WAL its PostgreSQL writes as a primary.
+  ///  "fuse"  a FUSE mount over pg_wal (stock PostgreSQL).
+  ///  "hook"  PostgreSQL's WAL hooks (pg-raft's patch of XLogWrite, postgresql-18.7) and the
+  ///          pg_raft_wal extension, over a Unix socket: needs that build (install_dir; built by
+  ///          external/build-pg-raft-postgresql.sh). pg_wal is a plain directory (a link to pg/pg_wal).
+  string wal_capture = "fuse";
   /// io_threads: the node's io_context threads (connections other than raft's leader-to-follower
   /// ones, which read on threads of their own; write completions, timers, the client channel).
   unsigned io_threads = 2;

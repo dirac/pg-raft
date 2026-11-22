@@ -69,6 +69,9 @@ void pgbench(Config const& cfg, uint16_t port, std::vector<string> args) {
 
 BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
   auto cfg = Config{};
+  // PG_RAFT_WAL_CAPTURE=hook (with PG_RAFT_INSTALL_DIR), PG_RAFT_COMMIT_WAIT=sync_rep: testing.h.
+  config_from_env(cfg);
+  BOOST_TEST_MESSAGE("wal_capture = " << cfg.wal_capture << ", PostgreSQL in " << pg_bin(cfg));
   if (access((pg_bin(cfg) / "postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not available; skipping");
     return;
@@ -85,9 +88,6 @@ BOOST_AUTO_TEST_CASE(steady_state, *boost::unit_test::timeout(600)) {
                            .pg_port  = static_cast<uint16_t>(kPgPort + i),
                            .ha_port  = static_cast<uint16_t>(kHaPort + i)});
 
-  // PG_RAFT_COMMIT_WAIT=sync_rep runs the test with the commit waiting in synchronous replication.
-  if (auto const* w = std::getenv("PG_RAFT_COMMIT_WAIT"); w)
-    cfg.commit_wait = w;
   BOOST_TEST_MESSAGE("commit_wait = " << cfg.commit_wait);
 
   cfg.proxy_pg_port   = kProxyPort;

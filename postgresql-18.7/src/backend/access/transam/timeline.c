@@ -444,6 +444,10 @@ writeTimeLineHistory(TimeLineID newTLI, TimeLineID parentTLI,
 	Assert(access(path, F_OK) != 0 && errno == ENOENT);
 	durable_rename(tmppath, path, ERROR);
 
+	/* pg-raft: the new timeline's history file is in place */
+	if (wal_timeline_hook)
+		wal_timeline_hook(newTLI);
+
 	/* The history file can be archived immediately. */
 	if (XLogArchivingActive())
 	{

@@ -4,6 +4,11 @@ dir          = "@DIR@/data"
 backup_store = "@DIR@/backups"
 socket_dir   = "/tmp"
 
+# How the WAL is captured ("fuse", or "hook": PostgreSQL's WAL hooks, which need pg-raft's
+# PostgreSQL in install_dir). fresh.sh sets both (WAL_CAPTURE=hook).
+wal_capture  = "@WAL_CAPTURE@"
+install_dir  = "@INSTALL_DIR@"
+
 proxy_pg_port   = 6432
 proxy_http_port = 6480
 

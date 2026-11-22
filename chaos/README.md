@@ -13,6 +13,12 @@ python3 chaos/chaos.py stop           # stop the run's nodes and proxy (kill the
                                       # pkill -f "chaos.py run")
 ```
 
+```bash
+WAL_CAPTURE=hook ./chaos/fresh.sh 3   # the same with PostgreSQL's WAL hooks instead of FUSE (pg-raft's
+                                      # PostgreSQL, built by external/build-pg-raft-postgresql.sh)
+SETUP_ONLY=1 ./chaos/fresh.sh         # a new cluster left running, no chaos (to measure or inspect)
+```
+
 Requirements: the pg-raft build environment (`b2` in `/opt/pg_raft/bin`, see the top-level
 `CLAUDE.md`), PostgreSQL in `/opt/pg_raft/postgresql/18/bin` (`PG_BIN` overrides it), FUSE, and
 `python3` (standard library only). Ports 6432 (proxy), 6480 (proxy admin), 6441–6443 (PostgreSQL),

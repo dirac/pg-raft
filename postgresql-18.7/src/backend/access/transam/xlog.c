@@ -143,6 +143,11 @@ bool		XLOG_DEBUG = false;
 
 int			wal_segment_size = DEFAULT_XLOG_SEG_SIZE;
 
+/* pg-raft: hooks on the WAL written and flushed by XLogWrite (see xlog.h) */
+wal_write_hook_type wal_write_hook = NULL;
+wal_flush_hook_type wal_flush_hook = NULL;
+wal_timeline_hook_type wal_timeline_hook = NULL;
+
 /*
  * Number of WAL insertion locks to use. A higher value allows more insertions
  * to happen concurrently, but adds some CPU overhead to flushing the WAL,
@@ -2309,6 +2314,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	int			npages;
 	int			startidx;
 	uint32		startoffset;
+	XLogRecPtr	hooked;			/* pg-raft: WAL passed to wal_write_hook */
 
 	/* We should always be inside a critical section here */
 	Assert(CritSectionCount > 0);
@@ -2317,6 +2323,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	 * Update local LogwrtResult (caller probably did this already, but...)
 	 */
 	RefreshXLogWriteResult(LogwrtResult);
+	hooked = LogwrtResult.Write;
 
 	/*
 	 * Since successive pages in the xlog cache are consecutively allocated,
@@ -2458,6 +2465,33 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				startoffset += written;
 			} while (nleft > 0);
 
+			/*
+			 * pg-raft: the WAL just written, up to the write request (not the
+			 * rest of a partial last page), and none passed before.
+			 */
+			if (wal_write_hook)
+			{
+				XLogRecPtr	group_end;
+				XLogRecPtr	group_start;
+				XLogRecPtr	valid_end;
+				XLogRecPtr	valid_start;
+
+				XLogSegNoOffsetToRecPtr(openLogSegNo, startoffset,
+										wal_segment_size, group_end);
+				group_start = group_end - nbytes;
+				valid_end = Min(group_end, WriteRqst.Write);
+				valid_start = Max(group_start, hooked);
+				if (valid_end > valid_start)
+				{
+					wal_write_hook(tli, openLogSegNo,
+								   XLogSegmentOffset(valid_start, wal_segment_size),
+								   (uint32) (valid_end - valid_start),
+								   XLogCtl->pages + startidx * (Size) XLOG_BLCKSZ +
+								   (valid_start - group_start));
+					hooked = valid_end;
+				}
+			}
+
 			npages = 0;
 
 			/*
@@ -2475,7 +2509,10 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 			 */
 			if (finishing_seg)
 			{
-				issue_xlog_fsync(openLogFile, openLogSegNo, tli);
+				/* pg-raft: the hook may make the segment durable instead */
+				if (!(wal_flush_hook &&
+					  wal_flush_hook(tli, openLogSegNo, wal_segment_size)))
+					issue_xlog_fsync(openLogFile, openLogSegNo, tli);
 
 				/* signal that we need to wakeup walsenders later */
 				WalSndWakeupRequest();
@@ -2525,12 +2562,29 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 	if (LogwrtResult.Flush < WriteRqst.Flush &&
 		LogwrtResult.Flush < LogwrtResult.Write)
 	{
+		bool		hook_flushed = false;
+
+		/*
+		 * pg-raft: the hook may make the WAL durable instead of the local
+		 * fsync (of the segment holding the last byte written).
+		 */
+		if (wal_flush_hook)
+		{
+			XLogSegNo	flush_segno;
+
+			XLByteToPrevSeg(LogwrtResult.Write, flush_segno, wal_segment_size);
+			hook_flushed = wal_flush_hook(tli, flush_segno,
+										  XLogSegmentOffset(LogwrtResult.Write - 1,
+															wal_segment_size) + 1);
+		}
+
 		/*
 		 * Could get here without iterating above loop, in which case we might
 		 * have no open file or the wrong one.  However, we do not need to
 		 * fsync more than one file.
 		 */
-		if (wal_sync_method != WAL_SYNC_METHOD_OPEN &&
+		if (!hook_flushed &&
+			wal_sync_method != WAL_SYNC_METHOD_OPEN &&
 			wal_sync_method != WAL_SYNC_METHOD_OPEN_DSYNC)
 		{
 			if (openLogFile >= 0 &&

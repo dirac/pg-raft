@@ -34,6 +34,12 @@ void parse_node(T& data, Config& config) {
     config.write_op_bytes = toml::find<uint64_t>(data, "write_op_bytes");
   if (data.contains("io_threads"))
     config.io_threads = toml::find<unsigned>(data, "io_threads");
+  if (data.contains("wal_capture")) {
+    config.wal_capture = toml::find<string>(data, "wal_capture");
+    if (config.wal_capture != "fuse" && config.wal_capture != "hook")
+      throw std::invalid_argument(
+          std::format("wal_capture = \"{}\": \"fuse\" or \"hook\"", config.wal_capture));
+  }
   if (data.contains("commit_wait")) {
     config.commit_wait = toml::find<string>(data, "commit_wait");
     if (config.commit_wait != "fsync" && config.commit_wait != "sync_rep")

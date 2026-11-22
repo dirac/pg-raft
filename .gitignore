@@ -43,3 +43,6 @@
 bin
 tmp
 reports
+
+# In-repo PostgreSQL build and install (build/postgresql-18.7, build/postgresql/<major>)
+/build/

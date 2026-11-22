@@ -76,6 +76,7 @@ void plant(fs::path const& path) {
 
 BOOST_AUTO_TEST_CASE(restart_rebuilds_after_unclean_end, *boost::unit_test::timeout(900)) {
   auto cfg = Config{};
+  config_from_env(cfg);  // PG_RAFT_WAL_CAPTURE=hook etc. (testing.h)
   if (access((pg_bin(cfg) / "postgres").c_str(), X_OK) != 0) {
     BOOST_TEST_MESSAGE("PostgreSQL not available; skipping");
     return;

@@ -24,6 +24,7 @@ follower_sync = true
 write_op_bytes = 131072
 io_threads = 6
 commit_wait = "sync_rep"
+wal_capture = "hook"
 frame_checksums = true
 ledger_file_size = 268435456
 pg_hba = ["host all all 10.0.0.0/16 trust", "host replication all 10.0.0.0/16 trust"]
@@ -58,6 +59,7 @@ max_connections = 100
   BOOST_TEST(c.write_op_bytes == 131072U);
   BOOST_TEST(c.io_threads == 6U);
   BOOST_TEST(c.commit_wait == "sync_rep");
+  BOOST_TEST(c.wal_capture == "hook");
   BOOST_TEST(c.frame_checksums);
   BOOST_TEST(c.ledger_file_size == uint64_t{256} << 20U);
   BOOST_REQUIRE(c.pg_hba.size() == 2U);
@@ -89,6 +91,7 @@ BOOST_AUTO_TEST_CASE(node_defaults) {
   BOOST_TEST(c.write_op_bytes == 64U * 1024U);
   BOOST_TEST(c.io_threads == 2U);
   BOOST_TEST(c.commit_wait == "fsync");
+  BOOST_TEST(c.wal_capture == "fuse");
   BOOST_TEST(!c.frame_checksums);
   BOOST_TEST(c.ledger_file_size == uint64_t{1} << 30U);
   BOOST_TEST(c.pg_hba.empty());

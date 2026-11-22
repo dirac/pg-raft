@@ -298,10 +298,14 @@ Result<void> Node::start() {
     return r;
 
   // FUSE over data/pg_wal, backed by pg/pg_wal.
-  fs::create_directories(data_dir_ / "pg_wal", ec);
-  fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
-  if (!fuse_->start())
-    return elog(system_error_code(EIO), "Unable to mount FUSE on {}", data_dir_ / "pg_wal");
+  if (hook_mode()) {
+    hook_server_ = make_shared<WalHookServer>(
+        fs::path{config_.socket_dir} / std::format(".s.pg_raft.{}", pg_port()), pg_wal_dir_, *tracker_);
+    if (auto r = hook_server_->start(); !r)
+      return r;
+  }
+  if (auto r = attach_wal(); !r)
+    return r;
 
   // The WAL sender, which the standby streams from.
   auto cd        = controldata(pg_bin(config_), data_dir_);
@@ -437,6 +441,11 @@ Result<void> Node::write_standby_config(uint16_t wal_sender_port) {
     // The node is the primary's synchronous standby (SyncAcker): a commit waits for raft there.
     if (sync_rep_)
       conf << "synchronous_standby_names = 'pg_raft'\n";
+    // wal_capture = "hook": the extension reports the WAL to the hook server (it needs pg-raft's
+    // PostgreSQL, install_dir).
+    if (hook_mode())
+      conf << "shared_preload_libraries = 'pg_raft_wal'\n"
+           << std::format("pg_raft.socket = '{}'\n", hook_server_->socket_path().string());
     if (!conf.flush())
       return elog(system_error_code(EIO), "Unable to write {}", data_dir_ / "pg_raft.conf");
   }
@@ -533,17 +542,13 @@ Result<void> Node::restore_and_restart() {
 
   pg_->kill();
   pg_->stop(PgInstance::StopMode::Immediate, 5000);  // reaps it, and releases its IPC
-  if (fuse_) {  // (none after a failed attempt)
-    fuse_->stop();
-    fuse_.reset();
-  }
+  detach_wal();
 
   if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
     return r;  // (behind the log: restart anyway, needs_backup stays set and is retried)
 
-  fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
-  if (!fuse_->start())
-    return elog(system_error_code(EIO), "Unable to mount FUSE on {}", data_dir_ / "pg_wal");
+  if (auto r = attach_wal(); !r)
+    return r;
   if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
     return r;
   tracker_->set_mode(NodeWalTracker::Mode::kFollower);
@@ -748,16 +753,53 @@ Result<void> Node::rebuild() {
   return rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_);
 }
 
+Result<void> Node::attach_wal() {
+  std::error_code ec;
+  auto const      pg_wal = data_dir_ / "pg_wal";
+  if (!hook_mode()) {
+    fs::create_directories(pg_wal, ec);
+    fuse_ = make_unique<Fuse>(pg_wal, make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
+    if (!fuse_->start())
+      return elog(system_error_code(EIO), "Unable to mount FUSE on {}", pg_wal);
+    return ok();
+  }
+
+  // A link to pg/pg_wal. A plain directory there (a restored backup's, or a FUSE run's mount
+  // point): its files go to pg/pg_wal first.
+  if (fs::is_symlink(pg_wal, ec))
+    return ok();
+  if (fs::is_directory(pg_wal, ec)) {
+    for (auto const& entry : fs::directory_iterator(pg_wal, ec)) {
+      fs::rename(entry.path(), pg_wal_dir_ / entry.path().filename(), ec);
+      if (ec)
+        return elog(ec, "Unable to move {} into {}", entry.path(), pg_wal_dir_);
+    }
+    fs::remove(pg_wal, ec);
+    if (ec)
+      return elog(ec, "Unable to remove {}", pg_wal);
+  }
+  fs::create_directory_symlink(fs::path{".."} / "pg" / "pg_wal", pg_wal, ec);
+  if (ec)
+    return elog(ec, "Unable to link {} to {}", pg_wal, pg_wal_dir_);
+  return ok();
+}
+
+void Node::detach_wal() {
+  if (fuse_) {  // (none after a failed attempt)
+    fuse_->stop();
+    fuse_.reset();
+  }
+  if (hook_server_)
+    hook_server_->reset_segments();
+}
+
 Result<void> Node::restart_as_standby() {
   // The hook killed it; reap it.
   pg_->stop(PgInstance::StopMode::Immediate, 5000);
 
   // Rebuild pg/pg_wal with FUSE unmounted: WalFuseOps caches mmaps by LSN, and a cached mapping of
   // a replaced file must not be reused.
-  if (fuse_) {  // (none after a failed attempt)
-    fuse_->stop();
-    fuse_.reset();
-  }
+  detach_wal();
 
   // The backup's WAL counts up to the end of its last segment, not its End-LSN: pg_backup_stop
   // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
@@ -784,9 +826,8 @@ Result<void> Node::restart_as_standby() {
     return r;
   }
 
-  fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
-  if (!fuse_->start())
-    return elog(system_error_code(EIO), "Unable to mount FUSE on {}", data_dir_ / "pg_wal");
+  if (auto r = attach_wal(); !r)
+    return r;
 
   if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
     return r;
@@ -1049,8 +1090,9 @@ void Node::shutdown() {
         s->shutdown();
     senders_.clear();
   }
-  if (fuse_)
-    fuse_->stop();
+  detach_wal();
+  if (hook_server_)
+    hook_server_->stop();
   // A clean end: the next start needs no rebuild of pg/pg_wal.
   if (clean) {
     std::error_code ec;

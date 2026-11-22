@@ -4,6 +4,7 @@
 #include "src/base/config.h"
 #include "src/node/node_wal_tracker.h"
 #include "src/node/sync_acker.h"
+#include "src/node/wal_hook_server.h"
 #include "src/process/pg_instance.h"
 #include "src/raft/raft_server.h"
 #include "src/wal_fuse/fuse.h"
@@ -74,6 +75,14 @@ class Node : public std::enable_shared_from_this<Node> {
   // pg/pg_wal rebuilt from raft/wal (rebuild_pg_wal), with PostgreSQL stopped and FUSE unmounted.
   Result<void> rebuild();
 
+  // PostgreSQL's pg_wal attached to the WAL capture (wal_capture): "fuse": the FUSE mount over
+  // data/pg_wal, backed by pg/pg_wal; "hook": data/pg_wal a link to pg/pg_wal (the extension reports
+  // the WAL over the hook server's socket). Detached while PostgreSQL is stopped and pg/pg_wal is
+  // rebuilt or restored (mappings of replaced files must not be reused).
+  Result<void> attach_wal();
+  void         detach_wal();
+  bool         hook_mode() const { return config_.wal_capture == "hook"; }
+
   // node<N>/running: present from start() until a shutdown() that stopped PostgreSQL cleanly. Found
   // at a start, the previous run ended otherwise (a crash, a kill, a power loss, a PostgreSQL that
   // had to be killed), and pg/pg_wal can hold WAL that never committed: it is rebuilt.
@@ -126,6 +135,7 @@ class Node : public std::enable_shared_from_this<Node> {
   shared_ptr<RaftServer>      raft_;
   shared_ptr<NodeWalTracker>  tracker_;
   unique_ptr<Fuse>            fuse_;
+  shared_ptr<WalHookServer>   hook_server_;  // wal_capture = "hook"
   unique_ptr<PgInstance>      pg_;
   shared_ptr<WalSenderServer> wal_sender_server_;
 
