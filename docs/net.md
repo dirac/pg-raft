@@ -116,7 +116,7 @@ Consumers call:
 **Reader thread** (`threaded_reader()`, TCP only; both ends of raft's leader-to-follower
 connections): instead of the asio loop, a thread of the connection's own reads frames from a dup of
 the socket (`recvmsg` with `MSG_DONTWAIT`, data and status frames; a file frame closes the
-connection), sleeping in `ppoll` until data arrives (asio's sockets are non-blocking, and a dup
+connection), sleeping in `poll` until data arrives (asio's sockets are non-blocking, and a dup
 shares the flag), and hands each frame to its handler on that thread: no hand-off to an io thread,
 and no second read for the body. Writes stay on the io_context: they are queued, so a slow peer
 never blocks the thread that sends (raft sends with its lock held). The thread holds the connection

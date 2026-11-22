@@ -1,6 +1,7 @@
 #include "src/node/sync_acker.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pwd.h>
@@ -131,9 +132,11 @@ std::optional<vector<string>> simple_query(int fd, string const& sql, char stop_
 
 Result<void> SyncAcker::start() {
   stop();
-  int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  // No SOCK_CLOEXEC on macOS: set FD_CLOEXEC after (Process closes inherited fds anyway).
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd == -1)
     return elog(system_error_code(errno), "sync acker: socket");
+  ::fcntl(fd, F_SETFD, FD_CLOEXEC);
   sockaddr_in addr{};
   addr.sin_family      = AF_INET;
   addr.sin_port        = htons(port_);

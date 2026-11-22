@@ -330,7 +330,7 @@ bool Connection::read_full(int fd, std::span<boost::asio::mutable_buffer const> 
   while (first < iov.size()) {
     msghdr msg{};
     msg.msg_iov    = iov.data() + first;
-    msg.msg_iovlen = iov.size() - first;
+    msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(iov.size() - first);
     auto n         = ::recvmsg(fd, &msg, MSG_DONTWAIT);
     if (n > 0) {
       std::get<0>(socket_).count_read();
@@ -369,12 +369,11 @@ bool Connection::read_full(int fd, std::span<boost::asio::mutable_buffer const> 
 }
 
 bool Connection::wait_readable(int fd) {
-  // The socket is non-blocking (asio's, and a dup shares the flag): wait in ppoll, waking every
-  // 100 ms to notice a close.
+  // The socket is non-blocking (asio's, and a dup shares the flag): wait in poll, waking every
+  // 100 ms to notice a close (poll, not ppoll: macOS has no ppoll).
   while (!closed()) {
-    timespec ts{.tv_sec = 0, .tv_nsec = 100'000'000};
-    pollfd   p{.fd = fd, .events = POLLIN, .revents = 0};
-    if (::ppoll(&p, 1, &ts, nullptr) > 0)
+    pollfd p{.fd = fd, .events = POLLIN, .revents = 0};
+    if (::poll(&p, 1, 100) > 0)
       return true;
   }
   return false;

@@ -1249,7 +1249,7 @@ BOOST_AUTO_TEST_CASE(follower_sync_write_failures) {
     BOOST_TEST(f.verify().has_value());
     BOOST_TEST(std::get<1>(f.last_entry()) >= last);
     if (last > RaftIndex{0})
-      check_entries(f, RaftIndex{1}, vector<Item>(items.begin(), items.begin() + INT(last)));
+      check_entries(f, RaftIndex{1}, vector<Item>(items.begin(), items.begin() + static_cast<std::ptrdiff_t>(INT(last))));
     if (!failed)
       break;
   }

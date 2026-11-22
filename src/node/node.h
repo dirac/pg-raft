@@ -140,7 +140,28 @@ class Node : public std::enable_shared_from_this<Node> {
   // commit_wait = "sync_rep": the leader's synchronous-standby connection to its PostgreSQL
   // (SyncAcker), from promotion to step-down; on_applied() hands it the committed WAL end.
   bool                              sync_rep_ = false;
-  std::atomic<shared_ptr<SyncAcker>> acker_;
+  // A shared_ptr behind a mutex: Apple clang's libc++ has no std::atomic<shared_ptr>.
+  class AckerSlot {
+   public:
+    shared_ptr<SyncAcker> load() {
+      auto lk = std::lock_guard{mtx_};
+      return ptr_;
+    }
+    void store(shared_ptr<SyncAcker> p) {
+      auto lk = std::lock_guard{mtx_};
+      ptr_    = std::move(p);
+    }
+    shared_ptr<SyncAcker> exchange(shared_ptr<SyncAcker> p) {
+      auto lk = std::lock_guard{mtx_};
+      std::swap(ptr_, p);
+      return p;
+    }
+
+   private:
+    std::mutex            mtx_;
+    shared_ptr<SyncAcker> ptr_;
+  };
+  AckerSlot acker_;
 
   std::mutex                  senders_mtx_;
   vector<weak_ptr<WalSender>> senders_;
