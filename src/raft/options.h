@@ -31,6 +31,22 @@ struct Options {
   // reader thread): the leader its follower's replies, the follower the leader's requests. The
   // other connections stay on the io_context.
   bool reader_threads = true;
+  // A follower whose PostgreSQL standby has replayed less than the applied wal_end minus this many
+  // bytes (or isn't running) doesn't start an election: it would win (raft compares the logs, not
+  // PostgreSQL's replay) and then fail to promote in time, while a caught-up node could serve. Its
+  // standby catches up without a leader (it streams committed WAL from wal_dir). After
+  // lagging_election_wait_msecs without a leader it starts one anyway. 0: off (the raft tests have
+  // no PostgreSQL; the node sets it).
+  uint64_t max_standby_lag              = 0;
+  unsigned lagging_election_wait_msecs  = 30000;
+  // Compaction without a keep_from (set_wal_keep_from(): the latest backup's segment) keeps
+  // keep_old_logs entries. The node turns it off: until it has set keep_from, compacting could drop
+  // the WAL that the latest backup needs to catch up, and a node restoring it would be stuck until
+  // the next backup.
+  bool compact_without_keep_from = true;
+  // The local PostgreSQL's redo point when the server starts (set_wal_gc_floor() later): the WAL
+  // deletion thread runs at once, and must not delete what a restarting standby replays from.
+  uint64_t wal_gc_floor = 0;
   // Testing only: nothing is synced to the disk, so a machine crash loses the term, the vote and
   // the log. A process crash loses nothing.
   bool no_sync = false;

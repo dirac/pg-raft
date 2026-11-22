@@ -7,6 +7,13 @@ uint16_t xlp_magic(unsigned char const* p) {
   return static_cast<uint16_t>(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8));
 }
 
+uint64_t xlp_pageaddr(unsigned char const* p) {
+  uint64_t v = 0;
+  for (int i = 7; i >= 0; --i)
+    v = (v << 8U) | p[8 + i];
+  return v;
+}
+
 uint32_t xlp_rem_len(unsigned char const* p) {
   p += 16;
   return (static_cast<uint32_t>(p[0]) << 0) | (static_cast<uint32_t>(p[1]) << 8) |
@@ -65,6 +72,11 @@ std::tuple<off_t, size_t, bool> WalFuseSegment::WalState::update(unsigned char c
     if (size < 2 || xlp_magic(ptr) == 0)
       return {curr_, 0U, rec_start};
     if (size < static_cast<size_t>(curr_ == 0 ? 40 : 24))
+      return {curr_, 0U, rec_start};
+    // Not this page's header (only partly stored yet, or stale): the end of the walk. Walking it
+    // as a page with no records let initialize() count its bytes as published, and PostgreSQL's
+    // full write of the page then published only what differed: the magic never reached raft.
+    if (segment_start_ && xlp_pageaddr(ptr) != *segment_start_ + static_cast<uint64_t>(curr_))
       return {curr_, 0U, rec_start};
 
     rsize_ = round_up(xlp_rem_len(ptr));

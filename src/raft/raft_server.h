@@ -122,6 +122,19 @@ class RaftServer : public ClientConnectionApi,
   /// of the WAL through AppendEntries. Set by the node whenever it sees a newer backup.
   void set_wal_keep_from(LogSeqNumber keep_from);
 
+  /// The local PostgreSQL's redo point (its last checkpoint or restartpoint): the WAL from there on
+  /// is what it replays after a crash, so wal_gc keeps the segments from its segment on, even
+  /// those before the first entry's segment. 0: none.
+  void set_wal_gc_floor(uint64_t redo_lsn) {
+    if (wal_gc_floor_.exchange(redo_lsn) != redo_lsn) {
+      {
+        auto lk  = std::unique_lock{gc_mtx_};
+        gc_wake_ = true;
+      }
+      gc_cv_.notify_all();
+    }
+  }
+
   /// Connection from client and other peers.
   void new_connection(string peer, socket_type socket) override;
 
@@ -191,6 +204,10 @@ class RaftServer : public ClientConnectionApi,
                                    RaftTerm    term,
                                    RequestVote request) override;
 
+  RaftResponse handle_peer_request(RaftNodeId     candidate,
+                                   RaftTerm       term,
+                                   RequestPreVote request) override;
+
   RaftResponse handle_peer_request(RaftNodeId      leader,
                                    RaftTerm        term,
                                    InstallSnapshot request,
@@ -229,6 +246,11 @@ class RaftServer : public ClientConnectionApi,
                        RaftTerm                       req_term,
                        RaftTerm                       peer_term,
                        RequestElectionResponse        response) override;
+
+  void handle_response(shared_ptr<RaftPeerConnection> conn,
+                       RaftTerm                       req_term,
+                       RaftTerm                       peer_term,
+                       RequestPreVoteResponse         response) override;
 
   RaftIndex commit_idx() const { return commit_idx_.load(std::memory_order_relaxed); }
 
@@ -303,6 +325,21 @@ class RaftServer : public ClientConnectionApi,
   void make_follower(std::source_location loc = std::source_location::current());
   void log_untriggered_election(unsigned now) const;
   void make_candidate(unsigned inc = 1);
+
+  /// The election timeout passed: a PreVote round for current_term() + 1 (make_candidate() once a
+  /// majority, this node included, would vote for it).
+  void start_pre_vote();
+
+  /// Whether this node heard from a leader of its current term within the minimum election
+  /// timeout: it then refuses PreVotes.
+  bool hears_leader() const;
+
+  std::atomic<uint64_t> wal_gc_floor_{0};
+
+  // The PreVote round in flight: the proposed term (0: none) and who granted it.
+  std::mutex       pre_vote_mtx_;
+  RaftTerm         pre_vote_term_{0};
+  std::set<RaftNodeId> pre_votes_;
 
   void make_leader(UniqueLock lk);
   void make_follower(UniqueLock lk, std::source_location loc = std::source_location::current());

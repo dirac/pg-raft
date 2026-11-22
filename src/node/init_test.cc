@@ -51,6 +51,19 @@ BOOST_AUTO_TEST_CASE(backup_end_lsn_from_manifest) {
   BOOST_REQUIRE(lsn.has_value());
   BOOST_TEST((*lsn == LogSeqNumber{.timeline = 2, .lsn = 0x105A1F3B0ULL}));
 
+  // As PostgreSQL writes them: the newest timeline first (a standby's backup across promotions).
+  std::ofstream(tmp() / "backup_manifest") << R"({
+    "PostgreSQL-Backup-Manifest-Version": 2,
+    "WAL-Ranges": [
+      { "Timeline": 6, "Start-LSN": "0/CA618328", "End-LSN": "0/CA6183B8" },
+      { "Timeline": 5, "Start-LSN": "0/B6E85068", "End-LSN": "0/CA618328" },
+      { "Timeline": 4, "Start-LSN": "0/42C74F98", "End-LSN": "0/B6E85068" }
+    ]
+  })";
+  lsn = backup_end_lsn(tmp());
+  BOOST_REQUIRE(lsn.has_value());
+  BOOST_TEST((*lsn == LogSeqNumber{.timeline = 6, .lsn = 0xCA6183B8ULL}));
+
   BOOST_TEST(!backup_end_lsn(tmp() / "missing").has_value());
   std::ofstream(tmp() / "backup_manifest") << "{ not json";
   BOOST_TEST(!backup_end_lsn(tmp()).has_value());

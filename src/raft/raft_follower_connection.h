@@ -20,6 +20,10 @@ struct FollowerConnectionApi {
                                            RaftTerm    term,
                                            RequestVote request) = 0;
 
+  virtual RaftResponse handle_peer_request(RaftNodeId     candidate,
+                                           RaftTerm       term,
+                                           RequestPreVote request) = 0;
+
   virtual RaftResponse handle_peer_request(RaftNodeId    leader,
                                            RaftTerm      term,
                                            AppendEntries request,

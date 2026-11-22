@@ -74,6 +74,9 @@ __attribute__((target("sse4.2"))) uint32_t crc32c_hw(uint32_t             crc,
 }
 
 bool have_hw() {
+  // __builtin_cpu_supports reads the CPU model the runtime fills in: in a static initializer that
+  // may not have run yet (it answered false on an SSE4.2 CPU), so initialize it first.
+  __builtin_cpu_init();
   return __builtin_cpu_supports("sse4.2");
 }
 #else
@@ -85,12 +88,16 @@ bool have_hw() {
 }
 #endif
 
-bool const kHw = have_hw();
-
 }  // namespace
 
+bool crc32c_hardware() {
+  static bool const hw = have_hw();  // on first use, not in a static initializer
+  return hw;
+}
+
 uint32_t crc32c(uint32_t crc, void const* data, size_t size) {
-  auto const* p = static_cast<unsigned char const*>(data);
+  bool const  kHw = crc32c_hardware();
+  auto const* p   = static_cast<unsigned char const*>(data);
   crc           = ~crc;
   crc           = kHw ? crc32c_hw(crc, p, size) : crc32c_sw(crc, p, size);
   return ~crc;

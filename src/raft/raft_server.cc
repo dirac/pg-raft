@@ -51,6 +51,7 @@ RaftServer::~RaftServer() {
 }
 
 void RaftServer::start() {
+  wal_gc_floor_.store(options_.wal_gc_floor);  // before the WAL deletion thread starts
   std::filesystem::create_directories(dir_);
   current_term_ = value(term_file_.open()).term;
 
@@ -77,6 +78,8 @@ void RaftServer::start() {
 
   if (current_term_.load() > RaftTerm{0})
     can_vote_.test_and_set();
+  // The wait of a lagging node for a leader (start_pre_vote()) counts from now.
+  leader_msg_epoch_.store(epoch_msec(), std::memory_order_relaxed);
 
   gather_terms();
 
@@ -149,7 +152,7 @@ void RaftServer::periodic() {
             r);
         log_untriggered_election(c);
 
-        make_candidate();
+        start_pre_vote();
       } else {
         // Wake up at the election deadline.
         t = std::min(t, std::chrono::milliseconds(std::max(p + r - c, 1U)));
@@ -244,10 +247,14 @@ void RaftServer::exec(WalCommand cmd, std::span<uint8_t const> wal, ExecHandler 
 
     last_entry_time_ = std::time(nullptr);
 
+    // The leadership's term, not current_term(): a leader that has just heard of a newer term
+    // (update_current_term() sets it before make_follower() gets this lock) still appends as the
+    // leader of its own term. An entry labelled with the newer term would share (index, term) with
+    // a different entry of that term's leader, breaking log matching.
     auto const idx = append(
         Entry{
             .time = last_entry_time_,
-            .term = current_term(),
+            .term = leadership_term(),
             .cmd  = std::move(cmd),
         },
         wal);
@@ -460,11 +467,11 @@ bool RaftServer::tick(bool force) {
 
   last_entry_time_.store(std::time(nullptr), std::memory_order_relaxed);
 
-  // A tick entry (the callers hold the lock).
+  // A tick entry (the callers hold the lock), of the leadership's term (see exec()).
   auto const idx = append(
       Entry{
           .time = last_entry_time_,
-          .term = current_term(),
+          .term = leadership_term(),
           .cmd  = {},
       },
       {});
@@ -524,8 +531,11 @@ void RaftServer::make_follower(RaftServer::UniqueLock lk, std::source_location l
     handlers_.clear();
   }
   type_.store(NodeType::kFollower);
-  if (was_leader)
+  if (was_leader) {
+    // A deposed leader's wait for the next leader (start_pre_vote()) counts from now.
+    leader_msg_epoch_.store(epoch_msec(), std::memory_order_relaxed);
     observer_->stepped_down(term);
+  }
 
   stepdown_.clear();
 }
@@ -600,9 +610,24 @@ void RaftServer::make_leader(RaftServer::UniqueLock lk) {
       std::get<RaftTerm>(last_entry),
       std::get<RaftIndex>(last_entry));
 
+  leadership_term_.store(votes_.term());
+
+  // An entry of this term at once (Raft §5.4.2): the leader commits only entries of its own term
+  // by counting replicas (update_match_index), and the entries of earlier terms with them. Without
+  // it, an earlier term's entry counted onto a majority could commit (be applied, its WAL streamed
+  // to the standbys) and still be overwritten by a candidate whose last entry has a newer term.
+  last_entry_time_ = std::time(nullptr);
+  auto const idx   = append(
+      Entry{
+          .time = last_entry_time_,
+          .term = leadership_term(),
+          .cmd  = {},
+      },
+      {});
+  log(INFO, "{}Added the entry {} of term {}", log_prefix_, idx, leadership_term());
+
   match_indexes_.reset();
   match_indexes_.match_index(self_id_, ledger_.durable_idx());
-  leadership_term_.store(votes_.term());
 
   if (connections_->has_unconnected_peers())
     connections_->reconnect(
@@ -771,6 +796,8 @@ RaftResponse RaftServer::handle_peer_request(RaftNodeId /* leader */,
     return failed;
 
   update_last_ping(true);
+  leader_msg_epoch_.store(epoch_msec(), std::memory_order_relaxed);
+  leader_msg_term_.store(current_term, std::memory_order_relaxed);
 
   // A chunk of the leader's first ledger file, into the install file.
   if (auto r = ledger_.install_chunk(request.offset, bytes); !r)
@@ -1049,6 +1076,95 @@ void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
   }
 }
 
+bool RaftServer::hears_leader() const {
+  auto const term = leader_msg_term_.load(std::memory_order_relaxed);
+  return term != RaftTerm{0} && term == current_term() &&
+         epoch_msec() - leader_msg_epoch_.load(std::memory_order_relaxed) <
+             options_.election_timeout_msecs;
+}
+
+void RaftServer::start_pre_vote() {
+  // A node that needs a backup starts no election (make_candidate() says so and waits).
+  if (applied_state().needs_backup || nodes() == 1U)
+    return make_candidate();
+
+  // A standby far behind (or not running) would win and then not promote in time: leave the
+  // election to a node that can serve, unless there has been no leader for a while.
+  if (options_.max_standby_lag != 0) {
+    auto const replayed = standby_applied_lsn();
+    auto const wal_end  = applied_state().wal_end.lsn;
+    auto const leaderless =
+        epoch_msec() - leader_msg_epoch_.load(std::memory_order_relaxed);
+    if ((!replayed || *replayed + options_.max_standby_lag < wal_end) &&
+        leaderless < options_.lagging_election_wait_msecs) {
+      log(INFO,
+          "{}Not starting an election: the standby is at {} of {} (no leader for {} ms)",
+          log_prefix_,
+          replayed ? std::format("{:X}", *replayed) : string{"(not running)"},
+          std::format("{:X}", wal_end),
+          leaderless);
+      update_last_ping(false);
+      return;
+    }
+  }
+
+  auto const proposed = current_term() + 1U;
+  {
+    auto lk        = std::unique_lock{pre_vote_mtx_};
+    pre_vote_term_ = proposed;
+    pre_votes_     = {self_id_};
+  }
+  // The next round after another election timeout, if this one gets no majority.
+  update_last_ping(false);
+  log(INFO, "{}PreVote for term={}", log_prefix_, proposed);
+  if (connections_->post([this, s = self(), proposed](shared_ptr<RaftPeerConnection> conn) {
+        conn->send_request_pre_vote(ledger_, proposed);
+      }) != (nodes() - 1U))
+    connections_->reconnect(
+        self<RaftServer>(), config(), [this, s = self()](shared_ptr<RaftPeerConnection> conn) {
+          on_connect(conn);
+        });
+}
+
+RaftResponse RaftServer::handle_peer_request(RaftNodeId     candidate,
+                                             RaftTerm       term,
+                                             RequestPreVote request) {
+  // Nothing changes here, the term included.
+  auto const current = current_term();
+  auto const granted = term > current && can_vote() && !is_leader() && !is_candidate() &&
+                       !hears_leader() && !(ledger_.last_entry() > request.last_entry);
+  log(INFO,
+      "{}PreVote for term={} from node={}: {}",
+      log_prefix_,
+      term,
+      candidate,
+      granted ? "granted" : "refused");
+  return RaftResponse{.term = current, .response = RequestPreVoteResponse{.granted = granted}};
+}
+
+void RaftServer::handle_response(shared_ptr<RaftPeerConnection> conn,
+                                 RaftTerm                       req_term,
+                                 RaftTerm                       peer_term,
+                                 RequestPreVoteResponse         response) {
+  // A newer term elsewhere: take it (this node is a follower; nothing to depose).
+  if (peer_term >= req_term)
+    update_current_term(peer_term);
+  if (!response.granted || !is_follower() || current_term() + 1U != req_term)
+    return;
+
+  {
+    auto lk = std::unique_lock{pre_vote_mtx_};
+    if (pre_vote_term_ != req_term)
+      return;
+    pre_votes_.insert(conn->peer_id());
+    if (pre_votes_.size() < nodes() / 2U + 1U)
+      return;
+    pre_vote_term_ = RaftTerm{0};
+  }
+  log(INFO, "{}PreVote for term={} won", log_prefix_, req_term);
+  make_candidate();
+}
+
 RaftResponse RaftServer::handle_peer_request(RaftNodeId /*leader*/,
                                              RaftTerm        term,
                                              RequestElection request) {
@@ -1089,6 +1205,13 @@ void RaftServer::update_match_index(RaftNodeId node_id, RaftIndex idx) {
   // The leader counts itself once its ledger has the entries on disk (at once without syncs).
   match_indexes_.match_index(self_id_, ledger_.durable_idx());
   if (auto n_commit_idx = match_indexes_.commit_index(commit_idx()); n_commit_idx > commit_idx()) {
+    // Only an entry of the leader's own term commits by counting (Raft §5.4.2); the earlier
+    // entries commit with it. The terms only grow along the log: when the entry at n_commit_idx is
+    // of an earlier term, so is every entry before it, and nothing commits yet (make_leader()
+    // appended one of this term). Not a leader (leadership term 0): nothing either.
+    auto const term = leadership_term();
+    if (term == RaftTerm{0} || ledger_.term(n_commit_idx) != term)
+      return;
     set_commit_idx(n_commit_idx);
     apply_entries(true);
   }
@@ -1216,31 +1339,19 @@ void RaftServer::compact_log() {
   if (last_applied == RaftIndex{0})
     return;
 
-  // The new first entry. With a keep_from (the latest backup's segment): the first entry whose
-  // segment is at or after it; otherwise keep_old_logs entries. Never past the last applied entry,
-  // which stays (AppendEntries needs its term).
+  // The new first entry. With a keep_from (the latest backup's segment): the start of the last
+  // file before which all the WAL ends at or before it (so every entry whose segment is at or
+  // after it stays); otherwise keep_old_logs entries. Never past the last applied entry, which
+  // stays (AppendEntries needs its term).
   RaftIndex target = last_applied;
   if (keep_from_) {
-    for (RaftIndex idx = first; idx < last_applied;) {
-      auto batch = value(ledger_.entries(idx, 4096));
-      if (!batch || batch->empty())
-        break;
-      bool found = false;
-      for (auto const& le : *batch) {
-        auto const& e = le.entry;
-        if (idx >= last_applied)
-          break;
-        if (e.cmd.segment && !(*e.cmd.segment < *keep_from_)) {
-          target = idx;
-          found  = true;
-          break;
-        }
-        ++idx;
-      }
-      if (found)
-        break;
-    }
+    // The file headers' wal_end, not a scan of the records: this runs with the server lock held,
+    // and reading every record up to keep_from took it for 20 s after a backup moved keep_from on
+    // (no heartbeats meanwhile: an election).
+    target = ledger_.compaction_point_before_wal(keep_from_->lsn, last_applied);
   } else {
+    if (!options_.compact_without_keep_from)
+      return;  // until the node sets keep_from
     if (INT(last_applied) <= options_.keep_old_logs)
       return;
     target = last_applied - options_.keep_old_logs;
@@ -1296,9 +1407,12 @@ void RaftServer::wal_gc() {
       gc_wake_ = false;
     }
 
-    auto const first = applied_state().first_segment;
+    auto first = applied_state().first_segment;
     if (first.lsn == 0)
       continue;
+    // Not past the local PostgreSQL's redo point (set_wal_gc_floor()).
+    if (auto const floor = wal_gc_floor_.load(); floor != 0 && floor - floor % kWalSegmentSize < first.lsn)
+      first.lsn = floor - floor % kWalSegmentSize;
 
     std::vector<std::filesystem::path> old;
     std::error_code                    ec;
@@ -1324,7 +1438,7 @@ void RaftServer::wal_gc() {
     for (auto const& p : old) {
       std::filesystem::remove(p, ec);
       log(INFO,
-          "{}Deleted the WAL segment {}: before the first entry's {}",
+          "{}Deleted the WAL segment {}: before {} (the first entry's, or the redo point's)",
           log_prefix_,
           p.filename(),
           first);

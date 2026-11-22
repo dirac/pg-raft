@@ -57,6 +57,11 @@ class PgInstance {
 
   bool is_running() const;
 
+  /// Whether the postmaster started here has exited on its own (crashed, PANIC, shut down) and not
+  /// been reaped yet: is_running() still holds until stop() reaps it. Doesn't block (false while
+  /// another call holds the instance).
+  bool exited() const;
+
   // SIGKILL to PostgreSQL and all its processes, right now: the postmaster is stopped (SIGSTOP, so
   // it forks nothing more), each child and its process group is killed (every child calls setsid,
   // so a signal to the postmaster's group doesn't reach them), then the postmaster. Takes no lock

@@ -3,6 +3,7 @@
 #include <sys/ipc.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <sys/wait.h>
 
 #include <fstream>
 #include <sstream>
@@ -287,6 +288,17 @@ PgInstance::Role PgInstance::role() const {
 bool PgInstance::is_running() const {
   std::lock_guard lk(mu_);
   return postgres_.is_running();
+}
+
+bool PgInstance::exited() const {
+  std::unique_lock lk(mu_, std::try_to_lock);
+  if (!lk || !postgres_.is_running())
+    return false;
+  // Peek (WNOWAIT): stop() still reaps it, and releases its IPC.
+  siginfo_t info{};
+  if (::waitid(P_PID, static_cast<id_t>(postgres_.pid()), &info, WEXITED | WNOHANG | WNOWAIT) != 0)
+    return false;
+  return info.si_pid != 0;
 }
 
 bool PgInstance::wait_ready(uint16_t port, int timeout_s) const {

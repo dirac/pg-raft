@@ -142,6 +142,12 @@ void NodeWalTracker::async_fsync(shared_ptr<WalSegment>            segment,
 void NodeWalTracker::async_timeline(uint32_t timeline, string const& content) {
   if (mode() != Mode::kLeader)
     return;
+  // A timeline that isn't past the committed one belongs to another primary: publishing it would
+  // replace that history (the node then steps down: Node::promote()).
+  if (auto const committed = raft_->applied_state().timeline; timeline <= committed) {
+    log(ERROR, "Not publishing timeline {}: timeline {} is committed already", timeline, committed);
+    return;
+  }
 
   log(INFO, "Publishing timeline {}", timeline);
   raft_->exec(

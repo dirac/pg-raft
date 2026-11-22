@@ -1635,6 +1635,19 @@ RaftIndex Ledger::compaction_point(RaftIndex idx) const {
   return std::prev(it)->first;
 }
 
+RaftIndex Ledger::compaction_point_before_wal(uint64_t lsn, RaftIndex limit) const {
+  auto lk = std::shared_lock{mtx_};
+  if (files_.empty())
+    return base_idx_ + 1U;
+  auto best = files_.begin()->first;
+  for (auto const& [first, f] : files_) {
+    if (first > limit || f->header.state.wal_end.lsn > lsn)
+      break;
+    best = first;
+  }
+  return best;
+}
+
 Result<void> Ledger::drop_before(RaftIndex first) {
   auto lk = std::unique_lock{mtx_};
   auto it = files_.find(first);

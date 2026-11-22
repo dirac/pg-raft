@@ -23,6 +23,11 @@ class Fuse {
   void stop();
   bool is_mounted() const { return mounted_.load(); }
 
+  /// Removes the mount a killed process left at |mount_point| (its FUSE daemon gone: a dead mount,
+  /// on which everything fails with ENXIO or ENOTCONN), so that the directory can be used, or
+  /// mounted again; waits up to 5 s for it to go. start() does it too.
+  static void remove_stale_mount(std::filesystem::path const& mount_point);
+
   FuseOps const& ops() const { return *ops_instance_; }
 
  private:
@@ -37,5 +42,6 @@ class Fuse {
 
   std::thread       loop_thread_;
   std::atomic<bool> mounted_{false};
+  std::atomic<bool> loop_done_{false};  // the loop thread's fuse_loop() returned
   bool              multithreaded_ = false;
 };

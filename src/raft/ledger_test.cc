@@ -1187,7 +1187,8 @@ BOOST_AUTO_TEST_CASE(follower_sync_records) {
 
     // Records it has: skipped, synced_idx unchanged and still covering them.
     auto again   = leader.records(RaftIndex{20}, 5);
-    auto decoded = decode_records(concat(**again));
+    auto bytes   = concat(**again);  // the decoded records point into it
+    auto decoded = decode_records(bytes);
     BOOST_REQUIRE(decoded.has_value());
     auto r = f.append_records(RaftIndex{19}, RaftTerm{1}, *decoded, true);
     BOOST_REQUIRE(r.has_value() && r->has_value());
@@ -1207,7 +1208,8 @@ BOOST_AUTO_TEST_CASE(follower_sync_records) {
   Ledger g(g_dir(), og);
   BOOST_REQUIRE(g.open().has_value());
   auto first = leader.records(RaftIndex{1}, 10);
-  auto d1    = decode_records(concat(**first));
+  auto bytes1 = concat(**first);  // the decoded records point into it
+  auto d1     = decode_records(bytes1);
   BOOST_REQUIRE(d1.has_value());
   BOOST_REQUIRE(g.append_records(RaftIndex{0}, RaftTerm{0}, *d1, false).has_value());
   BOOST_TEST(g.synced_idx() == RaftIndex{0});

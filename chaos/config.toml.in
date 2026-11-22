@@ -1,0 +1,39 @@
+# Chaos test cluster: 3 nodes + proxy on this machine. fresh.sh writes config.toml from this file,
+# with its directory placeholder replaced by this directory.
+dir          = "@DIR@/data"
+backup_store = "@DIR@/backups"
+socket_dir   = "/tmp"
+
+proxy_pg_port   = 6432
+proxy_http_port = 6480
+
+# Backups and compaction happen during the run (small ledger files: InstallSnapshot gets exercised).
+backup_interval_secs        = 900
+backup_wal_size             = 1073741824
+backup_pending_timeout_secs = 120
+ledger_file_size            = 67108864
+
+leader_sync   = false
+follower_sync = false
+commit_wait   = "fsync"
+
+[[server]]
+hostname = "127.0.0.1"
+pg_port  = 6441
+ha_port  = 7101
+
+[[server]]
+hostname = "127.0.0.1"
+pg_port  = 6442
+ha_port  = 7102
+
+[[server]]
+hostname = "127.0.0.1"
+pg_port  = 6443
+ha_port  = 7103
+
+[pg_config]
+shared_buffers     = "256MB"
+max_connections    = 100
+max_wal_size       = "1GB"
+checkpoint_timeout = "5min"

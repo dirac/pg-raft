@@ -264,6 +264,12 @@ class Ledger {
   /// The first index of the file holding |idx| (the first index a compaction to |idx| keeps).
   RaftIndex compaction_point(RaftIndex idx) const;
 
+  /// The latest file start, at most |limit|, before which every record's WAL ends at or before
+  /// |lsn| (each file's header has the state before its first record, and its wal_end): compacting
+  /// to it keeps the WAL from |lsn| on. From the file headers, not the records (reading those took
+  /// the server lock for seconds). The first file's start if none.
+  RaftIndex compaction_point_before_wal(uint64_t lsn, RaftIndex limit) const;
+
   /// Deletes the files before the one starting at |first|. open() is given the same first index
   /// after a restart.
   Result<void> drop_before(RaftIndex first);

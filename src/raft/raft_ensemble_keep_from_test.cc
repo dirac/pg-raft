@@ -45,12 +45,14 @@ BOOST_AUTO_TEST_CASE(keep_from, *boost::unit_test::timeout(timeout)) {
       s->set_wal_keep_from(keep);
   // Compaction never goes past the last checkpoint (checkpoint_secs): when the segments filled
   // before one, the servers compact at a later periodic().
-  auto compacted = [&service] {
+  // (To keep's segment, not just any compaction: under load the writer can pass keep_old_logs
+  // entries first, and a compaction by count happens before this one.)
+  auto compacted = [&service, keep] {
     for (unsigned i = 0; i < 3; ++i)
       if (auto s = service.server(i);
-          !s || s->inspect_for_test([](RaftState const&, Ledger const& log, RaftIndex) {
-                  return log.first_idx();
-                }) == RaftIndex{1})
+          !s || s->inspect_for_test([](RaftState const& st, Ledger const&, RaftIndex) {
+                  return st.first_segment;
+                }).lsn + 2U * kWalSegmentSize <= keep.lsn)
         return false;
     return true;
   };

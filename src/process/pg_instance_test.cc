@@ -180,6 +180,41 @@ BOOST_AUTO_TEST_CASE(stop_immediate, *boost::unit_test::timeout(60)) {
   BOOST_TEST(!pg.is_running());
 }
 
+// exited(): a postmaster that exits on its own (here a SIGKILL from outside) is seen, without
+// being reaped: is_running() still holds until stop() reaps it.
+BOOST_AUTO_TEST_CASE(exited_on_its_own, *boost::unit_test::timeout(60)) {
+  if (!pg_available()) {
+    BOOST_TEST_MESSAGE("PostgreSQL not found; skipping");
+    return;
+  }
+  IoThreads threads{1};
+  TmpDir    tmp;
+  auto      data_dir = tmp() / "pgdata";
+
+  PgInstance pg(kPgBin, data_dir, kPort, PgInstance::Role::kPrimary);
+  BOOST_REQUIRE(pg.init({"-E", "UTF8", "-A", "trust", "--no-sync"}));
+  BOOST_REQUIRE(pg.write_config({}));
+  BOOST_REQUIRE(pg.write_hba({}));
+  BOOST_REQUIRE(pg.start());
+  BOOST_REQUIRE(pg.wait_ready(kPort));
+  BOOST_TEST(!pg.exited());
+
+  pg.kill();
+  bool seen = false;
+  for (int i = 0; i < 100 && !seen; ++i) {
+    seen = pg.exited();
+    if (!seen)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  BOOST_TEST(seen);
+  BOOST_TEST(pg.exited());  // not reaped by the peek
+  BOOST_TEST(pg.is_running());
+
+  pg.stop(PgInstance::StopMode::Immediate, 5000);
+  BOOST_TEST(!pg.is_running());
+  BOOST_TEST(!pg.exited());
+}
+
 // ── backup / restore ──────────────────────────────────────────────────────────
 
 BOOST_AUTO_TEST_CASE(backup, *boost::unit_test::timeout(60)) {

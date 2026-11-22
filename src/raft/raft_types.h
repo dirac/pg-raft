@@ -46,6 +46,29 @@ struct RequestVoteResponse {
   }
 };
 
+/// PreVote (Raft thesis §9.6): would the peer vote for the sender in the request's term (the
+/// sender's term + 1)? Nothing changes on either side, the terms included; the sender starts a real
+/// election only with a majority of yeses. A peer says no while it hears from a leader, so a node
+/// that was cut off or stalled for a while doesn't depose a healthy leader (a PostgreSQL failover)
+/// when it comes back.
+struct RequestPreVote {
+  std::tuple<RaftTerm, RaftIndex> last_entry;
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & last_entry;
+  }
+};
+
+struct RequestPreVoteResponse {
+  bool granted;
+
+  template <class Archive>
+  void serialize(Archive& ar, unsigned int const /*version*/) {
+    ar & granted;
+  }
+};
+
 struct AppendEntries {
   RaftTerm  prev_log_term;
   RaftIndex prev_log_idx;
@@ -159,7 +182,12 @@ struct RaftRequest {
   /* Node that generated the request. */
   RaftNodeId node_id;
 
-  std::variant<std::monostate, RequestVote, AppendEntries, InstallSnapshot, RequestElection>
+  std::variant<std::monostate,
+               RequestVote,
+               AppendEntries,
+               InstallSnapshot,
+               RequestElection,
+               RequestPreVote>
       request;
 
   /* Copied from request to associated response. */
@@ -186,7 +214,8 @@ struct RaftResponse {
                RequestVoteResponse,
                AppendEntriesResponse,
                InstallSnapshotResponse,
-               RequestElectionResponse>
+               RequestElectionResponse,
+               RequestPreVoteResponse>
       response;
 
   /* Copied from request to associated response. */
@@ -234,6 +263,23 @@ template <>
 struct std::formatter<RequestVoteResponse> : public parse_fn {
   auto format(RequestVoteResponse const& r, std::format_context& ctx) const {
     return std::format_to(ctx.out(), "RequestVoteResponse {{ vote_granted = {} }}", r.vote_granted);
+  }
+};
+
+template <>
+struct std::formatter<RequestPreVote> : public parse_fn {
+  auto format(RequestPreVote const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(),
+                          "RequestPreVote {{ term = {} index = {} }}",
+                          std::get<RaftTerm>(r.last_entry),
+                          std::get<RaftIndex>(r.last_entry));
+  }
+};
+
+template <>
+struct std::formatter<RequestPreVoteResponse> : public parse_fn {
+  auto format(RequestPreVoteResponse const& r, std::format_context& ctx) const {
+    return std::format_to(ctx.out(), "RequestPreVoteResponse {{ granted = {} }}", r.granted);
   }
 };
 

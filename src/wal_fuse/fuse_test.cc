@@ -91,6 +91,33 @@ BOOST_AUTO_TEST_CASE(mount_and_unmount, * boost::unit_test::timeout(60)) {
   BOOST_CHECK_EQUAL(st_mp.st_dev, st_parent.st_dev);
 }
 
+// stop() with a file still open on the mount (a process that outlived PostgreSQL): the plain
+// unmount fails (busy), and stop() forces it instead of waiting for the loop forever.
+BOOST_AUTO_TEST_CASE(stop_with_a_file_open, * boost::unit_test::timeout(60)) {
+  TmpDir tmp;
+  auto   backing = tmp() / "backing";
+  auto   mount   = tmp() / "mount";
+  std::filesystem::create_directory(backing);
+  std::filesystem::create_directory(mount);
+  std::ofstream(backing / "f") << "x";
+
+  Fuse fuse(mount, std::make_unique<FuseOps>(backing));
+  BOOST_REQUIRE(fuse.start());
+  int fd = ::open((mount / "f").c_str(), O_RDONLY);
+  BOOST_REQUIRE(fd != -1);
+
+  auto t0 = std::chrono::steady_clock::now();
+  fuse.stop();
+  BOOST_CHECK(!fuse.is_mounted());
+  BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(30));
+  ::close(fd);
+
+  struct stat st_mp{}, st_parent{};
+  BOOST_REQUIRE_EQUAL(stat(mount.c_str(), &st_mp), 0);
+  BOOST_REQUIRE_EQUAL(stat(tmp().c_str(), &st_parent), 0);
+  BOOST_CHECK_EQUAL(st_mp.st_dev, st_parent.st_dev);
+}
+
 BOOST_AUTO_TEST_CASE(destructor_unmounts, * boost::unit_test::timeout(60)) {
   TmpDir tmp;
   auto   backing = tmp() / "backing";

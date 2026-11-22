@@ -71,16 +71,8 @@ class Node : public std::enable_shared_from_this<Node> {
   // (with FUSE unmounted), and start PostgreSQL again as a standby.
   Result<void> restart_as_standby();
 
-  // The end LSN of the backup this node restored (node<N>/backup_end), {} if none.
-  LogSeqNumber backup_end() const;
-
-  // The end up to which rebuild_pg_wal keeps raft/wal's WAL: the applied wal_end, the restored
-  // backup's end (rounded up to its segment's end), and, at a start, where PostgreSQL's control
-  // file says its replay must go (|control|: its last checkpoint and minimum recovery point).
-  LogSeqNumber rebuild_end(std::map<string, string> const& control = {}) const;
-
-  // Rebuild pg/pg_wal from raft/wal (FUSE unmounted, PostgreSQL stopped).
-  Result<void> rebuild(std::map<string, string> const& control = {});
+  // pg/pg_wal rebuilt from raft/wal (rebuild_pg_wal), with PostgreSQL stopped and FUSE unmounted.
+  Result<void> rebuild();
 
   // node<N>/running: present from start() until a shutdown() that stopped PostgreSQL cleanly. Found
   // at a start, the previous run ended otherwise (a crash, a kill, a power loss, a PostgreSQL that

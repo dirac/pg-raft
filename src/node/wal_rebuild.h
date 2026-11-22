@@ -2,25 +2,25 @@
 
 #include "src/base/base.h"
 
-// Demotion (docs/node.md §3.3): before a deposed primary restarts as a standby, its pg_wal must
-// hold only committed WAL, or the standby would replay WAL that the cluster never committed.
-// raft/wal holds the replicated WAL, so pg_wal is rebuilt from it:
+// Demotion (docs/node.md §3.3), and a start after an unclean end: before PostgreSQL starts as a
+// standby, its pg_wal must hold only committed WAL, or the standby would replay WAL that the
+// cluster never committed. raft/wal holds committed WAL only (each node writes an entry's WAL bytes
+// there when it applies the entry), so pg_wal is rebuilt from it:
 //
+//  - a segment or history file in raft/wal gets raft's copy; the segment holding its timeline's
+//    start point gets the bytes before that point from the ancestor timelines that own them
+//    (raft's copies of their segments, else PostgreSQL's own copy): PostgreSQL copies them in
+//    through an xlogtemp file on promotion, which FUSE doesn't replicate;
 //  - a segment or history file not in raft/wal is deleted (the deposed primary's uncommitted WAL,
-//    or a timeline its failed promotion started);
-//  - a segment on a later timeline than |end| is deleted, one on an earlier timeline gets raft's
-//    copy;
-//  - on |end|'s timeline, a segment wholly before |end| gets raft's copy, the segment holding |end|
-//    gets raft's copy with everything from |end| on zeroed (raft/wal may hold uncommitted bytes
-//    past it: the leader copies bytes in before they commit), and a later segment is deleted;
+//    or a timeline its failed promotion started), except a segment older than every segment
+//    raft/wal holds, on a timeline raft knows: history raft has compacted away (a restored
+//    backup's WAL, which its standby replays from the backup's redo point);
 //  - unlinked (.X), .partial and xlogtemp.* files are deleted; directories (archive_status,
 //    summaries) and other files are kept.
 //
-// |end| is the end of the committed WAL: the larger of RaftState::wal_end and the end of the
-// backup the node restored, rounded up to its segment's end (its WAL is committed by definition
-// and is in raft/wal too; pg_backup_stop ends that segment with an XLOG_SWITCH record past the
-// backup's End-LSN, which must not be zeroed).
+// Nothing is cut at an "end": the applied state a node starts with is its last checkpoint's, behind
+// what raft/wal holds, and cutting there dropped committed segments of a newer timeline (the
+// standby then replayed the old timeline's partial last record and PANICked).
 // PostgreSQL must not be running, and pg_wal must not be mounted (WalFuseOps caches mmaps by LSN).
 Result<void> rebuild_pg_wal(std::filesystem::path const& pg_wal,
-                            std::filesystem::path const& raft_wal,
-                            LogSeqNumber                 end);
+                            std::filesystem::path const& raft_wal);

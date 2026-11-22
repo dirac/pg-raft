@@ -10,5 +10,8 @@
 
 uint32_t crc32c(uint32_t crc, void const* data, size_t size);
 
+/// Whether crc32c() runs on the CPU's instructions.
+bool crc32c_hardware();
+
 /// The same, always on the table (what a CPU without the instructions runs; for tests).
 uint32_t crc32c_portable(uint32_t crc, void const* data, size_t size);

@@ -43,6 +43,17 @@ BOOST_AUTO_TEST_CASE(log_seq_number_rejects) {
 
 // crc32c(): the standard check value, and incremental use.
 
+// The instructions are used where the CPU has them (a static initializer once saw an SSE4.2 CPU
+// as without, and every ledger record's crc went through the table).
+BOOST_AUTO_TEST_CASE(crc32c_on_the_instructions) {
+#if defined(__x86_64__)
+  __builtin_cpu_init();
+  BOOST_TEST(crc32c_hardware() == __builtin_cpu_supports("sse4.2"));
+#elif defined(__aarch64__) && defined(__APPLE__)
+  BOOST_TEST(crc32c_hardware());
+#endif
+}
+
 BOOST_AUTO_TEST_CASE(crc32c_values) {
   BOOST_TEST(crc32c(0, "123456789", 9) == 0xE3069283U);
   BOOST_TEST(crc32c_portable(0, "123456789", 9) == 0xE3069283U);

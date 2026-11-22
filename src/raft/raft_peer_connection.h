@@ -39,6 +39,11 @@ struct PeerConnectionApi {
                                RaftTerm                       current_term,
                                RequestElectionResponse        response) = 0;
 
+  virtual void handle_response(shared_ptr<RaftPeerConnection> conn,
+                               RaftTerm                       request_term,
+                               RaftTerm                       current_term,
+                               RequestPreVoteResponse         response) = 0;
+
   virtual std::shared_lock<std::shared_mutex> usage_lock() const = 0;
 
   /// A copy of the applied state. It must not take the server lock: a caller may hold the
@@ -117,6 +122,9 @@ class RaftPeerConnection : public Connection {
 
   /// If the node is a candidate.
   void send_request_vote(Ledger const& ledger, RaftTerm candidate_term);
+
+  /// PreVote for |proposed_term| (the sender's term + 1; the request's term field carries it).
+  void send_request_pre_vote(Ledger const& ledger, RaftTerm proposed_term);
 
   /// Request election from the node
   void send_request_election(Ledger const& ledger, RaftTerm leadership_term);
@@ -253,7 +261,7 @@ class RaftPeerConnection : public Connection {
   unsigned  last_send_{0};  // When (epoch_msec()) append entries or install snapshot was sent.
 
   // The diff between LSB and MSB is the number of outstanding calls of each kind.
-  std::array<std::atomic_uint64_t, 5> sequence_{};
+  std::array<std::atomic_uint64_t, std::variant_size_v<decltype(RaftRequest::request)>> sequence_{};
 
   // The latest AppendEntries' send (steady_clock ns), and the moving average of the round trips
   // (from that send to a reply).

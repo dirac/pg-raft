@@ -10,7 +10,7 @@
 class WalFuseSegment {
  public:
   WalFuseSegment(WalTracker& tracker, shared_ptr<WalSegment> map)
-      : tracker_(tracker), map_(map), next_(0), synced_(0), state_() {}
+      : tracker_(tracker), map_(map), next_(0), synced_(0), state_(map_->lsn().lsn) {}
 
   ~WalFuseSegment();
 
@@ -29,6 +29,10 @@ class WalFuseSegment {
 
   struct WalState {
     WalState() {}
+    /// |segment_start|: the segment's start LSN. A page header then counts only if its
+    /// xlp_pageaddr is the page's own LSN: a header only partly stored (its magic from one write,
+    /// the rest not yet) is the end of the walk, not a page with no records.
+    explicit WalState(uint64_t segment_start) : segment_start_(segment_start) {}
 
     std::tuple<off_t, size_t, bool> update(unsigned char const* ptr, size_t size, off_t offset);
 
@@ -36,8 +40,9 @@ class WalFuseSegment {
     size_t rsize() const { return rsize_; }
 
    private:
-    off_t  curr_{0};   /// The amount already parsed.
-    size_t rsize_{0};  /// The size that is remaining.
+    off_t                   curr_{0};   /// The amount already parsed.
+    size_t                  rsize_{0};  /// The size that is remaining.
+    std::optional<uint64_t> segment_start_;
   };
 
   /// Update the memory region.

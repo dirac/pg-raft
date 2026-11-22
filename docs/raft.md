@@ -151,9 +151,10 @@ gets a `RaftClientConnection` (§6). `PeerConnectionMgr` reconnects closed slots
 - **Candidate.** It persists `term + 1`, votes for itself, and sends `RequestVote{last_entry}`.
 - **Voters** refuse a stale term, refuse when they can't vote yet (`!can_vote`), and refuse a
   candidate whose log is older. Otherwise they grant one vote per term, persisted.
-- **Two-phase leadership.** A candidate with a majority sends AppendEntries, and only becomes
-  `kLeader` once `commit_idx == last_entry`. Until then it does not `exec()` anything, so the new
-  primary has every WAL byte that a previous primary acknowledged.
+- **Two-phase leadership.** A candidate with a majority appends a tick entry of its term at once,
+  sends AppendEntries, and only becomes `kLeader` once `commit_idx == last_entry` (that tick
+  committed). Until then it does not `exec()` anything, so the new primary has every WAL byte that
+  a previous primary acknowledged.
 - **Step-down** (`stepdown()`, also called on shutdown): the leader forces a tick, sends
   `RequestElection` to the first peer that has the tick, and that peer becomes a candidate at once.
   If no peer takes over within 32 election timeouts, the step-down is called off.
@@ -182,7 +183,10 @@ gets a `RaftClientConnection` (§6). `PeerConnectionMgr` reconnects closed slots
 - **Leader on response:**
   - Success: `in_sync`, then the match index. The commit index is the highest index held by a
     majority of all the nodes (`MatchIndexes`, quorum `n/2 + 1`), the leader counted at its
-    ledger's durable index (the ledger's sync thread updates it too). Then apply.
+    ledger's durable index (the ledger's sync thread updates it too), and only if the entry there
+    is of the leader's term (Raft §5.4.2: an earlier term's entry on a majority can still be
+    overwritten by a candidate whose last entry has a newer term; it commits with the first entry
+    of the leader's own term after it, hence the tick at election). Then apply.
   - Failure: walk back up to `min(n, 64)` entries looking for a match. If there is no term to
     compare (`term` missing) or the entry has been compacted, send InstallSnapshot.
 - **Ticks:** the leader appends a tick entry if it has appended nothing for `tick_seconds`.

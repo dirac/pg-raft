@@ -75,6 +75,22 @@ std::optional<string> query(uint16_t                  port,
   return out;
 }
 
+/// A statement on a fresh connection: whether it succeeded (CHECKPOINT returns no rows).
+bool execute(uint16_t port, char const* sql, std::chrono::milliseconds timeout) {
+  auto conn = PgClient::connect(port);
+  if (!conn)
+    return false;
+  bool done = false;
+  if (auto stmt = (*conn)->prepare(sql); stmt) {
+    auto p = make_shared<std::promise<Result<Rows>>>();
+    auto f = p->get_future();
+    (*conn)->async_exec(*stmt, [p](Result<Rows> r) { p->set_value(std::move(r)); });
+    done = f.wait_for(timeout) == std::future_status::ready && f.get().has_value();
+  }
+  (*conn)->close();
+  return done;
+}
+
 std::optional<uint64_t> parse_lsn(std::optional<string> const& s) {
   unsigned hi = 0, lo = 0;
   if (!s || sscanf(s->c_str(), "%X/%X", &hi, &lo) != 2)
@@ -102,7 +118,25 @@ constexpr char const* kPollSql =
     "SELECT pg_is_in_recovery()::text, "
     "CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_current_wal_flush_lsn()::text END, "
     "CASE WHEN pg_is_in_recovery() THEN NULL ELSE pg_walfile_name(pg_current_wal_flush_lsn()) END, "
-    "CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::text END";
+    "CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::text END, "
+    "(SELECT redo_lsn FROM pg_control_checkpoint())::text";
+
+/// The control file's redo location: where PostgreSQL's replay starts after a crash.
+std::optional<uint64_t> redo_location(std::map<string, string> const& control) {
+  if (auto pos = control.find("Latest checkpoint's REDO location"); pos != control.end())
+    return parse_lsn(pos->second);
+  return std::nullopt;
+}
+
+/// Whether a WAL segment holding |lsn| (on any timeline) is in |dir|.
+bool has_segment(fs::path const& dir, uint64_t lsn) {
+  std::error_code ec;
+  for (auto const& entry : fs::directory_iterator(dir, ec))
+    if (auto seg = log_seq_number(entry.path().filename().string().c_str());
+        seg && seg->lsn == lsn - lsn % kWalSegmentSize)
+      return true;
+  return false;
+}
 
 }  // namespace
 
@@ -175,22 +209,47 @@ Result<void> Node::start() {
   // Raft first: it knows whether the node needs a backup (an InstallSnapshot replaced its log).
   auto endpoint =
       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), config_.servers.at(INT(id_)).ha_port);
+  // The acceptor binds here (it throws on an error, e.g. the port in use): an error, not an abort.
+  std::optional<asio::ip::tcp::acceptor> acceptor;
+  try {
+    acceptor.emplace(io_context(), endpoint);
+  } catch (boost::system::system_error const& e) {
+    return elog(system_error_code(e.code().value()), "Unable to listen on raft port {}", endpoint.port());
+  }
   // The disk syncs on the commit path (config.h): off unless the config (or the caller) asks.
   auto raft_options          = options_.raft;
   raft_options.leader_sync   = raft_options.leader_sync || config_.leader_sync;
   raft_options.follower_sync = raft_options.follower_sync || config_.follower_sync;
+  // Compaction waits for keep_from (the latest backup's segment, set below and by retention()).
+  raft_options.compact_without_keep_from = false;
+  // A node whose standby is more than 4 segments behind leaves the elections to the others.
+  if (raft_options.max_standby_lag == 0)
+    raft_options.max_standby_lag = 4 * kWalSegmentSize;
+  // raft/wal's WAL from the local PostgreSQL's redo point on is kept from the first moment (the
+  // deletion thread runs as soon as raft starts; a restarting standby replays from there).
+  if (fs::exists(data_dir_ / "PG_VERSION"))
+    if (auto redo = redo_location(controldata(pg_bin(config_), data_dir_)); redo && *redo != 0)
+      raft_options.wal_gc_floor = *redo;
   raft_options.ledger_file_size = options_.ledger_file_size_for_test != 0
                                       ? options_.ledger_file_size_for_test
                                       : config_.ledger_file_size;
   raft_                      = Server::create<RaftServer>(id_,
-                                     asio::ip::tcp::acceptor(io_context(), endpoint),
+                                     std::move(*acceptor),
                                      config_,
                                      raft_dir_,
                                      raft_wal_dir_,
                                      raft_options,
                                      make_shared<Observer>(weak_from_this()));
+  // The latest backup's WAL is kept from the start (compaction waits for it).
+  if (auto latest = store_->latest(); latest && *latest)
+    raft_->set_wal_keep_from(keep_from(**latest));
   sync_rep_ = config_.commit_wait == "sync_rep";
   tracker_  = make_shared<NodeWalTracker>(raft_, config_.write_op_bytes, !sync_rep_);
+
+  // A previous run killed with its FUSE mount in place leaves a dead mount on data/pg_wal: a
+  // restore or rebuild below would fail on it. (After the raft port's bind: a second instance of
+  // this node fails there, before it could unmount the running one's.)
+  Fuse::remove_stale_mount(data_dir_ / "pg_wal");
 
   bool restored = false;
   if (!fs::exists(data_dir_ / "PG_VERSION") || raft_->applied_state().needs_backup) {
@@ -202,12 +261,37 @@ Result<void> Node::start() {
     restored = true;
   }
 
+  // A standby whose redo point (its last restartpoint) is before raft's first segment can't
+  // recover: that WAL was compacted away. The latest backup is past it (compaction keeps its WAL).
+  if (!restored && fs::exists(data_dir_ / "PG_VERSION")) {
+    auto const control = controldata(pg_bin(config_), data_dir_);
+    auto const redo    = redo_location(control);
+    auto const first   = raft_->applied_state().first_segment;
+    if (redo && *redo != 0)
+      raft_->set_wal_gc_floor(*redo);
+    // (A restored backup's redo point is usually before it: its WAL came with the backup, into
+    // pg/pg_wal. Behind means that WAL is nowhere.)
+    if (redo && first.lsn != 0 && *redo < first.lsn && !has_segment(pg_wal_dir_, *redo) &&
+        !has_segment(raft_wal_dir_, *redo)) {
+      log(WARN,
+          "Node {}: PostgreSQL's redo point {:X} is before the first segment {}, and its WAL is "
+          "gone: restoring the latest backup",
+          id_,
+          *redo,
+          first);
+      raft_->set_needs_backup(true);
+      if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
+        return r;
+      restored = true;
+    }
+  }
+
   // After an unclean end of the previous run, pg/pg_wal can hold WAL that never committed (a
   // primary's write whose fsync failed or never completed): rebuild it from raft/wal, which holds
   // committed WAL only, before PostgreSQL starts on it. (A restore has just replaced it.)
   if (fs::exists(running_marker()) && !restored && fs::exists(data_dir_ / "PG_VERSION")) {
     log(WARN, "Node {}: the previous run did not end cleanly: rebuilding pg/pg_wal", id_);
-    if (auto r = rebuild(controldata(pg_bin(config_), data_dir_)); !r)
+    if (auto r = rebuild(); !r)
       return r;
   }
   if (auto r = write_marker(running_marker()); !r)
@@ -266,8 +350,25 @@ Result<void> Node::start() {
   if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
     return r;
   tracker_->set_mode(NodeWalTracker::Mode::kFollower);
-  if (!pg_->start() || !pg_->wait_ready(pg_port(), 60))
-    return elog(system_error_code(EIO), "PostgreSQL did not start on port {}", pg_port());
+  // A standby after a crash replays from its last restartpoint before it accepts connections:
+  // wait as long as PostgreSQL runs (and recovers), not a fixed time.
+  // (At most 20 minutes: one that waits for WAL nobody has any more never gets there.)
+  auto started = pg_->start() && pg_->wait_ready(pg_port(), 60);
+  for (int i = 0; i < 19 && !started && pg_->is_running() && !pg_->exited(); ++i) {
+    log(INFO, "Node {}: PostgreSQL is still starting (recovery)", id_);
+    started = pg_->wait_ready(pg_port(), 60);
+  }
+  if (!started) {
+    // A standby that can't recover from its data directory and pg_wal (e.g. WAL it can't replay):
+    // the node would fail every start the same way. Restore the latest backup once instead; the
+    // standby then streams the rest from raft/wal.
+    if (restored)
+      return elog(system_error_code(EIO), "PostgreSQL did not start on port {}", pg_port());
+    log(ERROR, "Node {}: PostgreSQL did not start on port {}: restoring the latest backup", id_, pg_port());
+    raft_->set_needs_backup(true);
+    if (auto r = restore_and_restart(); !r)
+      return r;
+  }
 
   started_.store(true);
   transition_thread_ = std::thread([this] { transitions(); });
@@ -313,9 +414,9 @@ Result<void> Node::restore_latest_backup() {
       return elog(ec, "Unable to move {} into {}", entry.path(), pg_wal_dir_);
   }
 
-  // Its WAL is committed by definition: the rebuild of a demotion keeps it (backup_end()).
-  std::ofstream(base_dir_ / "backup_end")
-      << (*latest)->lsn.timeline << ' ' << (*latest)->lsn.lsn << '\n';
+  // Its replay starts at the backup's redo point: keep raft/wal's WAL from there on.
+  if (auto redo = redo_location(controldata(pg_bin(config_), data_dir_)); redo && *redo != 0)
+    raft_->set_wal_gc_floor(*redo);
 
   if (!raft_->restored_backup((*latest)->lsn))
     return elog(system_error_code(EAGAIN), "Node {}: the restored backup is behind the log", id_);
@@ -432,8 +533,10 @@ Result<void> Node::restore_and_restart() {
 
   pg_->kill();
   pg_->stop(PgInstance::StopMode::Immediate, 5000);  // reaps it, and releases its IPC
-  fuse_->stop();
-  fuse_.reset();
+  if (fuse_) {  // (none after a failed attempt)
+    fuse_->stop();
+    fuse_.reset();
+  }
 
   if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
     return r;  // (behind the log: restart anyway, needs_backup stays set and is retried)
@@ -444,9 +547,9 @@ Result<void> Node::restore_and_restart() {
   if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
     return r;
   tracker_->set_mode(NodeWalTracker::Mode::kFollower);
-  needs_restart_.store(false);
   if (!pg_->start() || !pg_->wait_ready(pg_port(), 120))
     return elog(system_error_code(EIO), "PostgreSQL did not restart on port {}", pg_port());
+  needs_restart_.store(false);
   log(INFO, "Node {}: restored and restarted as a standby", id_);
   return ok();
 }
@@ -529,9 +632,13 @@ void Node::promote(RaftTerm term) {
   // 1. The standby receives everything in raft/wal: every byte a previous primary acknowledged.
   if (wal_end.lsn > 0) {
     advance_senders(wal_end);
-    auto lk      = std::unique_lock{standby_mtx_};
-    auto reached = standby_cv_.wait_for(
-        lk, timeout, [&] { return standby_flushed_ >= wal_end.lsn || deposed(); });
+    // In slices: a deposition doesn't notify standby_cv_ (only the standby's reports do).
+    auto lk       = std::unique_lock{standby_mtx_};
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto reached  = false;
+    while (!(reached = standby_flushed_ >= wal_end.lsn) && !deposed() &&
+           std::chrono::steady_clock::now() < deadline)
+      standby_cv_.wait_for(lk, 200ms);
     if (!reached || deposed()) {
       lk.unlock();
       log(ERROR, "Node {}: the standby did not reach {}: stepping down", id_, wal_end);
@@ -541,30 +648,65 @@ void Node::promote(RaftTerm term) {
     }
   }
 
-  // 2. Leader mode before PostgreSQL writes anything, then promote.
+  // 2. PostgreSQL picks its new timeline as one past the newest history file it sees: every
+  //    committed history file goes into its pg_wal first (a standby learns of a timeline only by
+  //    streaming into it). Otherwise it may pick a timeline another primary already used, and two
+  //    primaries' WAL would share a timeline.
+  auto const committed_tli = latest_history_timeline(raft_wal_dir_).value_or(1U);
+  for (uint32_t t = 2; t <= committed_tli; ++t)
+    if (auto content = read_history_file(raft_wal_dir_, t), have = read_history_file(pg_wal_dir_, t);
+        content && (!have || *have != *content))
+      if (auto r = write_history_file(pg_wal_dir_, t, *content); !r)
+        log(ERROR, "Node {}: unable to install the history of timeline {}", id_, t);
+
+  // 3. Leader mode before PostgreSQL writes anything, then promote.
   tracker_->set_mode(NodeWalTracker::Mode::kLeader);
   pg_->promote();
   if (!wait_until(
           timeout,
           [this] { return query(pg_port(), "SELECT pg_is_in_recovery()::text") == "false"; },
           deposed)) {
-    log(ERROR, "Node {}: PostgreSQL did not leave recovery", id_);
+    // A leader that doesn't serve leaves the cluster without a primary: hand the leadership over.
+    log(ERROR, "Node {}: PostgreSQL did not leave recovery: stepping down", id_);
+    if (!deposed())
+      raft_->stepdown();
     return;
   }
 
-  // 3. Its new timeline, published by the FUSE hook as a TimelineOp, must be committed (the
+  // 4. Its new timeline, published by the FUSE hook as a TimelineOp, must be committed (the
   //    history file is written into raft/wal when it is applied) before clients reach it.
   auto file = query(pg_port(), "SELECT pg_walfile_name(pg_current_wal_lsn())");
   auto tli  = file && file->size() >= 8 ? std::stoul(file->substr(0, 8), nullptr, 16) : 0UL;
+  if (tli <= committed_tli) {
+    // A timeline in use already: it must not serve (its WAL would mix with the other's).
+    log(ERROR,
+        "Node {}: PostgreSQL picked timeline {}, not past the committed {}: stepping down",
+        id_,
+        tli,
+        committed_tli);
+    if (!deposed())
+      raft_->stepdown();
+    return;
+  }
   if (!wait_until(
           timeout,
           [this, tli] { return latest_history_timeline(raft_wal_dir_).value_or(1U) >= tli; },
           deposed)) {
-    log(ERROR, "Node {}: timeline {} was not committed", id_, tli);
+    log(ERROR, "Node {}: timeline {} was not committed: stepping down", id_, tli);
+    if (!deposed())
+      raft_->stepdown();
     return;
   }
 
-  // 4. commit_wait = "sync_rep": the synchronous standby the commits wait for, before clients come.
+  // 5. A checkpoint before clients come. The control file keeps the standby's minimum recovery
+  //    point until the first checkpoint after the promotion (PostgreSQL clears it there: "crash
+  //    recovery should always recover to the end of WAL"), and the node restarts a crashed primary
+  //    as a standby, which trusts that point: it then declares consistency there, before a later
+  //    truncation it would have replayed, and PANICs on "WAL contains references to invalid pages".
+  if (!execute(pg_port(), "CHECKPOINT", timeout))
+    log(WARN, "Node {}: the checkpoint after the promotion did not complete", id_);
+
+  // 6. commit_wait = "sync_rep": the synchronous standby the commits wait for, before clients come.
   if (sync_rep_) {
     auto a = make_shared<SyncAcker>(pg_port());
     if (auto r = a->start(); !r) {
@@ -588,73 +730,22 @@ void Node::demote() {
   primary_.store(false);
   raft_->set_serving(false);
   if (needs_restart_.load())
-    if (auto r = restart_as_standby(); !r)
+    if (auto r = restart_as_standby(); !r) {
+      // As at a start: a standby that doesn't come up from its data directory gets the latest
+      // backup. (Still failing: the backup thread asks again.)
       log(ERROR,
-          "Node {}: unable to restart PostgreSQL as a standby: {}",
+          "Node {}: unable to restart PostgreSQL as a standby ({}): restoring the latest backup",
           id_,
           r.error().message());
+      raft_->set_needs_backup(true);
+      if (auto r2 = restore_and_restart(); !r2)
+        log(ERROR, "Node {}: the restore failed: {}", id_, r2.error().message());
+    }
 }
 
-LogSeqNumber Node::rebuild_end(std::map<string, string> const& control) const {
-  auto end  = raft_->applied_state().wal_end;
-  auto upto = [&end](LogSeqNumber lsn) {
-    if (end < lsn)
-      end = lsn;
-  };
-
-  // The backup's WAL counts up to the end of its last segment, not its End-LSN: pg_backup_stop
-  // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
-  // to the next segment boundary. Zeroing from the End-LSN would remove that record, and a
-  // standby promoted from this pg_wal would fork its timeline before where the others already are.
-  auto backup = backup_end();
-  if (backup.lsn % kWalSegmentSize != 0)
-    backup.lsn += kWalSegmentSize - backup.lsn % kWalSegmentSize;
-  upto(backup);
-
-  // At a start: the applied state is the last checkpoint's (raft re-applies the entries after
-  // it as they commit), which can be behind where PostgreSQL's replay must start or reach. Those
-  // positions are committed (a primary writes its checkpoint record, fsyncs it through raft, then
-  // updates its control file; a standby replays committed WAL only), and raft/wal holds committed
-  // bytes only (written on apply), so keeping its bytes up to them can't bring back uncommitted
-  // WAL. The checkpoint record's end is not in the control file: up to two pages after its start.
-  auto field = [&control](char const* key) -> std::optional<uint64_t> {
-    if (auto pos = control.find(key); pos != control.end())
-      return parse_lsn(pos->second);
-    return std::nullopt;
-  };
-  auto tli = [&control](char const* key) -> std::optional<uint32_t> {
-    if (auto pos = control.find(key); pos != control.end())
-      try {
-        return static_cast<uint32_t>(std::stoul(pos->second));
-      } catch (std::exception const&) {
-      }
-    return std::nullopt;
-  };
-  if (auto t = tli("Latest checkpoint's TimeLineID"); t) {
-    if (auto at = field("Latest checkpoint location"); at && *at != 0)
-      upto({.timeline = *t, .lsn = *at - *at % kWalBlockSize + 2U * kWalBlockSize});
-    if (auto redo = field("Latest checkpoint's REDO location"); redo && *redo != 0)
-      upto({.timeline = *t, .lsn = *redo});
-  }
-  if (auto t = tli("Min recovery ending loc's timeline"); t && *t != 0)
-    if (auto min = field("Minimum recovery ending location"); min && *min != 0)
-      upto({.timeline = *t, .lsn = *min});
-  return end;
-}
-
-Result<void> Node::rebuild(std::map<string, string> const& control) {
-  auto const end = rebuild_end(control);
-  log(INFO, "Node {}: rebuilding pg/pg_wal from raft/wal up to {}", id_, end);
-  return rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_, end);
-}
-
-LogSeqNumber Node::backup_end() const {
-  std::ifstream in(base_dir_ / "backup_end");
-  uint32_t      timeline = 0;
-  uint64_t      lsn      = 0;
-  if (!(in >> timeline >> lsn))
-    return {};
-  return {.timeline = timeline, .lsn = lsn};
+Result<void> Node::rebuild() {
+  log(INFO, "Node {}: rebuilding pg/pg_wal from raft/wal", id_);
+  return rebuild_pg_wal(pg_wal_dir_, raft_wal_dir_);
 }
 
 Result<void> Node::restart_as_standby() {
@@ -663,15 +754,35 @@ Result<void> Node::restart_as_standby() {
 
   // Rebuild pg/pg_wal with FUSE unmounted: WalFuseOps caches mmaps by LSN, and a cached mapping of
   // a replaced file must not be reused.
-  fuse_->stop();
-  fuse_.reset();
+  if (fuse_) {  // (none after a failed attempt)
+    fuse_->stop();
+    fuse_.reset();
+  }
 
   // The backup's WAL counts up to the end of its last segment, not its End-LSN: pg_backup_stop
   // writes an XLOG_SWITCH record there, which ends the segment, so every restored standby replays
   // to the next segment boundary. Zeroing from the End-LSN would remove that record, and a
   // standby promoted from this pg_wal would fork its timeline before where the others already are.
-  if (auto r = rebuild(); !r)
+  // Its redo point before raft's first segment: that WAL is gone, restore the latest backup.
+  auto const control = controldata(pg_bin(config_), data_dir_);
+  auto const redo    = redo_location(control);
+  auto const first   = raft_->applied_state().first_segment;
+  if (redo && *redo != 0)
+    raft_->set_wal_gc_floor(*redo);
+  if (redo && first.lsn != 0 && *redo < first.lsn && !has_segment(pg_wal_dir_, *redo) &&
+      !has_segment(raft_wal_dir_, *redo)) {
+    log(WARN,
+        "Node {}: PostgreSQL's redo point {:X} is before the first segment {}, and its WAL is gone: "
+        "restoring the latest backup",
+        id_,
+        *redo,
+        first);
+    raft_->set_needs_backup(true);
+    if (auto r = restore_latest_backup(); !r && r.error() != system_error_code(EAGAIN))
+      return r;
+  } else if (auto r = rebuild(); !r) {
     return r;
+  }
 
   fuse_ = make_unique<Fuse>(data_dir_ / "pg_wal", make_unique<WalFuseOps>(*tracker_, pg_wal_dir_));
   if (!fuse_->start())
@@ -680,9 +791,10 @@ Result<void> Node::restart_as_standby() {
   if (auto r = write_standby_config(wal_sender_server_->bound_port()); !r)
     return r;
   tracker_->set_mode(NodeWalTracker::Mode::kFollower);
-  needs_restart_.store(false);
+  // Cleared only once it runs: a failed restart must not look like a standby to a promotion.
   if (!pg_->start() || !pg_->wait_ready(pg_port(), 60))
     return elog(system_error_code(EIO), "PostgreSQL did not restart on port {}", pg_port());
+  needs_restart_.store(false);
 
   log(INFO, "Node {}: PostgreSQL restarted as a standby", id_);
   return ok();
@@ -702,10 +814,39 @@ void Node::poll() {
   while (!stopping()) {
     std::this_thread::sleep_for(options_.poll_interval);
 
+    // PostgreSQL exited on its own (a standby's PANIC, a crash): nothing else restarts it.
+    if (started_.load() && !needs_restart_.load() && pg_->exited()) {
+      if (raft_->is_leader() || primary_.load()) {
+        log(ERROR, "Node {}: PostgreSQL exited on the primary: stepping down", id_);
+        tracker_->set_mode(NodeWalTracker::Mode::kFenced);
+        needs_restart_.store(true);
+        raft_->stepdown();
+      } else {
+        log(ERROR, "Node {}: PostgreSQL exited: restarting it as a standby", id_);
+        needs_restart_.store(true);
+        {
+          auto lk       = std::unique_lock{role_mtx_};
+          role_changed_ = true;
+        }
+        role_cv_.notify_all();
+      }
+      if (conn) {
+        conn->close();
+        conn.reset();
+      }
+      continue;
+    }
+
+    // PostgreSQL unreachable (killed, restarting, recovering): its last status is no longer true.
+    // (A stale standby position would let the lag check of the elections pass.)
+    auto const unreachable = [this] { raft_->set_pg_status(std::nullopt, std::nullopt); };
+
     if (!conn) {
       auto c = PgClient::connect(pg_port());
-      if (!c)
+      if (!c) {
+        unreachable();
         continue;
+      }
       auto s = (*c)->prepare(kPollSql);
       if (!s) {
         (*c)->close();
@@ -721,16 +862,20 @@ void Node::poll() {
     if (f.wait_for(2s) != std::future_status::ready) {
       conn->close();
       conn.reset();
+      unreachable();
       continue;
     }
     auto rows = f.get();
-    if (!rows || rows->empty() || rows->at(0).size() < 4) {
+    if (!rows || rows->empty() || rows->at(0).size() < 5) {
       conn->close();
       conn.reset();
+      unreachable();
       continue;
     }
 
     auto const& row = rows->at(0);
+    if (auto redo = parse_lsn(row.at(4)); redo && *redo != 0)
+      raft_->set_wal_gc_floor(*redo);
     if (row.at(0) == "false") {
       auto lsn  = parse_lsn(row.at(1));
       auto file = row.at(2);
@@ -758,6 +903,15 @@ void Node::backups() {
   while (!wait_stopping(options_.backup_check_interval)) {
     maybe_backup();
     retention();
+
+    // A restart as a standby that failed (PostgreSQL still down, not the leader): ask again.
+    if (needs_restart_.load() && !raft_->is_leader()) {
+      {
+        auto lk       = std::unique_lock{role_mtx_};
+        role_changed_ = true;
+      }
+      role_cv_.notify_all();
+    }
 
     // A restore that couldn't be done yet (no backup recent enough): ask again.
     if (raft_->applied_state().needs_backup) {

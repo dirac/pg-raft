@@ -25,14 +25,21 @@ Result<LogSeqNumber> backup_end_lsn(fs::path const& backup_dir) {
     if (ranges.empty())
       return elog(system_error_code(EBADMSG), "No WAL-Ranges in {}", path);
 
-    auto const& last     = ranges.back().as_object();
-    auto        timeline = last.at("Timeline").to_number<uint32_t>();
-    auto        end      = string{last.at("End-LSN").as_string()};
-
-    unsigned hi = 0, lo = 0;
-    if (sscanf(end.c_str(), "%X/%X", &hi, &lo) != 2)
-      return elog(system_error_code(EBADMSG), "Bad End-LSN {} in {}", end, path);
-    return LogSeqNumber{.timeline = timeline, .lsn = (uint64_t{hi} << 32U) | lo};
+    // The range that ends last: PostgreSQL lists them newest timeline first, so a backup that
+    // spans timelines (a standby's) has its oldest one last.
+    std::optional<LogSeqNumber> best;
+    for (auto const& r : ranges) {
+      auto const& range    = r.as_object();
+      auto        timeline = range.at("Timeline").to_number<uint32_t>();
+      auto        end      = string{range.at("End-LSN").as_string()};
+      unsigned    hi = 0, lo = 0;
+      if (sscanf(end.c_str(), "%X/%X", &hi, &lo) != 2)
+        return elog(system_error_code(EBADMSG), "Bad End-LSN {} in {}", end, path);
+      auto const lsn = LogSeqNumber{.timeline = timeline, .lsn = (uint64_t{hi} << 32U) | lo};
+      if (!best || best->lsn < lsn.lsn || (best->lsn == lsn.lsn && best->timeline < lsn.timeline))
+        best = lsn;
+    }
+    return *best;
   } catch (std::exception const& e) {
     return elog(system_error_code(EBADMSG), "Unable to parse {}: {}", path, e.what());
   }

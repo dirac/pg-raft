@@ -1,0 +1,14 @@
+# Run output (fresh.sh, chaos.py)
+/config.toml
+/bin/
+/data/
+/backups/
+/logs/
+/old/
+/prof/
+/build.log
+/acked.txt
+/unknown.txt
+/next_id
+/proxy.pid
+__pycache__/

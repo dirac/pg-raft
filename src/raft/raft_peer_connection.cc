@@ -33,6 +33,18 @@ void RaftPeerConnection::send_request_vote(Ledger const& ledger, RaftTerm candid
                       });
 }
 
+void RaftPeerConnection::send_request_pre_vote(Ledger const& ledger, RaftTerm proposed_term) {
+  std::unique_lock<std::mutex> lk{mtx_};
+  return send_request(std::move(lk),
+                      RaftRequest{
+                          .term = proposed_term,
+                          .request =
+                              RequestPreVote{
+                                  .last_entry = ledger.last_entry(),
+                              },
+                      });
+}
+
 void RaftPeerConnection::send_request_election(Ledger const& ledger, RaftTerm leadership_term) {
   std::unique_lock<std::mutex> lk{mtx_};
   return send_request(std::move(lk),

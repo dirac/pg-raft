@@ -63,23 +63,21 @@ BOOST_AUTO_TEST_CASE(rebuild) {
   std::ofstream(pg / ("." + filename(seg(1, 0)))) << "x";
   fs::create_directories(pg / "archive_status");
 
-  // The committed WAL ends in timeline 2's segment 4, at offset 0x1000.
-  auto end = LogSeqNumber{.timeline = 2, .lsn = 4 * kWalSegmentSize + 0x1000};
-  BOOST_REQUIRE(rebuild_pg_wal(pg, raft, end).has_value());
+  BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
 
   // Earlier timeline, and before the end: raft's copy.
   BOOST_TEST((byte_at(pg, seg(1, 2), 100) == 'R'));
   BOOST_TEST((byte_at(pg, seg(1, 3), kWalSegmentSize - 1) == 'R'));
   BOOST_TEST((byte_at(pg, seg(2, 3), 100) == 'R'));
-  // The end's segment: raft's copy up to the end, zeros from it.
-  BOOST_TEST((byte_at(pg, seg(2, 4), 0x0FFF) == 'R'));
-  BOOST_TEST((byte_at(pg, seg(2, 4), 0x1000) == '\0'));
-  BOOST_TEST((byte_at(pg, seg(2, 4), kWalSegmentSize - 1) == '\0'));
+  // The last segment: raft's copy whole (raft/wal holds committed WAL only: nothing is cut).
+  BOOST_TEST((byte_at(pg, seg(2, 4), 0x1000) == 'R'));
+  BOOST_TEST((byte_at(pg, seg(2, 4), kWalSegmentSize - 1) == 'R'));
   BOOST_TEST(fs::file_size(pg / filename(seg(2, 4))) == kWalSegmentSize);
   // Never committed: gone.
   BOOST_TEST((!byte_at(pg, seg(2, 5), 0).has_value()));
   BOOST_TEST((!byte_at(pg, seg(3, 4), 0).has_value()));
-  BOOST_TEST((!byte_at(pg, seg(1, 1), 0).has_value()));
+  // Older than everything raft/wal holds (compacted history, e.g. a restored backup's): kept.
+  BOOST_TEST((byte_at(pg, seg(1, 1), 0) == 'P'));
   BOOST_TEST(!fs::exists(pg / "00000003.history"));
   // The committed history is raft's.
   std::ifstream h(pg / "00000002.history");
@@ -94,18 +92,116 @@ BOOST_AUTO_TEST_CASE(rebuild) {
   BOOST_TEST((byte_at(raft, seg(2, 4), kWalSegmentSize - 1) == 'R'));
 }
 
-// At bootstrap the committed end is the backup's end: its segment is kept up to there.
-BOOST_AUTO_TEST_CASE(backup_end) {
+// A newer timeline than the node's applied state knows of (its last checkpoint's, behind
+// raft/wal after a crash): its committed segments are kept (cutting them made the standby replay
+// the old timeline's partial last record, and PANIC).
+BOOST_AUTO_TEST_CASE(newer_timeline_kept) {
   TmpDir tmp;
   auto   pg   = tmp() / "pg_wal";
   auto   raft = tmp() / "raft_wal";
-  segment(raft, seg(1, 2), 'R');
+  segment(raft, seg(1, 2), 'A');
+  segment(raft, seg(2, 2), 'B');
+  std::ofstream(raft / "00000002.history") << "1\t0/2000000\tno recovery target specified\n";
   segment(pg, seg(1, 2), 'P');
-  segment(pg, seg(2, 2), 'P');  // the failed promotion's timeline 2
+  segment(pg, seg(2, 2), 'P');
+  BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
+  BOOST_TEST((byte_at(pg, seg(1, 2), 0) == 'A'));
+  BOOST_TEST((byte_at(pg, seg(2, 2), 0) == 'B'));
+}
 
-  BOOST_REQUIRE(
-      rebuild_pg_wal(pg, raft, {.timeline = 1, .lsn = 2 * kWalSegmentSize + 0x120}).has_value());
-  BOOST_TEST((byte_at(pg, seg(1, 2), 0x11F) == 'R'));
-  BOOST_TEST((byte_at(pg, seg(1, 2), 0x120) == '\0'));
-  BOOST_TEST((!byte_at(pg, seg(2, 2), 0).has_value()));
+// The segment holding a timeline's start point: raft's copy has zeros before it (PostgreSQL copies
+// the parent's bytes in through an xlogtemp file, which FUSE doesn't replicate). The rebuilt
+// segment gets them from raft's copy of the parent's segment, else from pg_wal's own copy.
+BOOST_AUTO_TEST_CASE(timeline_start_prefix) {
+  auto const start = uint64_t{3} * kWalSegmentSize + 0x100000;  // timeline 2 starts at 0/3100000
+  auto       zero_prefix = [&](fs::path const& dir) {
+    // raft's copy of timeline 2's segment 3: zeros up to the start point.
+    std::fstream f(dir / filename(seg(2, 3)), std::ios::binary | std::ios::in | std::ios::out);
+    auto         zeros = string(start - 3 * kWalSegmentSize, '\0');
+    f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+  };
+
+  {  // The parent's segment in raft/wal.
+    TmpDir tmp;
+    auto   pg   = tmp() / "pg_wal";
+    auto   raft = tmp() / "raft_wal";
+    segment(raft, seg(1, 3), 'A');
+    segment(raft, seg(2, 3), 'R');
+    zero_prefix(raft);
+    segment(raft, seg(2, 4), 'R');
+    std::ofstream(raft / "00000002.history") << "1\t0/3100000\tno recovery target specified\n";
+    segment(pg, seg(2, 3), 'P');
+    segment(pg, seg(2, 4), 'P');
+    BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
+    BOOST_TEST((byte_at(pg, seg(2, 3), 0) == 'A'));
+    BOOST_TEST((byte_at(pg, seg(2, 3), start - 3 * kWalSegmentSize - 1) == 'A'));
+    BOOST_TEST((byte_at(pg, seg(2, 3), start - 3 * kWalSegmentSize) == 'R'));
+  }
+  {  // The parent's segment compacted away in raft/wal: pg_wal's own copy of the prefix.
+    TmpDir tmp;
+    auto   pg   = tmp() / "pg_wal";
+    auto   raft = tmp() / "raft_wal";
+    segment(raft, seg(2, 3), 'R');
+    zero_prefix(raft);
+    segment(raft, seg(2, 4), 'R');
+    std::ofstream(raft / "00000002.history") << "1\t0/3100000\tno recovery target specified\n";
+    segment(pg, seg(2, 3), 'P');
+    BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
+    BOOST_TEST((byte_at(pg, seg(2, 3), 0) == 'P'));
+    BOOST_TEST((byte_at(pg, seg(2, 3), start - 3 * kWalSegmentSize - 1) == 'P'));
+    BOOST_TEST((byte_at(pg, seg(2, 3), start - 3 * kWalSegmentSize) == 'R'));
+  }
+}
+
+// Two timelines starting in one segment (promotions in quick succession): timeline 3's copy of the
+// segment needs timeline 1's bytes up to timeline 2's start and timeline 2's up to its own, and
+// raft's copy of timeline 2's segment has zeros before timeline 2's start.
+BOOST_AUTO_TEST_CASE(two_timeline_starts_in_one_segment) {
+  TmpDir     tmp;
+  auto       pg    = tmp() / "pg_wal";
+  auto       raft  = tmp() / "raft_wal";
+  auto const base  = uint64_t{3} * kWalSegmentSize;
+  auto const s2    = base + 0x100000;  // timeline 2 starts at 0/3100000
+  auto const s3    = base + 0x200000;  // timeline 3 at 0/3200000
+  auto       zeros = [](fs::path const& dir, LogSeqNumber lsn, uint64_t n) {
+    std::fstream f(dir / filename(lsn), std::ios::binary | std::ios::in | std::ios::out);
+    auto         z = string(n, '\0');
+    f.write(z.data(), static_cast<std::streamsize>(z.size()));
+  };
+  segment(raft, seg(1, 3), 'A');
+  segment(raft, seg(2, 3), 'B');
+  zeros(raft, seg(2, 3), s2 - base);
+  segment(raft, seg(3, 3), 'C');
+  zeros(raft, seg(3, 3), s3 - base);
+  std::ofstream(raft / "00000002.history") << "1\t0/3100000\tno recovery target specified\n";
+  std::ofstream(raft / "00000003.history") << "1\t0/3100000\tno recovery target specified\n\n"
+                                           << "2\t0/3200000\tno recovery target specified\n";
+  segment(pg, seg(3, 3), 'P');
+
+  BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
+  BOOST_TEST((byte_at(pg, seg(3, 3), 0) == 'A'));
+  BOOST_TEST((byte_at(pg, seg(3, 3), s2 - base - 1) == 'A'));
+  BOOST_TEST((byte_at(pg, seg(3, 3), s2 - base) == 'B'));
+  BOOST_TEST((byte_at(pg, seg(3, 3), s3 - base - 1) == 'B'));
+  BOOST_TEST((byte_at(pg, seg(3, 3), s3 - base) == 'C'));
+}
+
+// A restored backup's WAL from its redo point, which raft has compacted away (raft/wal starts
+// later): kept, on a timeline raft knows; an old segment on a timeline raft has no history of is
+// removed.
+BOOST_AUTO_TEST_CASE(compacted_history_kept) {
+  TmpDir tmp;
+  auto   pg   = tmp() / "pg_wal";
+  auto   raft = tmp() / "raft_wal";
+  segment(raft, seg(2, 6), 'R');
+  std::ofstream(raft / "00000002.history") << "1\t0/1000000\tno recovery target specified\n";
+  segment(pg, seg(2, 4), 'P');  // the backup's WAL: before raft's first segment
+  segment(pg, seg(2, 5), 'P');
+  segment(pg, seg(5, 4), 'P');  // a timeline raft knows nothing of
+  segment(pg, seg(2, 7), 'P');  // past raft's first, not in raft: removed
+  BOOST_REQUIRE(rebuild_pg_wal(pg, raft).has_value());
+  BOOST_TEST((byte_at(pg, seg(2, 4), 0) == 'P'));
+  BOOST_TEST((byte_at(pg, seg(2, 5), 0) == 'P'));
+  BOOST_TEST((!byte_at(pg, seg(5, 4), 0).has_value()));
+  BOOST_TEST((!byte_at(pg, seg(2, 7), 0).has_value()));
 }

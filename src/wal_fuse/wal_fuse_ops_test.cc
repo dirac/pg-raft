@@ -21,11 +21,13 @@ static constexpr char kTextPath[] = "/readme.txt";
 // WalState::update() consumes header(40) + record(24) = 64 bytes and then
 // hits zeros at offset 64, which round_up(xl_tot_len=0) = 0, ending the loop.
 // async_publish is therefore called with offset=0, size=64.
+//   [8..15]  xlp_pageaddr = |pageaddr|: the page's own LSN (a header with another is not walked)
 template <typename C>
-static void fill_wal_page(C* page) {
+static void fill_wal_page(C* page, uint64_t pageaddr = 0) {
   memset(page, 0, kWalBlockSize);
   page[0]          = static_cast<C>(0x16);
   page[1]          = static_cast<C>(0xD1);  // xlp_magic = 0xD116 LE
+  memcpy(page + 8, &pageaddr, 8);
   uint32_t tot_len = 24;
   memcpy(page + 40, &tot_len, 4);  // xl_tot_len of first XLogRecord
 }
@@ -97,13 +99,57 @@ std::string_view wal_data();  // wal_data.cc: real WAL captured from PostgreSQL
 // xl_tot_len) is stored byte for byte and walked as far as when written at once. A standby's
 // walreceiver writes at any byte; before, a cut page header tripped an assertion in
 // WalState::update and the bytes past the walk were dropped.
+// A page header only partly stored (a write ended 4 bytes into the page) when the segment's last
+// handle closes: the next WalFuseSegment re-reads the file, and must not count the half header as
+// walked (published). Before, it did, and PostgreSQL's full write of the page then published only
+// the bytes that differed: from page + 4. The page's magic never reached raft, and no standby
+// could replay past it.
+BOOST_AUTO_TEST_CASE(partial_page_header_across_reopen, *boost::unit_test::timeout(60)) {
+  TmpDir           tmp;
+  RecordingTracker tracker;
+  auto const       lsn = LogSeqNumber{1, 0};
+  auto             a   = make_fuse_segment(tmp(), lsn, tracker);
+  BOOST_REQUIRE(a);
+
+  std::vector<unsigned char> page0(kWalBlockSize), page1(kWalBlockSize, 0);
+  fill_wal_page(page0.data());
+  uint32_t fill = kWalBlockSize - 40;  // one record filling page 0: the walk goes on to page 1
+  memcpy(page0.data() + 40, &fill, 4);
+  uint16_t magic = 0xD116, info = 0x0005;
+  uint64_t addr  = kWalBlockSize;
+  uint32_t len   = 24;
+  memcpy(page1.data(), &magic, 2);
+  memcpy(page1.data() + 2, &info, 2);
+  memcpy(page1.data() + 8, &addr, 8);  // xlp_pageaddr: page 1's LSN
+  memcpy(page1.data() + 24, &len, 4);  // a 24-byte record after the short header
+
+  a->write(page0.data(), page0.size(), 0);
+  a->write(page1.data(), 4, kWalBlockSize);  // magic and info only
+  a.reset();                                 // the last handle closes
+
+  auto map = make_shared<WalSegment>(make_shared<WalSegmentCache>(), tmp(), lsn);
+  BOOST_REQUIRE(map->open().has_value());
+  auto b = make_shared<WalFuseSegment>(tracker, std::move(map));
+  b->write(page1.data(), page1.size(), kWalBlockSize);
+
+  // Some publish covers page 1's first byte.
+  bool covered = false;
+  for (auto const& p : tracker.publishes)
+    covered = covered || (p.offset <= static_cast<off_t>(kWalBlockSize) &&
+                          p.offset + static_cast<off_t>(p.size) > static_cast<off_t>(kWalBlockSize));
+  BOOST_TEST(covered);
+}
+
 BOOST_AUTO_TEST_CASE(wal_segment_any_write_boundaries, *boost::unit_test::timeout(60)) {
   TmpDir           tmp;
   RecordingTracker whole_tracker, chunked_tracker;
   std::filesystem::create_directories(tmp() / "a");
   std::filesystem::create_directories(tmp() / "b");
-  auto whole   = make_fuse_segment(tmp() / "a", LogSeqNumber{1, 0}, whole_tracker);
-  auto chunked = make_fuse_segment(tmp() / "b", LogSeqNumber{1, 0}, chunked_tracker);
+  // The captured segment's own LSN: its first page header's xlp_pageaddr.
+  uint64_t seg_lsn = 0;
+  memcpy(&seg_lsn, wal_data().data() + 8, 8);
+  auto whole   = make_fuse_segment(tmp() / "a", LogSeqNumber{1, seg_lsn}, whole_tracker);
+  auto chunked = make_fuse_segment(tmp() / "b", LogSeqNumber{1, seg_lsn}, chunked_tracker);
   BOOST_REQUIRE(whole);
   BOOST_REQUIRE(chunked);
 
@@ -313,7 +359,7 @@ BOOST_FIXTURE_TEST_CASE(wal_file_write_publishes, WalOpsFixture, *boost::unit_te
   BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
 
   char page[kWalBlockSize]{};
-  fill_wal_page(page);
+  fill_wal_page(page, kWalSegmentSize);  // segment 1 (kWalPath)
   ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
 
   BOOST_REQUIRE_EQUAL(tracker.publishes.size(), 1u);
@@ -334,7 +380,7 @@ BOOST_FIXTURE_TEST_CASE(wal_file_fsync_calls_tracker,
   BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
 
   char page[kWalBlockSize]{};
-  fill_wal_page(page);
+  fill_wal_page(page, kWalSegmentSize);  // segment 1 (kWalPath)
   ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
 
   BOOST_REQUIRE_EQUAL(ops.op_fsync(kWalPath, 0, &fi), 0);
@@ -367,7 +413,7 @@ BOOST_FIXTURE_TEST_CASE(wal_file_read, WalOpsFixture, *boost::unit_test::timeout
   BOOST_REQUIRE_EQUAL(ops.op_open(kWalPath, &fi), 0);
 
   char page[kWalBlockSize]{};
-  fill_wal_page(page);
+  fill_wal_page(page, kWalSegmentSize);  // segment 1 (kWalPath)
   ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi);
 
   char buf[2]{};
@@ -402,7 +448,7 @@ BOOST_FIXTURE_TEST_CASE(two_opens_share_segment, WalOpsFixture, *boost::unit_tes
 
   // Write through first handle, read back through second — shared mmap.
   char page[kWalBlockSize]{};
-  fill_wal_page(page);
+  fill_wal_page(page, kWalSegmentSize);  // segment 1 (kWalPath)
   ops.op_write(kWalPath, page, kWalBlockSize, 0, &fi1);
 
   char buf[2]{};
