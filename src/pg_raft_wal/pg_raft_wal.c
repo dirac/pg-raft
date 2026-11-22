@@ -3,7 +3,8 @@
  *
  * Loaded by the node (shared_preload_libraries in pg_raft.conf, with pg_raft.socket). Implements
  * the hooks of PostgreSQL's pg-raft patch (wal_write_hook, wal_flush_hook, wal_timeline_hook in
- * access/xlog.h): each is one request to the node over a Unix socket, and one byte back.
+ * access/xlog.h; sync_rep_wait_hook in replication/syncrep.h, with pg_raft.sync_rep): each is one
+ * request to the node over a Unix socket, and one byte back.
  *
  *  - write:    the WAL at [offset, offset + size) of a segment is in the file; the node takes it
  *              (from the file) and answers at once.
@@ -12,9 +13,15 @@
  *              WAL). A failure is a PANIC, as a failed fsync is: nothing the node didn't commit may
  *              be acknowledged.
  *  - timeline: a new timeline's history file is in pg_wal (on promotion); its content goes along.
+ *  - commit:   (pg_raft.sync_rep, the node's commit_wait = "sync_rep") a commit waits until the
+ *              node answers that raft has committed the WAL up to its end; the node's flushes then
+ *              answer once the WAL is in the leader's ledger, so the raft rounds of different
+ *              commits overlap. The wait is not interrupted: a cancel or a terminate request waits
+ *              on (SA_RESTART: the read goes on), as a commit waiting in the flush does, and a
+ *              failure is a PANIC. A commit is never visible before a quorum has it.
  *
  * The write and flush hooks run with WALWriteLock held, so the requests of every process reach the
- * node one at a time, in WAL order. They run inside a critical section: no palloc, no ERROR (only
+ * node one at a time, in WAL order (commit waits don't: each process waits on its own connection). They run inside a critical section: no palloc, no ERROR (only
  * plain system calls here, and PANIC on failure). Each process connects on its first request.
  * A standby never writes WAL through XLogWrite: the hooks only run on a primary.
  */
@@ -32,7 +39,9 @@
 #include "access/xlog_internal.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "replication/syncrep.h"
 #include "utils/guc.h"
+#include "utils/wait_event.h"
 
 PG_MODULE_MAGIC;
 
@@ -41,10 +50,10 @@ void		_PG_init(void);
 /* The request: 24 bytes, native byte order (the node runs on the same machine). */
 typedef struct WalRequest
 {
-	uint8		type;			/* 'W', 'F', 'T' */
+	uint8		type;			/* 'W', 'F', 'T', 'C' */
 	uint8		pad[3];
 	uint32		tli;
-	uint64		segno;
+	uint64		segno;			/* C: the LSN */
 	uint32		offset;			/* W: start; F: end */
 	uint32		size;			/* W: bytes; T: content bytes that follow */
 } WalRequest;
@@ -52,6 +61,7 @@ typedef struct WalRequest
 StaticAssertDecl(sizeof(WalRequest) == 24, "WalRequest is 24 bytes");
 
 static char *socket_path = NULL;
+static bool sync_rep = false;
 static int	sock = -1;
 static pid_t sock_pid = 0;
 
@@ -153,7 +163,10 @@ request(const WalRequest *req, const char *extra, size_t extra_len)
 			read_byte(sock, &answer))
 			return answer == 0;
 		disconnect();
-		/* A flush must not be sent twice blindly: only retry writes and timelines. */
+		/*
+		 * A flush must not be sent twice blindly: only retry writes, timelines and commit waits (a
+		 * wait asks again whether the WAL is committed).
+		 */
 		if (req->type == 'F')
 			return false;
 	}
@@ -180,6 +193,22 @@ pg_raft_wal_flush(TimeLineID tli, XLogSegNo segno, uint32 end_offset)
 		elog(PANIC, "pg_raft_wal: the WAL up to %u of segment %llu of timeline %u was not committed",
 			 end_offset, (unsigned long long) segno, tli);
 	return true;				/* durable by replication: no local fsync */
+}
+
+/* A commit's wait: until raft has committed the WAL up to |lsn|. */
+static bool
+pg_raft_wal_sync_rep_wait(XLogRecPtr lsn, bool commit)
+{
+	WalRequest	req = {.type = 'C', .segno = lsn};
+	bool		replicated;
+
+	(void) commit;
+	pgstat_report_wait_start(WAIT_EVENT_SYNC_REP);
+	replicated = request(&req, NULL, 0);
+	pgstat_report_wait_end();
+	if (!replicated)
+		elog(PANIC, "pg_raft_wal: the WAL up to %X/%X was not committed", LSN_FORMAT_ARGS(lsn));
+	return true;
 }
 
 static void
@@ -233,6 +262,14 @@ _PG_init(void)
 							   PGC_POSTMASTER,
 							   0,
 							   NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_raft.sync_rep",
+							 "Commits wait for raft in the synchronous replication wait.",
+							 NULL,
+							 &sync_rep,
+							 false,
+							 PGC_POSTMASTER,
+							 0,
+							 NULL, NULL, NULL);
 	MarkGUCPrefixReserved("pg_raft");
 
 	if (socket_path == NULL || socket_path[0] == '\0')
@@ -243,4 +280,6 @@ _PG_init(void)
 	wal_write_hook = pg_raft_wal_write;
 	wal_flush_hook = pg_raft_wal_flush;
 	wal_timeline_hook = pg_raft_wal_timeline;
+	if (sync_rep)
+		sync_rep_wait_hook = pg_raft_wal_sync_rep_wait;
 }

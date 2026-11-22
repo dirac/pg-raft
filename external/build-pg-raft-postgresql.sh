@@ -1,7 +1,8 @@
 #!/bin/bash
 # pg-raft's PostgreSQL: the PostgreSQL release with pg-raft's WAL hooks
 # (patch_files/postgresql-<version>-pg-raft-wal-hooks.patch: wal_write_hook, wal_flush_hook,
-# wal_timeline_hook in access/xlog.h), and the pg_raft_wal extension (src/pg_raft_wal).
+# wal_timeline_hook in access/xlog.h; sync_rep_wait_hook in replication/syncrep.h), and the
+# pg_raft_wal extension (src/pg_raft_wal).
 #
 #  1. downloads postgresql-<version>.tar.gz into external/SOURCES (checked against
 #     external/checksums, as install-postgresql.sh does);

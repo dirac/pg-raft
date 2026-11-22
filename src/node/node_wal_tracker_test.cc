@@ -231,3 +231,63 @@ BOOST_AUTO_TEST_CASE(fenced_mode_fails_fsync, *boost::unit_test::timeout(timeout
   tracker.set_mode(NodeWalTracker::Mode::kFollower);
   BOOST_TEST(fsync(tracker, seg, 0, 8192).has_value());
 }
+
+// commit_wait = "sync_rep" with the hooks: the flush completes once appended, and a commit waits
+// (async_commit) until the entries carrying its WAL are committed; a mode change fails the waits.
+BOOST_AUTO_TEST_CASE(commit_waits, *boost::unit_test::timeout(timeout)) {
+  Ensemble e;
+  auto     leader = e.service.leader().value();
+  auto     lsn    = LogSeqNumber{.timeline = 1, .lsn = 0x5000000};
+  auto     seg    = make_segment(e.dir() / "pg_wal", lsn);
+
+  NodeWalTracker tracker{e.service.server(leader), 64 * 1024, /*wait_commit=*/false};
+  tracker.set_mode(NodeWalTracker::Mode::kLeader);
+
+  auto commit = [&](uint64_t end) {
+    auto p = make_shared<std::promise<Result<void>>>();
+    tracker.async_commit(end, [p](Result<void> r) { p->set_value(r); });
+    return p->get_future();
+  };
+
+  // What the hooks report: the writes, then the flush up to their end (offset = end, no size).
+  auto bytes = random_bytes(12000);
+  seg->write(bytes.data(), 0, bytes.size());
+  tracker.async_publish(seg, 0, 12000);
+  BOOST_TEST(fsync(tracker, seg, 12000, 0).has_value());
+
+  // A commit inside the flushed WAL completes once it is committed: every server has its bytes.
+  auto done = commit(lsn.lsn + 11000);
+  BOOST_REQUIRE(done.wait_for(30s) == std::future_status::ready);
+  BOOST_TEST(done.get().has_value());
+  BOOST_TEST(e.service.check_consistency({}).violations.empty());
+  for (unsigned i = 0; i < 3; ++i) {
+    auto copy = e.service.server(i)->segment(lsn);
+    BOOST_REQUIRE(copy.has_value());
+    BOOST_TEST(std::memcmp(copy.value()->mapping(), bytes.data(), 11000) == 0, i);
+  }
+  // Below what is committed: at once.
+  BOOST_TEST(commit(lsn.lsn + 12000).get().has_value());
+
+  // Past every entry: it waits; the next flush covering it completes it.
+  auto later = commit(lsn.lsn + 16000);
+  BOOST_TEST((later.wait_for(500ms) == std::future_status::timeout));
+  seg->write(bytes.data(), 12000, 4000);
+  tracker.async_publish(seg, 12000, 4000);
+  BOOST_TEST(fsync(tracker, seg, 16000, 0).has_value());
+  BOOST_REQUIRE(later.wait_for(30s) == std::future_status::ready);
+  BOOST_TEST(later.get().has_value());
+
+  // Lost leadership: a wait in progress fails, and so does a new one.
+  auto stuck = commit(lsn.lsn + 20000);
+  BOOST_TEST((stuck.wait_for(200ms) == std::future_status::timeout));
+  tracker.set_mode(NodeWalTracker::Mode::kFenced);
+  BOOST_REQUIRE(stuck.wait_for(1s) == std::future_status::ready);
+  auto r = stuck.get();
+  BOOST_REQUIRE(!r.has_value());
+  BOOST_TEST(r.error().value() == WalSegment::kNoConsensus);
+  BOOST_TEST(!commit(lsn.lsn + 100).get().has_value());
+
+  // A standby never commits: follower mode fails a wait too.
+  tracker.set_mode(NodeWalTracker::Mode::kFollower);
+  BOOST_TEST(!commit(lsn.lsn + 100).get().has_value());
+}

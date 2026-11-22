@@ -139,8 +139,9 @@ class Node : public std::enable_shared_from_this<Node> {
   unique_ptr<PgInstance>      pg_;
   shared_ptr<WalSenderServer> wal_sender_server_;
 
-  // commit_wait = "sync_rep": the leader's synchronous-standby connection to its PostgreSQL
-  // (SyncAcker), from promotion to step-down; on_applied() hands it the committed WAL end.
+  // commit_wait = "sync_rep": with FUSE, the leader's synchronous-standby connection to its
+  // PostgreSQL (SyncAcker), from promotion to step-down; on_applied() hands it the committed WAL
+  // end. With the hooks, the commits wait in NodeWalTracker::async_commit (no SyncAcker).
   bool                              sync_rep_ = false;
   // A shared_ptr behind a mutex: Apple clang's libc++ has no std::atomic<shared_ptr>.
   class AckerSlot {

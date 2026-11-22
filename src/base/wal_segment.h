@@ -102,6 +102,14 @@ struct WalTracker {
     (void)content;
   }
 
+  /// A commit waits until the WAL up to |lsn| (a byte position) is replicated, then |completion|
+  /// runs (PostgreSQL's sync_rep_wait_hook, wal_capture = "hook" with commit_wait = "sync_rep").
+  /// Default: at once (the WAL is local, durable after its fsync).
+  virtual void async_commit(uint64_t lsn, std::function<void(Result<void>)> completion) {
+    (void)lsn;
+    completion(ok());
+  }
+
   virtual ~WalTracker() = default;
 };
 

@@ -1,8 +1,11 @@
-pg-raft's WAL hooks for PostgreSQL 18.7: what the pg_raft_wal extension (src/pg_raft_wal) needs.
+pg-raft's WAL and commit hooks for PostgreSQL 18.7: what the pg_raft_wal extension (src/pg_raft_wal)
+needs.
 
   wal_write_hook     after each pg_pwrite in XLogWrite: the newly valid WAL (segment, offset, size)
   wal_flush_hook     at both flush points of XLogWrite; returns true to skip the local fsync
   wal_timeline_hook  in writeTimeLineHistory, once a new timeline's history file is in pg_wal
+  sync_rep_wait_hook in SyncRepWaitForLSN: waits for a commit's replication instead of the
+                     synchronous standbys (replication/syncrep.h); returns true if it waited
 
 Apply in a PostgreSQL 18.7 source tree:   patch -p1 < postgresql-18.7-pg-raft-wal-hooks.patch
 (external/build-pg-raft-postgresql.sh downloads PostgreSQL 18.7, applies it, and builds it.)
@@ -131,6 +134,34 @@ index b6864f8..bc68d73 100644
  			wal_sync_method != WAL_SYNC_METHOD_OPEN_DSYNC)
  		{
  			if (openLogFile >= 0 &&
+diff --git a/src/backend/replication/syncrep.c b/src/backend/replication/syncrep.c
+--- a/src/backend/replication/syncrep.c
++++ b/src/backend/replication/syncrep.c
+@@ -97,6 +97,9 @@
+ SyncRepConfigData *SyncRepConfig = NULL;
+ static int	SyncRepWaitMode = SYNC_REP_NO_WAIT;
+ 
++/* pg-raft: replaces the wait for the synchronous standbys (see syncrep.h) */
++sync_rep_wait_hook_type sync_rep_wait_hook = NULL;
++
+ static void SyncRepQueueInsert(int mode);
+ static void SyncRepCancelWait(void);
+ static int	SyncRepWakeQueue(bool all, int mode);
+@@ -157,6 +160,14 @@
+ 	Assert(InterruptHoldoffCount > 0);
+ 
+ 	/*
++	 * pg-raft: the hook waits instead, if the user requested synchronous
++	 * replication (synchronous_commit above local), whatever the standbys.
++	 */
++	if (sync_rep_wait_hook && SyncRepRequested() &&
++		sync_rep_wait_hook(lsn, commit))
++		return;
++
++	/*
+ 	 * Fast exit if user has not requested sync replication, or there are no
+ 	 * sync replication standby names defined.
+ 	 *
 diff --git a/src/include/access/xlog.h b/src/include/access/xlog.h
 index f20f5ed..ac039be 100644
 --- a/src/include/access/xlog.h
@@ -165,3 +196,28 @@ index f20f5ed..ac039be 100644
  extern bool XLogNeedsFlush(XLogRecPtr record);
  extern int	XLogFileInit(XLogSegNo logsegno, TimeLineID logtli);
  extern int	XLogFileOpen(XLogSegNo segno, TimeLineID tli);
+diff --git a/src/include/replication/syncrep.h b/src/include/replication/syncrep.h
+--- a/src/include/replication/syncrep.h
++++ b/src/include/replication/syncrep.h
+@@ -79,6 +79,21 @@
+ /* called by user backend */
+ extern void SyncRepWaitForLSN(XLogRecPtr lsn, bool commit);
+ 
++/*
++ * pg-raft: a library's wait for |lsn| to be replicated, in place of the wait for the synchronous
++ * standbys. Called by SyncRepWaitForLSN, when synchronous replication is requested
++ * (SyncRepRequested), whatever synchronous_standby_names says. Returns true if it waited (the
++ * WAL up to |lsn| is replicated); false falls back to the synchronous standbys.
++ *
++ * It runs after the commit (|commit|; otherwise a PREPARE or the end of a prepared transaction)
++ * is in the local WAL and flushed, with interrupts held off: the transaction can't be aborted, so
++ * the hook must not ereport(ERROR). Unlike the standbys' wait it need not end on a cancel or a
++ * terminate request (which would make the commit visible unreplicated): it may keep waiting, and
++ * if the WAL can't be replicated it must PANIC.
++ */
++typedef bool (*sync_rep_wait_hook_type) (XLogRecPtr lsn, bool commit);
++extern PGDLLIMPORT sync_rep_wait_hook_type sync_rep_wait_hook;
++
+ /* called at backend exit */
+ extern void SyncRepCleanupAtProcExit(void);
+ 

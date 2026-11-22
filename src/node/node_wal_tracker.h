@@ -28,6 +28,12 @@
 // finds an invalid record there and streams the rest from the WAL sender, and a deposed primary's
 // pg_wal is rebuilt from raft/wal (rebuild_pg_wal).
 //
+// Commit waits (async_commit, wal_capture = "hook" with commit_wait = "sync_rep": PostgreSQL's
+// sync_rep_wait_hook): a commit at |lsn| completes once an entry of the current leadership that
+// carries the WAL up to it (a WriteOp or a FlushOp) is committed; in any mode but leader, and on a
+// mode change, the waits fail with kNoConsensus (PostgreSQL then PANICs: nothing this node didn't
+// commit becomes visible).
+//
 // Fenced mode: the node lost leadership and has killed its PostgreSQL; until it restarts as a
 // standby (follower mode), every fsync fails with kNoConsensus, so that a backend that outlives
 // the kill for a moment can't have a commit acknowledged. Publishes and timelines are ignored.
@@ -41,11 +47,15 @@ class NodeWalTracker : public WalTracker {
   /// (Config::write_op_bytes).
   /// |wait_commit|: a leader's fsync completes when its FlushOp is committed (commit_wait =
   /// "fsync"); otherwise once it is appended to the leader's ledger, and the commit waits for the
-  /// quorum in PostgreSQL's synchronous replication (commit_wait = "sync_rep", SyncAcker).
+  /// quorum in PostgreSQL's synchronous replication (commit_wait = "sync_rep": async_commit, or
+  /// SyncAcker as a synchronous standby).
   explicit NodeWalTracker(shared_ptr<RaftServer> raft,
                           size_t                 write_op_bytes = 64 * 1024,
                           bool                   wait_commit    = true)
-      : raft_(std::move(raft)), write_op_bytes_(write_op_bytes), wait_commit_(wait_commit) {}
+      : raft_(std::move(raft)),
+        write_op_bytes_(write_op_bytes),
+        wait_commit_(wait_commit),
+        commits_(make_shared<CommitWaits>()) {}
 
   void set_mode(Mode mode);
   Mode mode() const { return mode_.load(); }
@@ -59,8 +69,29 @@ class NodeWalTracker : public WalTracker {
                    size_t                            size,
                    std::function<void(Result<void>)> completion) override;
   void async_timeline(uint32_t timeline, string const& content) override;
+  void async_commit(uint64_t lsn, std::function<void(Result<void>)> completion) override;
 
  private:
+  /// The commit waits of the current mode epoch, and how far its committed entries' WAL reaches.
+  /// Shared with the entries' handlers (they may run after the tracker is gone, at raft's
+  /// shutdown). A mode change bumps |epoch| and fails the waits under |mtx|, so that no entry of an
+  /// older leadership completes a newer wait.
+  struct CommitWaits {
+    std::mutex                                                 mtx;
+    uint64_t                                                   epoch         = 0;
+    uint64_t                                                   committed_end = 0;
+    std::multimap<uint64_t, std::function<void(Result<void>)>> waits;
+
+    /// An entry of |entry_epoch| carrying the WAL up to |end| is committed.
+    void committed(uint64_t end, uint64_t entry_epoch);
+    /// A mode change: a new epoch, the waits failed.
+    void reset();
+  };
+
+  /// An entry's handler, for an entry carrying the WAL up to |end|: on commit, completes the waits
+  /// it covers.
+  std::function<void(Result<RaftIndex>)> on_commit(uint64_t end);
+
   /// The flush LSN for an entry (the poller's); remembers it as carried.
   LogSeqNumber carry();
 
@@ -90,6 +121,8 @@ class NodeWalTracker : public WalTracker {
   std::mutex                 pending_mtx_;
   map<LogSeqNumber, Pending> pending_;
   std::atomic<uint64_t>      epoch_{0};
+
+  shared_ptr<CommitWaits> const commits_;
 
   /// Takes the segment's pending range (one of the current epoch), with pending_mtx_ held.
   std::optional<std::pair<off_t, size_t>> take_pending(LogSeqNumber lsn);

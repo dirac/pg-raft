@@ -438,14 +438,17 @@ Result<void> Node::write_standby_config(uint16_t wal_sender_port) {
                         wal_sender_port,
                         id_)
          << "recovery_target_timeline = 'latest'\n";
-    // The node is the primary's synchronous standby (SyncAcker): a commit waits for raft there.
-    if (sync_rep_)
+    // commit_wait = "sync_rep": a commit waits for raft in PostgreSQL's synchronous replication
+    // wait. With FUSE, the node is the primary's synchronous standby (SyncAcker); with the hooks,
+    // the extension's sync_rep_wait_hook asks the hook server, and the wait is not interrupted.
+    if (sync_rep_ && !hook_mode())
       conf << "synchronous_standby_names = 'pg_raft'\n";
     // wal_capture = "hook": the extension reports the WAL to the hook server (it needs pg-raft's
     // PostgreSQL, install_dir).
     if (hook_mode())
       conf << "shared_preload_libraries = 'pg_raft_wal'\n"
-           << std::format("pg_raft.socket = '{}'\n", hook_server_->socket_path().string());
+           << std::format("pg_raft.socket = '{}'\n", hook_server_->socket_path().string())
+           << std::format("pg_raft.sync_rep = {}\n", sync_rep_ ? "on" : "off");
     if (!conf.flush())
       return elog(system_error_code(EIO), "Unable to write {}", data_dir_ / "pg_raft.conf");
   }
@@ -711,8 +714,9 @@ void Node::promote(RaftTerm term) {
   if (!execute(pg_port(), "CHECKPOINT", timeout))
     log(WARN, "Node {}: the checkpoint after the promotion did not complete", id_);
 
-  // 6. commit_wait = "sync_rep": the synchronous standby the commits wait for, before clients come.
-  if (sync_rep_) {
+  // 6. commit_wait = "sync_rep" with FUSE: the synchronous standby the commits wait for, before
+  //    clients come. (With the hooks, the commits wait in the tracker, in leader mode since 3.)
+  if (sync_rep_ && !hook_mode()) {
     auto a = make_shared<SyncAcker>(pg_port());
     if (auto r = a->start(); !r) {
       log(ERROR, "Node {}: the synchronous standby connection failed: stepping down", id_);

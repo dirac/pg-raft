@@ -84,6 +84,14 @@ struct WalHookServer::Conn : public std::enable_shared_from_this<Conn> {
                             });
         return;
       }
+      case 'C': {
+        // A commit's wait: the 8-byte field is its end LSN. Answered on the io threads, as a flush.
+        tracker.async_commit(req.segno, [self = shared_from_this()](Result<void> r) {
+          asio::post(self->socket_.get_executor(),
+                     [self, ok = r.has_value()] { self->answer(ok); });
+        });
+        return;
+      }
       case 'T': {
         if (req.size > (1U << 20U)) {
           log(ERROR, "WAL hook: a history file of {} bytes", req.size);

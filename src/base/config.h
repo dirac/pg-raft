@@ -69,7 +69,9 @@ struct Config {
   ///  "sync_rep" the fsync returns once the flush is in the leader's ledger, and the commit waits in
   ///             PostgreSQL's synchronous replication for the node (application_name pg_raft), which
   ///             acknowledges the raft-committed WAL: rounds overlap, but a commit whose wait is
-  ///             cancelled is visible before a quorum has it. For measurement.
+  ///             cancelled is visible before a quorum has it. For measurement. With wal_capture =
+  ///             "hook" the commit waits in the patch's sync_rep_wait_hook instead, for the node's
+  ///             raft commit (NodeWalTracker::async_commit), and the wait is not interrupted.
   string commit_wait = "fsync";
   /// wal_capture: how the node sees the WAL its PostgreSQL writes as a primary.
   ///  "fuse"  a FUSE mount over pg_wal (stock PostgreSQL).

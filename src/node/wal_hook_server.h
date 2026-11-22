@@ -13,9 +13,13 @@
 //  - 'F': the segment's WAL up to |offset| must be durable: WalTracker::async_fsync, answered when it
 //         completes (on the leader, when raft commits it); 1 if it fails.
 //  - 'T': a new timeline's history file, |size| bytes of it following: WalTracker::async_timeline.
+//  - 'C': a commit waits for the WAL up to the LSN in the segment number's place (sync_rep_wait_hook,
+//         commit_wait = "sync_rep"): WalTracker::async_commit, answered when it completes (when raft
+//         commits the WAL up to there); 1 if it fails.
 //
 // PostgreSQL sends the write and flush requests with WALWriteLock held, waiting for each answer: they
-// come one at a time, in WAL order, even over the connections of different processes.
+// come one at a time, in WAL order, even over the connections of different processes. Commit waits
+// come from many processes at once, each on its own connection.
 //
 // The segments are mapped from |pg_wal| (WalSegment); reset_segments() drops the mappings, before
 // PostgreSQL's segments are replaced (a rebuild or a restore of pg_wal).
