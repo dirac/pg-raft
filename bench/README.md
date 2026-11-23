@@ -800,6 +800,275 @@ the same setting) and `END`; where a row was run twice (`lz4`, `zstd`), both run
 - **The repeated rows agree within 0.8%** (zstd with `fsync`) and less, so differences of a few
   percent are real. Solo varies by 2% across all the settings.
 
+### 2026-11-23: PostgreSQL 18.7, WAL capture by hooks, the commit in synchronous replication; scale 100 and 1000
+
+**Machines.** Four EC2 `i4i.8xlarge` (32 vCPUs, x86_64, 247 GiB, local NVMe instance storage for
+`/data`), Amazon Linux 2023: the three nodes in `us-west-2c` (node 0, 172.31.1.229), `2a` (node 1)
+and `2b` (node 2), pgbench and the proxy on a fourth machine in `2d` (the AZs differ from
+2026-11-18's). Client to primary round trip ~0.58 ms (ping). Node 0 was the primary in every run.
+
+**Software.** pg-raft binaries built from `667816b` (release, gcc 14); bench scripts `2eb97c8`,
+then `7d1fbef` (lz4 default) and `c567793` (`MAX_WAL_SIZE`). PostgreSQL 18.7 everywhere: the stock
+build (`/opt/pg_raft/postgresql/18`) for solo, std and pg-raft with FUSE; pg-raft's PostgreSQL
+(18.7 with the hooks patch, `pg_raft_wal` preloaded) for pg-raft with hooks. Both built with lz4.
+
+**Method.** pgbench TPC-B-like (simple query mode), threads `min(clients, 30)`, 30 s warm-up (not
+measured), 120 s measured; a fresh cluster per setup, the data loaded once, then the client counts
+in ascending order on the same tables; pg-raft direct to the primary (no proxy). One run per point
+(the repeats are below). Settings in every setup: `shared_buffers = 4GB`, `max_connections = 400`,
+`checkpoint_timeout = 15min`, `wal_sync_method = fdatasync`, `full_page_writes = on`,
+`wal_buffers = 16MB`, data checksums on, `synchronous_commit = on`. solo and std keep
+`wal_recycle` and `wal_init_zero` on (PostgreSQL's defaults); pg-raft forces both off.
+
+**Setups.**
+- **solo**: one PostgreSQL on node 0's machine, no HA (the ceiling).
+- **std**: PostgreSQL quorum synchronous replication, a primary and two standbys,
+  `synchronous_standby_names = 'ANY 1 (s1, s2)'` (2 of 3, as raft's majority).
+- **pg-raft**, 3 nodes, along two axes:
+  - WAL capture (`wal_capture`): **FUSE** (`pg_wal` mounted over FUSE) or **hook** (pg-raft's
+    PostgreSQL sends each WAL write and flush to the node over a Unix socket).
+  - Where the commit waits (`commit_wait`): **`fsync`** (inside PostgreSQL's WAL fsync, under
+    `WALWriteLock`, so rounds are serial) or **`sync_rep`** (in PostgreSQL's synchronous
+    replication wait, outside the lock, so rounds overlap). With FUSE, `sync_rep` makes the node its
+    PostgreSQL's synchronous standby, and a cancelled or terminated wait makes the commit visible
+    before a quorum has it. With hooks, `sync_rep_wait_hook` waits for the raft commit and isn't
+    interrupted (a failure PANICs), so hook + `sync_rep` keeps `fsync`'s guarantee.
+- **Syncs on / off**: for solo and std, PostgreSQL's `fsync = on` / `off` (`PG_FSYNC=off`). For
+  pg-raft, the raft ledger's commit-path syncs `leader_sync` and `follower_sync` `true` / `false`
+  (`RAFT_SYNC=1`); pg-raft's data files and its `wal_dir` checkpoint are synced either way. Not the
+  same switch: std with `fsync = off` gives up more.
+
+**Columns.** tps (pgbench, without the initial connection time); latency average and stddev
+(pgbench, per transaction); `END`: pgbench's per-statement latency of the commit (`END;`).
+Percentages are of std with the same syncs, at the same client count.
+
+**Raw data** (on the client, outside the repository): `~/shared/pg_raft/campaign/` holds the driver
+scripts (`campaign*.sh`), their logs, `state.txt` and the summaries (`summary.md`: scale 100;
+`summary-lz4.md`; `summary-s1000.md`; `summary-rep.md` and `rep-aggregate.md`: the repeats). Per-run
+directories (`settings.txt` with the settings in effect, `run.log`, `warmup.log`, `summary.txt`) in
+`~/shared/pg_raft/results/` (scale 100), `lz4-results/`, `s1000-results/` and `rep-results/`, named
+`<setup>-<variant>-n<nodes>-c<clients>-<time>`.
+
+#### Scale 100, `wal_compression = off`, 25 to 300 clients
+
+`max_wal_size = 16GB`. tps (% of std):
+
+**Syncs on**
+
+| Setup | 25 | 50 | 100 | 150 | 200 | 300 |
+|---|---|---|---|---|---|---|
+| solo | 6,731 (111%) | 12,772 (111%) | 23,539 (113%) | 32,639 (115%) | 39,503 (117%) | 45,730 (120%) |
+| std, quorum sync rep | 6,080 | 11,537 | 20,902 | 28,358 | 33,708 | 37,997 |
+| pg-raft FUSE, `fsync` | 5,784 (95%) | 10,942 (95%) | 19,037 (91%) | 25,043 (88%) | 29,174 (87%) | 31,903 (84%) |
+| pg-raft FUSE, `sync_rep` | 6,054 (100%) | 11,473 (99%) | 20,637 (99%) | 27,643 (97%) | 32,584 (97%) | 36,064 (95%) |
+| pg-raft hook, `fsync` | 5,792 (95%) | 10,942 (95%) | 19,439 (93%) | 25,431 (90%) | 29,575 (88%) | 32,455 (85%) |
+| pg-raft hook, `sync_rep` | 6,037 (99%) | 11,438 (99%) | 20,477 (98%) | 27,434 (97%) | 32,218 (96%) | 35,599 (94%) |
+
+**Syncs off**
+
+| Setup | 25 | 50 | 100 | 150 | 200 | 300 |
+|---|---|---|---|---|---|---|
+| solo | 6,854 (110%) | 13,038 (111%) | 24,249 (112%) | 34,042 (115%) | 41,830 (117%) | 49,143 (120%) |
+| std, quorum sync rep | 6,218 | 11,772 | 21,577 | 29,620 | 35,623 | 40,993 |
+| pg-raft FUSE, `fsync` | 5,903 (95%) | 11,106 (94%) | 19,933 (92%) | 26,681 (90%) | 31,345 (88%) | 34,388 (84%) |
+| pg-raft FUSE, `sync_rep` | 6,145 (99%) | 11,580 (98%) | 20,948 (97%) | 28,287 (95%) | 33,382 (94%) | 37,486 (91%) |
+| pg-raft hook, `fsync` | 5,914 (95%) | 11,134 (95%) | 19,917 (92%) | 26,719 (90%) | 31,341 (88%) | 34,924 (85%) |
+| pg-raft hook, `sync_rep` | 6,132 (99%) | 11,541 (98%) | 20,867 (97%) | 28,119 (95%) | 33,140 (93%) | 37,305 (91%) |
+
+- **pg-raft with `sync_rep` is within 1–6% of std with the syncs on** (98–100% at 25–100 clients,
+  94–95% at 300), against 84–95% with the commit in the fsync. `sync_rep` gains 4–13% over `fsync`
+  with the syncs on (4–9% off), more as the clients grow.
+- **Hook and FUSE perform the same**: within about 2% at every point. FUSE isn't the bottleneck at this
+  scale; the hooks' advantage is correctness (`sync_rep` without the early-visibility caveat).
+- **Syncs off helps std more than pg-raft**: std +8% at 300 clients, pg-raft hook + `sync_rep`
+  +5%, so the gap to std is wider with them off (91% at 300).
+- **The gap grows with the clients**: TPC-B at scale 100 updates one of 100 branch rows per
+  transaction, so a longer commit queues more transactions on the hot rows (2026-11-18). `END` at
+  300 clients: std 1.230 ms, hook + `sync_rep` 1.380 ms, hook + `fsync` 1.601 ms.
+- **The cost of HA itself**: std is at 83–90% of solo.
+
+<details><summary>Scale 100: tps, latency and <code>END</code> for every point</summary>
+
+| Setup | Clients | tps | latency avg (ms) | stddev (ms) | `END` (ms) |
+|---|---|---|---|---|---|
+| solo, syncs on | 25 | 6,731 | 3.714 | 0.346 | 0.556 |
+| solo, syncs on | 50 | 12,772 | 3.914 | 0.446 | 0.581 |
+| solo, syncs on | 100 | 23,539 | 4.246 | 0.731 | 0.622 |
+| solo, syncs on | 150 | 32,639 | 4.592 | 1.075 | 0.655 |
+| solo, syncs on | 200 | 39,503 | 5.056 | 1.611 | 0.704 |
+| solo, syncs on | 300 | 45,730 | 6.549 | 3.282 | 0.828 |
+| std, quorum sync rep, syncs on | 25 | 6,080 | 4.112 | 0.691 | 0.897 |
+| std, quorum sync rep, syncs on | 50 | 11,537 | 4.333 | 0.758 | 0.929 |
+| std, quorum sync rep, syncs on | 100 | 20,902 | 4.782 | 1.220 | 0.985 |
+| std, quorum sync rep, syncs on | 150 | 28,358 | 5.284 | 1.751 | 1.032 |
+| std, quorum sync rep, syncs on | 200 | 33,708 | 5.927 | 2.457 | 1.079 |
+| std, quorum sync rep, syncs on | 300 | 37,997 | 7.882 | 5.086 | 1.230 |
+| pg-raft FUSE, `fsync`, syncs on | 25 | 5,784 | 4.322 | 0.497 | 1.121 |
+| pg-raft FUSE, `fsync`, syncs on | 50 | 10,942 | 4.568 | 0.621 | 1.156 |
+| pg-raft FUSE, `fsync`, syncs on | 100 | 19,037 | 5.250 | 1.291 | 1.313 |
+| pg-raft FUSE, `fsync`, syncs on | 150 | 25,043 | 5.985 | 2.093 | 1.397 |
+| pg-raft FUSE, `fsync`, syncs on | 200 | 29,174 | 6.848 | 3.249 | 1.454 |
+| pg-raft FUSE, `fsync`, syncs on | 300 | 31,903 | 9.391 | 7.162 | 1.650 |
+| pg-raft FUSE, `sync_rep`, syncs on | 25 | 6,054 | 4.129 | 1.100 | 0.918 |
+| pg-raft FUSE, `sync_rep`, syncs on | 50 | 11,473 | 4.357 | 0.496 | 0.938 |
+| pg-raft FUSE, `sync_rep`, syncs on | 100 | 20,637 | 4.843 | 2.196 | 1.024 |
+| pg-raft FUSE, `sync_rep`, syncs on | 150 | 27,643 | 5.422 | 3.551 | 1.103 |
+| pg-raft FUSE, `sync_rep`, syncs on | 200 | 32,584 | 6.132 | 4.409 | 1.164 |
+| pg-raft FUSE, `sync_rep`, syncs on | 300 | 36,064 | 8.307 | 8.199 | 1.350 |
+| pg-raft hook, `fsync`, syncs on | 25 | 5,792 | 4.316 | 0.491 | 1.110 |
+| pg-raft hook, `fsync`, syncs on | 50 | 10,942 | 4.568 | 0.582 | 1.148 |
+| pg-raft hook, `fsync`, syncs on | 100 | 19,439 | 5.141 | 1.204 | 1.244 |
+| pg-raft hook, `fsync`, syncs on | 150 | 25,431 | 5.893 | 1.984 | 1.358 |
+| pg-raft hook, `fsync`, syncs on | 200 | 29,575 | 6.756 | 3.147 | 1.421 |
+| pg-raft hook, `fsync`, syncs on | 300 | 32,455 | 9.231 | 7.113 | 1.601 |
+| pg-raft hook, `sync_rep`, syncs on | 25 | 6,037 | 4.141 | 1.134 | 0.932 |
+| pg-raft hook, `sync_rep`, syncs on | 50 | 11,438 | 4.370 | 0.502 | 0.961 |
+| pg-raft hook, `sync_rep`, syncs on | 100 | 20,477 | 4.881 | 2.155 | 1.050 |
+| pg-raft hook, `sync_rep`, syncs on | 150 | 27,434 | 5.464 | 3.606 | 1.124 |
+| pg-raft hook, `sync_rep`, syncs on | 200 | 32,218 | 6.201 | 4.335 | 1.190 |
+| pg-raft hook, `sync_rep`, syncs on | 300 | 35,599 | 8.415 | 8.348 | 1.380 |
+| solo, syncs off | 25 | 6,854 | 3.647 | 0.204 | 0.500 |
+| solo, syncs off | 50 | 13,038 | 3.834 | 0.321 | 0.517 |
+| solo, syncs off | 100 | 24,249 | 4.121 | 0.547 | 0.537 |
+| solo, syncs off | 150 | 34,042 | 4.402 | 0.819 | 0.552 |
+| solo, syncs off | 200 | 41,830 | 4.776 | 1.202 | 0.576 |
+| solo, syncs off | 300 | 49,143 | 6.095 | 2.682 | 0.684 |
+| std, quorum sync rep, syncs off | 25 | 6,218 | 4.021 | 0.298 | 0.830 |
+| std, quorum sync rep, syncs off | 50 | 11,772 | 4.246 | 0.458 | 0.855 |
+| std, quorum sync rep, syncs off | 100 | 21,577 | 4.632 | 0.801 | 0.890 |
+| std, quorum sync rep, syncs off | 150 | 29,620 | 5.061 | 1.247 | 0.918 |
+| std, quorum sync rep, syncs off | 200 | 35,623 | 5.608 | 1.870 | 0.950 |
+| std, quorum sync rep, syncs off | 300 | 40,993 | 7.307 | 4.083 | 1.063 |
+| pg-raft FUSE, `fsync`, syncs off | 25 | 5,903 | 4.235 | 0.356 | 1.030 |
+| pg-raft FUSE, `fsync`, syncs off | 50 | 11,106 | 4.501 | 0.556 | 1.085 |
+| pg-raft FUSE, `fsync`, syncs off | 100 | 19,933 | 5.014 | 1.004 | 1.158 |
+| pg-raft FUSE, `fsync`, syncs off | 150 | 26,681 | 5.618 | 1.622 | 1.228 |
+| pg-raft FUSE, `fsync`, syncs off | 200 | 31,345 | 6.373 | 2.509 | 1.284 |
+| pg-raft FUSE, `fsync`, syncs off | 300 | 34,388 | 8.712 | 5.787 | 1.474 |
+| pg-raft FUSE, `sync_rep`, syncs off | 25 | 6,145 | 4.068 | 0.298 | 0.873 |
+| pg-raft FUSE, `sync_rep`, syncs off | 50 | 11,580 | 4.316 | 0.479 | 0.913 |
+| pg-raft FUSE, `sync_rep`, syncs off | 100 | 20,948 | 4.771 | 0.878 | 0.979 |
+| pg-raft FUSE, `sync_rep`, syncs off | 150 | 28,287 | 5.299 | 1.418 | 1.040 |
+| pg-raft FUSE, `sync_rep`, syncs off | 200 | 33,382 | 5.985 | 2.194 | 1.104 |
+| pg-raft FUSE, `sync_rep`, syncs off | 300 | 37,486 | 7.993 | 4.929 | 1.260 |
+| pg-raft hook, `fsync`, syncs off | 25 | 5,914 | 4.227 | 0.363 | 1.030 |
+| pg-raft hook, `fsync`, syncs off | 50 | 11,134 | 4.489 | 0.555 | 1.080 |
+| pg-raft hook, `fsync`, syncs off | 100 | 19,917 | 5.018 | 0.984 | 1.164 |
+| pg-raft hook, `fsync`, syncs off | 150 | 26,719 | 5.609 | 1.578 | 1.226 |
+| pg-raft hook, `fsync`, syncs off | 200 | 31,341 | 6.374 | 2.516 | 1.284 |
+| pg-raft hook, `fsync`, syncs off | 300 | 34,924 | 8.579 | 5.682 | 1.441 |
+| pg-raft hook, `sync_rep`, syncs off | 25 | 6,132 | 4.077 | 0.305 | 0.880 |
+| pg-raft hook, `sync_rep`, syncs off | 50 | 11,541 | 4.331 | 0.480 | 0.924 |
+| pg-raft hook, `sync_rep`, syncs off | 100 | 20,867 | 4.789 | 0.883 | 0.993 |
+| pg-raft hook, `sync_rep`, syncs off | 150 | 28,119 | 5.330 | 1.425 | 1.057 |
+| pg-raft hook, `sync_rep`, syncs off | 200 | 33,140 | 6.028 | 2.241 | 1.121 |
+| pg-raft hook, `sync_rep`, syncs off | 300 | 37,305 | 8.031 | 4.985 | 1.272 |
+
+</details>
+
+#### Scale 100, `wal_compression = lz4`, syncs on
+
+std and pg-raft hook + `sync_rep` again with `wal_compression = lz4` (`WAL_COMPRESSION=lz4`),
+everything else as above. tps (% of std):
+
+| Setup | 25 | 50 | 100 | 150 | 200 | 300 |
+|---|---|---|---|---|---|---|
+| std, quorum sync rep | 6,131 | 11,550 | 20,932 | 28,392 | 33,722 | 38,578 |
+| pg-raft hook, `sync_rep` | 6,075 (99%) | 11,360 (98%) | 20,367 (97%) | 27,453 (97%) | 32,265 (96%) | 36,342 (94%) |
+
+lz4 changes little at scale 100: under ±1% for both up to 200 clients, std +1.5% and pg-raft +2.1%
+at 300 (so 94% of std either way). The accounts table (~1.5 GB) is small, so full page images are
+a small part of the WAL. pg-raft's latency stddev at 300 clients drops from 8.3 to 6.7 ms. lz4 is
+now the bench default (`7d1fbef`).
+
+<details><summary>Scale 100 with lz4: tps, latency and <code>END</code></summary>
+
+| Setup | Clients | tps | latency avg (ms) | stddev (ms) | `END` (ms) |
+|---|---|---|---|---|---|
+| std, quorum sync rep | 25 | 6,131 | 4.078 | 0.361 | 0.882 |
+| std, quorum sync rep | 50 | 11,550 | 4.327 | 0.628 | 0.923 |
+| std, quorum sync rep | 100 | 20,932 | 4.774 | 1.225 | 0.986 |
+| std, quorum sync rep | 150 | 28,392 | 5.278 | 1.749 | 1.033 |
+| std, quorum sync rep | 200 | 33,722 | 5.923 | 2.466 | 1.080 |
+| std, quorum sync rep | 300 | 38,578 | 7.764 | 4.815 | 1.200 |
+| pg-raft hook, `sync_rep` | 25 | 6,075 | 4.115 | 0.399 | 0.919 |
+| pg-raft hook, `sync_rep` | 50 | 11,360 | 4.400 | 1.614 | 0.983 |
+| pg-raft hook, `sync_rep` | 100 | 20,367 | 4.907 | 2.998 | 1.068 |
+| pg-raft hook, `sync_rep` | 150 | 27,453 | 5.459 | 2.728 | 1.125 |
+| pg-raft hook, `sync_rep` | 200 | 32,265 | 6.193 | 3.554 | 1.190 |
+| pg-raft hook, `sync_rep` | 300 | 36,342 | 8.243 | 6.748 | 1.334 |
+
+</details>
+
+#### Scale 1000, `wal_compression = lz4`, `max_wal_size = 64GB`, syncs on, 150 to 300 clients
+
+Scale 1000 (`PGBENCH_INIT_ARGS="-I dtGvp"`: the load generated on the server; 1,000 branch rows,
+~13 GB of accounts, far larger than `shared_buffers`), `MAX_WAL_SIZE=64GB`, lz4, syncs on
+(pg-raft with `leader_sync` and `follower_sync`). tps (% of std):
+
+| Setup | 150 | 200 | 300 |
+|---|---|---|---|
+| solo | 35,844 (111%) | 46,085 (111%) | 56,271 (111%) |
+| std, quorum sync rep | 32,375 | 41,376 | 50,525 |
+| pg-raft FUSE, `fsync` | 29,583 (91%) | 38,442 (93%) | 49,256 (97%) |
+| pg-raft FUSE, `sync_rep` | 30,945 (96%) | 39,965 (97%) | 48,614 (96%) |
+| pg-raft hook, `fsync` | 29,666 (92%) | 38,268 (92%) | 49,327 (98%) |
+| pg-raft hook, `sync_rep` | 30,262 (93%) | 38,841 (94%) | 46,177 (91%) |
+
+- **pg-raft with `fsync` is at 91–98% of std**, 97–98% at 300 clients (49.3k against 50.5k), with
+  hook and FUSE within 0.6% of each other. On 2026-11-18 (PostgreSQL 17.9, no compression,
+  `max_wal_size = 16GB`) it was at 72–75%; on 2026-11-19 with lz4 and 64GB, 94%.
+- **Less contention than at scale 100**: with 1,000 branch rows a longer commit queues fewer
+  transactions, so pg-raft's gap shrinks as the clients grow instead of widening.
+- **`sync_rep` gains at 150–200 clients and loses at 300**: +1.5–5% over `fsync` at 150–200 (FUSE
+  96–97% of std), but at 300 hook + `sync_rep` does 6% less than hook + `fsync` (91% of std) and
+  FUSE + `sync_rep` 1% less. Its latency stddev is 3–4 times `fsync`'s (300 clients: hook 5.6 ms,
+  FUSE 4.0 ms, against 1.2–1.3 ms; std 1.4 ms), as on 2026-11-19: some commits stall. Not yet
+  understood. Single runs: the repeats below say whether hook and FUSE `sync_rep` really differ.
+- **solo is 11% above std** at every client count.
+
+<details><summary>Scale 1000: tps, latency and <code>END</code></summary>
+
+| Setup | Clients | tps | latency avg (ms) | stddev (ms) | `END` (ms) |
+|---|---|---|---|---|---|
+| solo | 150 | 35,844 | 4.181 | 0.404 | 0.677 |
+| solo | 200 | 46,085 | 4.334 | 0.462 | 0.728 |
+| solo | 300 | 56,271 | 5.321 | 0.992 | 1.061 |
+| std, quorum sync rep | 150 | 32,375 | 4.629 | 0.705 | 1.094 |
+| std, quorum sync rep | 200 | 41,376 | 4.827 | 0.791 | 1.180 |
+| std, quorum sync rep | 300 | 50,525 | 5.922 | 1.433 | 1.685 |
+| pg-raft FUSE, `fsync` | 150 | 29,583 | 5.064 | 0.790 | 1.526 |
+| pg-raft FUSE, `fsync` | 200 | 38,442 | 5.196 | 0.861 | 1.564 |
+| pg-raft FUSE, `fsync` | 300 | 49,256 | 6.075 | 1.173 | 1.994 |
+| pg-raft FUSE, `sync_rep` | 150 | 30,945 | 4.843 | 3.018 | 1.289 |
+| pg-raft FUSE, `sync_rep` | 200 | 39,965 | 4.997 | 2.935 | 1.327 |
+| pg-raft FUSE, `sync_rep` | 300 | 48,614 | 6.157 | 4.045 | 1.857 |
+| pg-raft hook, `fsync` | 150 | 29,666 | 5.051 | 0.761 | 1.510 |
+| pg-raft hook, `fsync` | 200 | 38,268 | 5.221 | 0.943 | 1.560 |
+| pg-raft hook, `fsync` | 300 | 49,327 | 6.063 | 1.286 | 1.966 |
+| pg-raft hook, `sync_rep` | 150 | 30,262 | 4.950 | 3.388 | 1.392 |
+| pg-raft hook, `sync_rep` | 200 | 38,841 | 5.142 | 3.573 | 1.458 |
+| pg-raft hook, `sync_rep` | 300 | 46,177 | 6.483 | 5.598 | 2.099 |
+
+</details>
+
+#### Scale 1000, repeated (in progress)
+
+The scale 1000 setups above (without solo) in up to 5 rounds (`campaign-rep.sh`), to measure the
+run-to-run variation: each round runs std, hook + `fsync`, hook + `sync_rep`, FUSE + `fsync`, FUSE +
+`sync_rep` in that order, each on a fresh cluster with the same settings, at 150, 200 and 300
+clients; ~55 min a round. Started 2026-11-23 23:11 UTC; `rep-aggregate.md` will have each point's
+mean, min, max and spread. Round 1 so far, tps (% of std):
+
+| Setup | 150 | 200 | 300 |
+|---|---|---|---|
+| std, quorum sync rep | 32,322 | 41,456 | 50,075 |
+| pg-raft hook, `fsync` | 29,402 (91%) | 38,142 (92%) | 48,985 (98%) |
+| pg-raft hook, `sync_rep` | 29,896 (92%) | 38,646 (93%) | 46,379 (93%) |
+
+Against the single runs above: std within 0.9%, hook + `fsync` within 0.9%, hook + `sync_rep`
+within 1.2%; hook + `sync_rep` again falls behind `fsync` at 300 clients.
+
 ## pg-raft notes
 
 - **Commit-path syncs.** `raft/config.toml` has `leader_sync` and `follower_sync`, both `false`:
