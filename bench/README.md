@@ -176,7 +176,7 @@ per-statement latencies) and `summary.txt`.
 | `multi/` | |
 |---|---|
 | `lib.sh` | the roles (from `~/machines.txt`), `/data/bench`, `~/shared/pg_raft`, `on HOST CMD` |
-| `gen.sh` | the configs for 3 and 5 nodes and for solo, in `multi/gen/`; `RAFT_SYNC=1` turns pg-raft's commit-path syncs on, `PG_FSYNC=off` runs std and solo with `fsync = off` (both also read by `deploy.sh`) |
+| `gen.sh` | the configs for 3 and 5 nodes and for solo, in `multi/gen/`; `RAFT_SYNC=1` turns pg-raft's commit-path syncs on, `PG_FSYNC=off` runs std and solo with `fsync = off`, `WAL_COMPRESSION` (`off`, `pglz`, `lz4`, `zstd`) sets `wal_compression` for all three (lz4 by default, from the configs) (all also read by `deploy.sh`) |
 | `deploy.sh [--no-build]` | `gen.sh`, a release build into `~/shared/pg_raft/bin`, bench/ copied to every machine, the binaries installed |
 | `run.sh solo \| std N \| raft N \| stop` | one setup on a fresh cluster, pgbench at each client count in `SWEEP` (pg-raft: through the proxy and direct), then stop it and copy the results to `~/shared/pg_raft/results`; `VARIANT=name` tags the results (`raft-direct-sync-n3-c10-…`) |
 | `all.sh [setups]` | every setup in turn, then `summary.sh` |

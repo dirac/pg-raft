@@ -9,6 +9,7 @@
 # the raft configs (the commit waits in PostgreSQL's synchronous replication). WAL_CAPTURE=hook:
 # wal_capture = "hook" and install_dir = HOOK_INSTALL_DIR (pg-raft's PostgreSQL with the
 # pg_raft_wal extension) in the raft configs. MAX_CONNECTIONS=N: max_connections for all three.
+# WAL_COMPRESSION=off|pglz|lz4|zstd: wal_compression for all three (lz4 by default, in the configs).
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
@@ -16,6 +17,7 @@ mkdir -p "$GEN_DIR"
 pg_lines=()
 [[ "${PG_FSYNC:-on}" == off ]] && pg_lines+=('"fsync = off"')
 [[ -n "${MAX_CONNECTIONS:-}" ]] && pg_lines+=("\"max_connections = $MAX_CONNECTIONS\"")
+[[ -n "${WAL_COMPRESSION:-}" ]] && pg_lines+=("\"wal_compression = $WAL_COMPRESSION\"")
 pg_conf=""
 (( ${#pg_lines[@]} )) && pg_conf="PG_CONF=(${pg_lines[*]})"
 capture="${WAL_CAPTURE:-fuse}"
@@ -50,6 +52,9 @@ for n in "${NODE_SIZES[@]}"; do
     sed -n '/^\[pg_config\]/,$p' "$src" |
       if [[ -n "${MAX_CONNECTIONS:-}" ]]; then
         sed -E "s/^max_connections[[:space:]]*=.*/max_connections    = $MAX_CONNECTIONS/"
+      else cat; fi |
+      if [[ -n "${WAL_COMPRESSION:-}" ]]; then
+        sed -E "s/^wal_compression[[:space:]]*=.*/wal_compression    = \"$WAL_COMPRESSION\"/"
       else cat; fi
   } > "$GEN_DIR/raft-$n.toml"
 

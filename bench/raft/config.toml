@@ -86,3 +86,4 @@ shared_buffers     = "4GB"
 max_connections    = 200
 max_wal_size       = "16GB"
 checkpoint_timeout = "15min"
+wal_compression    = "lz4"
