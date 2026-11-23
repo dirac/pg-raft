@@ -102,6 +102,6 @@ recoveries, failed checks.
 ## Notes
 
 - One machine: the "network" is loopback, so partitions are only simulated by pauses.
-- `commit_wait = "fsync"`; the `sync_rep` mode isn't exercised.
+- `commit_wait = "fsync"` by default; `COMMIT_WAIT=sync_rep ./chaos/fresh.sh` runs the `sync_rep` mode.
 - On macOS, PostgreSQLs killed with their data directories deleted leave System V shared memory
   behind; `fresh.sh` removes the orphaned segments (macOS allows 32).

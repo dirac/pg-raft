@@ -312,6 +312,7 @@ def check(label):
         took = wait_recovered(300)
         if took is None:
             ev(f"CHECK FAILED [{label}]: no primary/nodes not up after 300 s")
+            ok = False
             return False
         p = primary()
         pport = PG_PORTS[p]
@@ -327,6 +328,7 @@ def check(label):
         prim = psql(pport, q_sum, timeout=60)
         if prim is None or target is None:
             ev(f"CHECK FAILED [{label}]: queries on the primary (node {p}) failed")
+            ok = False
             return False
         cnt, a, t, b, d, h = prim.split(",")
         if not (a == t == b == d):

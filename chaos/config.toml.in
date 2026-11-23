@@ -20,7 +20,7 @@ ledger_file_size            = 67108864
 
 leader_sync   = false
 follower_sync = false
-commit_wait   = "fsync"
+commit_wait   = "@COMMIT_WAIT@"
 
 [[server]]
 hostname = "127.0.0.1"
