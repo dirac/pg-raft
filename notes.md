@@ -30,6 +30,10 @@ When the node loses leadership, it stops its PostgreSQL at once, and every fsync
 
 The old primary rejoins without pg_rewind. Its data directory never runs ahead of the committed WAL, because PostgreSQL writes a data page only after the WAL covering it has been flushed, and here a flush means committed. Only its pg_wal can hold uncommitted WAL, so the node rebuilds pg_wal from the committed copy and restarts PostgreSQL as a standby.
 
+Operation
+
+A pg-raft node is a single executable, pg_raft_node, run once on each of three or five servers. Every node reads the same configuration file, which lists the servers' addresses and ports, the path to a stock PostgreSQL installation (with FUSE), a working directory, and where backups are kept. Each node is started with that file and its own index in the server list; the nodes elect a leader among themselves, and the leader's PostgreSQL becomes the primary. A companion command, pg_raft_initdb, runs once beforehand to create the first backup that every node starts from. Clients either connect through a small proxy, pg_raft_proxy, which always forwards to the current primary, or connect directly to a node's PostgreSQL, listing all nodes with target_session_attrs=read-write and reconnecting after a failover.
+
 Results: pgbench at scale 1000 across three availability zones
 
 Three database servers ran in three availability zones of AWS us-west-2, with pgbench on a fourth machine, PostgreSQL 18.7, pgbench's TPC-B-like workload at scale 1000 and 300 clients. The numbers are means of 5 rounds.
