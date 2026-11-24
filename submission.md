@@ -17,7 +17,7 @@ served by an implementation of the physical replication protocol. A dead primary
 pg_wal from the committed log when it restarts and rejoins the quorum without pg_rewind.
 
 The talk covers the design, the failover sequence and benchmarks across three availability
-zones. At pgbench scale 1000, pg-raft reaches 91–97% of the throughput of quorum synchronous
+zones. At pgbench scale 1000, pg-raft reaches 91–97% of the throughput of synchronous
 replication. A commit can wait for Raft inside the WAL flush, where `WALWriteLock` serializes
-Raft rounds, or in the synchronous replication wait, where rounds overlap: we'll show where each
-wins. We'll close with small upstream changes that would make this safer in stock PostgreSQL.
+Raft rounds, or in the synchronous replication wait, where rounds overlap: we'll show how each 
+of these performs. We'll conclude with a description of the patches.
