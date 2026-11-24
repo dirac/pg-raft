@@ -271,8 +271,18 @@ class Ledger {
   RaftIndex compaction_point_before_wal(uint64_t lsn, RaftIndex limit) const;
 
   /// Deletes the files before the one starting at |first|. open() is given the same first index
-  /// after a restart.
+  /// after a restart. detach_before() and then unlink_files() with what it returns.
   Result<void> drop_before(RaftIndex first);
+
+  /// The in-memory part of drop_before(): the ledger starts at |first| (reads before it find
+  /// nothing), and the files before it are returned, still on disk, for unlink_files(). Cheap: no
+  /// I/O. Until they are unlinked, a restart with the previous first index keeps them (and one with
+  /// |first| deletes them, Ledger::open).
+  Result<vector<std::filesystem::path>> detach_before(RaftIndex first);
+
+  /// Unlinks |paths| (files detach_before() returned; ENOENT is not an error) and syncs the
+  /// directory.
+  Result<void> unlink_files(vector<std::filesystem::path> const& paths);
 
   // InstallSnapshot (docs/ledger.md §6.6). The leader: snapshot_file(), then read_snapshot() for
   // each chunk. The follower: install_chunk() for each, prepare_install(), then the meta file names

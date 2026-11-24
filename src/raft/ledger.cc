@@ -1649,12 +1649,29 @@ RaftIndex Ledger::compaction_point_before_wal(uint64_t lsn, RaftIndex limit) con
 }
 
 Result<void> Ledger::drop_before(RaftIndex first) {
+  auto paths = detach_before(first);
+  if (!paths)
+    return paths.error();
+  return unlink_files(*paths);
+}
+
+Result<void> Ledger::unlink_files(vector<fs::path> const& paths) {
+  if (paths.empty())
+    return ok();
+  for (auto const& path : paths)
+    if (::unlink(path.c_str()) != 0 && errno != ENOENT)
+      return elog(system_error_code(errno), "Unable to delete {}", path);
+  return fsync_dir();
+}
+
+Result<vector<fs::path>> Ledger::detach_before(RaftIndex first) {
+  vector<fs::path> paths;
   auto lk = std::unique_lock{mtx_};
   auto it = files_.find(first);
   if (it == files_.end())
     return elog(system_error_code(EINVAL), "ledger {}: no file starts at index {}", dir_, first);
   if (it == files_.begin())
-    return ok();
+    return paths;
 
   auto const& h = it->second->header;
   base_idx_     = first - 1U;
@@ -1662,9 +1679,7 @@ Result<void> Ledger::drop_before(RaftIndex first) {
   base_term_    = h.prev_term;
   base_state_   = h.state;
   while (files_.begin()->first < first) {
-    auto const& f = files_.begin()->second;
-    if (::unlink(f->path.c_str()) != 0)
-      return elog(system_error_code(errno), "Unable to delete {}", f->path);
+    paths.push_back(files_.begin()->second->path);
     files_.erase(files_.begin());
   }
   auto const term_at = terms_.upper_bound(first) == terms_.begin()
@@ -1675,7 +1690,7 @@ Result<void> Ledger::drop_before(RaftIndex first) {
     terms_[first] = *term_at;
   while (!window_.empty() && window_.front().idx < first)
     window_.pop_front();
-  return fsync_dir();
+  return paths;
 }
 
 // InstallSnapshot.

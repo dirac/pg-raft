@@ -170,7 +170,11 @@ Majority faults, from the restart that gives back a quorum:
    (`keep_from` moves), and a new leader often compacts within a second of taking over, so it can
    be deposed at once (#7, #68). This is the cause of the elections after follower faults
    (#43 crash_follower, #64 kill_follower_pg) and of the second elections in #7, #68 and #97.
-   Compaction (`RaftServer`, with the server lock held) should not block heartbeats.
+   Compaction (`RaftServer`, with the server lock held) should not block heartbeats. (Fixed after
+   the run: under the lock compaction now only reads a few records and detaches the files in
+   memory; the WAL deletion thread saves the meta file and deletes the files, `docs/ledger.md`
+   §6.5. In `node_recovery_test` "Keeping the entries" to "Compacting:" went from 120–170 ms to
+   2 ms.)
 2. **A leader whose promotion failed can stay leader without serving.** In #35 (crash_majority)
    node 1 was elected by a survivor before that survivor was crashed; with no quorum its promotion
    failed ("PostgreSQL did not leave recovery: stepping down"), and the step-down gave up after 6 s

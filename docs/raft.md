@@ -205,11 +205,14 @@ entries inherited from earlier leaders have no handler.
   after it; without one (the raft tests) `keep_old_logs` entries are kept. Never past the last
   applied entry, nor past the last checkpoint ([ledger.md](ledger.md) §9.2; a checkpoint compacts
   again when a `keep_from` is set). Then it is rounded down to the first index of the ledger file that holds it:
-  **compaction deletes whole files**, and the new first file's header is the boundary state. The
-  meta file is written first (`first_idx`, `first_segment`), then the files are deleted. **The
+  **compaction deletes whole files**, and the new first file's header is the boundary state. Under the
+  server lock it only sets `first_idx` / `first_segment` and detaches the files in memory; the
+  WAL deletion thread writes the meta file, then deletes the files and the WAL segments
+  ([ledger.md](ledger.md) §6.5: doing it under the lock stopped a leader's heartbeats). **The
   leader compacts too**; stepping down to compact would be a PostgreSQL failover. No node takes a
   backup to compact: the standbys take the backups.
-- **WAL deletion** (`wal_gc`, a thread of its own): deletes the segments of `wal_dir` wholly before
+- **WAL deletion** (`wal_gc`, a thread of its own): finishes the compactions (meta file, ledger
+  files), then deletes the segments of `wal_dir` wholly before
   `first_segment`, by address, so the parent timeline's copy of the segment where a timeline
   starts is kept (the WAL sender reads the start of the new timeline's first segment from it).
   Every entry in the log has its WAL in `wal_dir`.

@@ -52,14 +52,6 @@ Found in the second review (2026-11-12), not fixed yet:
   `first_segment` (they are committed).
 - [ ] **node**: `restore_latest_backup` ignores a failed `copy_file` into `raft/wal` (the `ec` is
   overwritten by the next `rename`), and renames entries out of `data/pg_wal` while iterating it.
-- [ ] **raft**: `compact_log` runs under the server lock and, when `keep_from` moves, scans the
-  entries from the first one to find the target (reading the ledger files): commits stall
-  meanwhile. (It no longer applies them, nor deletes them in one transaction: the boundary state
-  is the new first file's header, and whole files are deleted.) The chaos run (2026-11-23,
-  finding 1) shows the cost: 8 of 27 compactions on a leader stalled it 250–360 ms, past the
-  200–300 ms election timeout, and a follower took over with a PostgreSQL failover (every election
-  after a follower-only fault; twice a leader deposed within a second of its promotion).
-  Compaction must not block heartbeats. ([chaos/README.md, finding 1](../chaos/README.md#findings))
 - [ ] **wal_fuse**: `op_write` always returns `size`, hiding real I/O errors such as a failed mmap.
   ([wal_fuse.md §6](wal_fuse.md#6-open-items))
 - [ ] **wal_fuse**: `WalState` doesn't range-check a corrupt `xl_tot_len` / `xlp_rem_len` and

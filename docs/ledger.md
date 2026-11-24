@@ -236,15 +236,30 @@ PostgreSQL failover), and none takes a backup to do it: the standbys take the ba
 `set_wal_keep_from`. The target first index is the first entry whose segment is at or after it
 (`keep_old_logs` entries without one, in the raft tests), never past the last applied entry, then
 rounded **down** to the first index of the file that holds it: compaction deletes whole files.
-Under the server lock:
+Under the server lock, with no I/O but a few small record reads (holding the lock for the meta
+file's fsync, the unlink of 1 GiB files and a directory fsync, plus reading up to 8 MiB of records
+to find `first_segment`, stalled a leader for 250–360 ms in the chaos run: past the election
+timeout):
 
-1. Write `meta` with the new `first_idx` and `first_segment` (the segment of the first entry with
-   one, from the new first file on).
-2. Delete the files before it (`Ledger::drop_before`).
+1. Set the new `first_idx` and `first_segment` in the state (the segment of the first entry with
+   one, from the new first file on: records decoded in place, 16 at a time).
+2. Detach the files before it from the ledger (`Ledger::detach_before`: in memory only; reads
+   before `first_idx` find nothing), and queue a job for the WAL deletion thread: the meta file's
+   save, numbered, and the detached files.
+
+The WAL deletion thread then:
+
+3. Writes `meta` (unless a later save is written already: every save is numbered under the server
+   lock, and written in order under a mutex of its own).
+4. Unlinks the files (`Ledger::unlink_files`) and syncs the directory, unless an install replaced
+   the ledger meanwhile (an epoch, checked under a mutex the install holds while it replaces the
+   files: a detached file's name could be the installed file's).
+5. Deletes the WAL segments before the job's `first_segment`.
 
 The boundary state, the state at the entry before the first one, is the new first file's header:
-nothing is computed. A crash between steps 1 and 2 leaves files before `first_idx`; startup
-deletes them.
+nothing is computed. A crash before step 3 leaves the old `meta` and the files: the ledger opens as
+before the compaction. A crash between steps 3 and 4 leaves files before `first_idx`; startup
+deletes them. `Ledger::drop_before` is steps 2 and 4 at once (the tests).
 
 ### 6.6 InstallSnapshot
 

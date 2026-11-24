@@ -846,7 +846,12 @@ void RaftServer::install(InstallInfo const& info) {
     dirty_.clear();
   }
   save_meta(first);
-  value(ledger_.finish_install(first));
+  {
+    // finish_install deletes every ledger file: a compaction's unlinks must not come after it.
+    auto lk = std::unique_lock{unlink_mtx_};
+    drop_epoch_.fetch_add(1);
+    value(ledger_.finish_install(first));
+  }
   save_meta();
   write_history(state_);  // the timeline the file's records continue on, from its header
 
@@ -1362,19 +1367,28 @@ void RaftServer::compact_log() {
   if (target <= first)
     return;
 
-  // The segment of the first entry, from target on, that has one.
+  // The segment of the first entry, from target on, that has one: usually the first. Small
+  // batches of records, decoded in place (entries() copied up to 8 MiB of WAL for this).
   auto first_segment = state_.first_segment;
   for (RaftIndex idx = target;;) {
-    auto batch = value(ledger_.entries(idx, 4096));
-    if (!batch || batch->empty())
+    auto batch = value(ledger_.records(idx, 16, 256U << 10U));
+    if (!batch || batch->count() == 0)
       break;
-    auto pos = std::ranges::find_if(
-        *batch, [](LedgerEntry const& e) { return e.entry.cmd.segment.has_value(); });
-    if (pos != batch->end()) {
-      first_segment = *pos->entry.cmd.segment;
+    std::optional<LogSeqNumber> found;
+    for (auto const& buf : batch->buffers) {
+      for (std::span<uint8_t const> rest{buf}; !found && !rest.empty();) {
+        auto rec = value(decode_record(rest));
+        found    = rec.entry.cmd.segment;
+        rest     = rest.subspan(rec.bytes.size());
+      }
+      if (found)
+        break;
+    }
+    if (found) {
+      first_segment = *found;
       break;
     }
-    idx = idx + batch->size();
+    idx = batch->last + 1U;
   }
 
   log(INFO,
@@ -1383,31 +1397,77 @@ void RaftServer::compact_log() {
       target,
       first_segment,
       last_applied);
-  // The meta file first: after a crash between the two, Ledger::open drops the files before
-  // first_idx.
+  // The ledger drops the files in memory; the WAL deletion thread saves the meta file, then
+  // unlinks them (after a crash between the two, Ledger::open drops the files before first_idx).
   state_.first_idx     = target;
   state_.first_segment = first_segment;
-  save_meta();
-  value(ledger_.drop_before(target));
-  publish_state();
+  auto files           = value(ledger_.detach_before(target));
+  auto meta            = meta_snapshot();
+  auto seq             = ++meta_seq_;
   {
-    auto lk  = std::unique_lock{gc_mtx_};
+    auto       lk    = std::unique_lock{gc_mtx_};
+    auto const epoch = drop_epoch_.load();
+    if (!drop_)
+      drop_.emplace();
+    if (drop_->epoch != epoch)
+      drop_->files.clear();
+    drop_->epoch = epoch;
+    drop_->seq   = seq;
+    drop_->meta  = std::move(meta);
+    drop_->files.insert(drop_->files.end(), files.begin(), files.end());
     gc_wake_ = true;
   }
+  // After the job: the WAL deletion thread takes first_segment from a job, else from the
+  // published state, which must then be in the meta file.
+  publish_state();
   gc_cv_.notify_all();
+}
+
+Result<void> RaftServer::write_meta(uint64_t seq, LedgerMeta const& meta) {
+  auto lk = std::unique_lock{meta_mtx_};
+  if (seq <= meta_written_)
+    return ok();
+  if (auto r = write_meta_file(meta_path(), meta, options_.no_sync); !r)
+    return r;
+  meta_written_ = seq;
+  return ok();
 }
 
 void RaftServer::wal_gc() {
   while (true) {
+    std::optional<DropJob> job;
     {
       auto lk = std::unique_lock{gc_mtx_};
       gc_cv_.wait(lk, [this] { return gc_wake_ || gc_stop_; });
       if (gc_stop_)
-        return;
+        return;  // a compaction not finished: the next start's (or the last save's) meta file
       gc_wake_ = false;
+      job      = std::exchange(drop_, std::nullopt);
     }
 
-    auto first = applied_state().first_segment;
+    // The compactions: the meta file, then their ledger files.
+    if (job) {
+      if (auto r = write_meta(job->seq, job->meta); !r) {
+        log(ERROR, "{}Unable to save the meta file of a compaction: retried later", log_prefix_);
+        auto lk = std::unique_lock{gc_mtx_};
+        if (!drop_)
+          drop_ = std::move(job);
+        else if (drop_->epoch == job->epoch)  // a later compaction: its meta file, every file
+          drop_->files.insert(drop_->files.begin(), job->files.begin(), job->files.end());
+        continue;
+      }
+      auto lk = std::unique_lock{unlink_mtx_};
+      if (job->epoch == drop_epoch_.load())
+        if (auto r = ledger_.unlink_files(job->files); !r)
+          log(ERROR,
+              "{}Unable to delete the compacted ledger files (the next start does)",
+              log_prefix_);
+    }
+
+    // The meta file has the first segment (a compaction's, saved above; otherwise saved with the
+    // server lock held before it was published, as an install's, which voids an earlier job's).
+    auto first = job && job->epoch == drop_epoch_.load() ? job->meta.state.first_segment
+                                                         : applied_state().first_segment;
     if (first.lsn == 0)
       continue;
     // Not past the local PostgreSQL's redo point (set_wal_gc_floor()).

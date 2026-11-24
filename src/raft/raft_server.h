@@ -370,9 +370,12 @@ class RaftServer : public ClientConnectionApi,
   /// and truncates the log, if it holds the lock.
   void compact(RaftIndex idx, UniqueLock lk);
 
-  /// Compaction, with the server lock held: saves the state (first_idx, first_segment) and the
-  /// boundary state in the meta file, then drops the entries before the new first entry from the
-  /// ledger; then wakes the WAL deletion thread.
+  /// Compaction, with the server lock held, without I/O beyond a few small record reads: sets the
+  /// state (first_idx, first_segment), detaches the ledger files before the new first entry, and
+  /// hands the rest to the WAL deletion thread (DropJob): it saves the meta file, then unlinks the
+  /// files (a restart in between keeps them, or deletes them with the saved first index), then
+  /// deletes the WAL segments. Holding the lock for those took 250–360 ms in the chaos run (the
+  /// leader's heartbeats stopped: an election).
   void compact_log();
 
   /// The history files of |s|'s timeline and of its ancestors (each the lines of the latest one
@@ -380,9 +383,10 @@ class RaftServer : public ClientConnectionApi,
   /// before the state are not applied again (compacted, or never received).
   void write_history(RaftState const& s);
 
-  /// The WAL deletion thread: deletes the segments of wal_dir wholly before first_segment (by
-  /// address: the parent timeline's copy of the segment where a timeline starts is kept, the WAL
-  /// sender reads the start of the new timeline's first segment from it).
+  /// The WAL deletion thread: finishes the compactions (DropJob), then deletes the segments of
+  /// wal_dir wholly before first_segment (by address: the parent timeline's copy of the segment
+  /// where a timeline starts is kept, the WAL sender reads the start of the new timeline's first
+  /// segment from it).
   void wal_gc();
 
   /// A stepdown that has not handed over the leadership in kStepdownTimeouts election timeouts is
@@ -418,15 +422,22 @@ class RaftServer : public ClientConnectionApi,
   /// wal_dir: the entries' part of it is the last checkpoint's (the node's own fields are
   /// current).
   std::filesystem::path meta_path() const { return dir_ / "meta"; }
-  void save_meta(std::optional<RaftIndex> installing = std::nullopt) {
+  /// What the meta file holds now (with the server lock held).
+  LedgerMeta meta_snapshot(std::optional<RaftIndex> installing = std::nullopt) const {
     auto s        = state_;
     s.log_idx     = checkpoint_state_.log_idx;
     s.timestamp   = checkpoint_state_.timestamp;
     s.flushed_lsn = checkpoint_state_.flushed_lsn;
     s.wal_end     = checkpoint_state_.wal_end;
-    value(write_meta_file(
-        meta_path(), LedgerMeta{.state = s, .installing = installing}, options_.no_sync));
+    return LedgerMeta{.state = s, .installing = installing};
   }
+  /// Saves the meta file now (with the server lock held).
+  void save_meta(std::optional<RaftIndex> installing = std::nullopt) {
+    value(write_meta(++meta_seq_, meta_snapshot(installing)));
+  }
+  /// Writes save number |seq| of the meta file, unless a later one is written already (the
+  /// compaction's saves are written by the WAL deletion thread, without the server lock).
+  Result<void> write_meta(uint64_t seq, LedgerMeta const& meta);
 
   /// A stepdown is called off after this many election timeouts.
   constexpr static unsigned kStepdownTimeouts = 32U;
@@ -512,11 +523,32 @@ class RaftServer : public ClientConnectionApi,
 
   std::optional<LogSeqNumber> keep_from_;  // under the server lock
 
+  // The meta file's saves are numbered (under the server lock) and written under meta_mtx_: one
+  // written makes the earlier ones void (each holds the state at its number).
+  uint64_t   meta_seq_ = 0;  // under the server lock
+  std::mutex meta_mtx_;
+  uint64_t   meta_written_ = 0;  // under meta_mtx_
+
+  // The compactions the WAL deletion thread finishes (under gc_mtx_): the latest one's meta save,
+  // then every one's ledger files.
+  struct DropJob {
+    uint64_t                      seq   = 0;
+    uint64_t                      epoch = 0;  // drop_epoch_ when the files were detached
+    LedgerMeta                    meta;
+    vector<std::filesystem::path> files;
+  };
+  // An install replaces every ledger file: it bumps the epoch (under unlink_mtx_, which the WAL
+  // deletion thread holds while it unlinks), and the files detached before it are not unlinked
+  // (they are gone; a name may be the installed file's).
+  std::mutex            unlink_mtx_;
+  std::atomic<uint64_t> drop_epoch_{0};
+
   // The WAL deletion thread.
   std::mutex               gc_mtx_;
   std::condition_variable  gc_cv_;
   bool                     gc_wake_{false};
   bool                     gc_stop_{false};
+  std::optional<DropJob>   drop_;  // under gc_mtx_
   std::thread              gc_thread_;
   std::atomic<RaftIndex>   applied_idx_{RaftIndex{0}};
   shared_ptr<RaftObserver> observer_;
