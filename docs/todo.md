@@ -21,15 +21,26 @@ Found in the second review (2026-11-12), not fixed yet:
 - [ ] **node**: nothing watches the postmaster. A PostgreSQL that dies on its own (OOM kill,
   crash) is never restarted; on the leader the node keeps reporting "serving" and the proxy keeps
   routing to a dead server. ([node.md §3.4](node.md#34-startup-and-postgresql-exits))
-- [ ] **node**: `Node::promote` gives up without stepping down when PostgreSQL doesn't leave
-  recovery, when the timeline isn't committed in time, or when PostgreSQL isn't running: the node
-  stays leader and never serves, so the cluster has no primary until something else changes.
-  Only the standby catch-up step steps down. Also, a failed `pg_walfile_name` query gives `tli =
-  0`, which skips the wait for the committed timeline.
+- [ ] **node**: a leader whose promotion failed can stay leader without serving (chaos run
+  2026-11-23, #35). `Node::promote` steps down when a step fails, but with no quorum the stepdown
+  is called off after `kStepdownTimeouts` election timeouts ("did not hand over the leadership,
+  calling it off", `RaftServer`), and nothing retries the promotion once the quorum is back; its
+  heartbeats keep the others from campaigning (PreVote refused), so the cluster had no primary for
+  89 s, until finding 1 below deposed it. A leader that isn't serving should retry the promotion,
+  or keep stepping down. Also, a failed `pg_walfile_name` query gives `tli = 0`, which skips the
+  wait for the committed timeline. ([chaos/README.md, finding 2](../chaos/README.md#findings))
+- [ ] **node**: a leader serves after its post-promotion `CHECKPOINT` failed (chaos run
+  2026-11-23, #94). `Node::promote` step 5 only logs "the checkpoint after the promotion did not
+  complete" and goes on to `set_serving(true)`: the proxy routed clients to a primary without a
+  quorum (nothing lost, commits wait for raft), and the checkpoint's protection is skipped (the
+  control file keeps the standby's minimum recovery point, which a crashed primary restarted as a
+  standby trusts). Step down, or retry the checkpoint, instead of serving.
+  ([chaos/README.md, finding 3](../chaos/README.md#findings))
 - [ ] **node**: a backup blocks promotion. `PgInstance::backup` holds `mu_` for the whole
   `pg_basebackup` (on a standby it can wait up to `checkpoint_timeout` to start, then copy the
   whole database), and `promote()` / `is_running()` take `mu_`; a node elected during its backup
-  can't promote until the backup ends.
+  can't promote until the backup ends. (Likely seen in the chaos run 2026-11-23, #4: elected
+  0.1 s after it began a `pg_basebackup`, the node began promoting 2.6 s later; not confirmed.)
 - [ ] **node**: `restart_as_standby` and `restore_and_restart` reset `fuse_` and, if the rebuild
   or restore then fails, return with it null; the next attempt calls `fuse_->stop()` on a null
   pointer (the backup thread retries the restore every minute).
@@ -44,7 +55,11 @@ Found in the second review (2026-11-12), not fixed yet:
 - [ ] **raft**: `compact_log` runs under the server lock and, when `keep_from` moves, scans the
   entries from the first one to find the target (reading the ledger files): commits stall
   meanwhile. (It no longer applies them, nor deletes them in one transaction: the boundary state
-  is the new first file's header, and whole files are deleted.)
+  is the new first file's header, and whole files are deleted.) The chaos run (2026-11-23,
+  finding 1) shows the cost: 8 of 27 compactions on a leader stalled it 250–360 ms, past the
+  200–300 ms election timeout, and a follower took over with a PostgreSQL failover (every election
+  after a follower-only fault; twice a leader deposed within a second of its promotion).
+  Compaction must not block heartbeats. ([chaos/README.md, finding 1](../chaos/README.md#findings))
 - [ ] **wal_fuse**: `op_write` always returns `size`, hiding real I/O errors such as a failed mmap.
   ([wal_fuse.md §6](wal_fuse.md#6-open-items))
 - [ ] **wal_fuse**: `WalState` doesn't range-check a corrupt `xl_tot_len` / `xlp_rem_len` and

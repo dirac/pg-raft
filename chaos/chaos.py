@@ -33,6 +33,9 @@ N = 3
 
 os.makedirs(LOGS, exist_ok=True)
 EVENTS = open(os.path.join(LOGS, "events.log"), "a", buffering=1)
+# Failover timing (election_times.py reads it with the node logs): faults and primary changes,
+# one JSON object per line, wall-clock ms.
+TIMING = open(os.path.join(LOGS, "failover.jsonl"), "a", buffering=1)
 lock = threading.Lock()
 procs = {}          # node id -> Popen
 expected_down = set()
@@ -49,6 +52,23 @@ def ev(msg):
     with lock:
         EVENTS.write(line + "\n")
     print(line, flush=True)
+
+
+def timing(**kw):
+    kw["t"] = round(time.time() * 1000)
+    with lock:
+        TIMING.write(json.dumps(kw) + "\n")
+
+
+def primary_watch():
+    """The proxy's primary every 50 ms; each change goes to failover.jsonl."""
+    last = "?"
+    while not stop_all.is_set():
+        p = primary()
+        if p != last:
+            timing(event="primary", server=p)
+            last = p
+        time.sleep(0.05)
 
 
 def sh(cmd, timeout=60, **kw):
@@ -400,6 +420,7 @@ def act():
     down = random.uniform(3, 30)
     stats["actions"] += 1
     ev(f"ACTION {stats['actions']}: {name} (primary node {p}, follower pick node {f}, down {down:.0f} s)")
+    timing(event="fault", action=name, n=stats["actions"], primary=p, follower=f)
     if name == "crash_leader":
         crash_node(p); time.sleep(down); start_node(p)
     elif name == "crash_follower":
@@ -455,6 +476,7 @@ def run(hours):
         ev("the cluster did not come up")
         return
     threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=primary_watch, daemon=True).start()
     threading.Thread(target=writer, daemon=True).start()
     threading.Thread(target=pgbench_loop, daemon=True).start()
     end = time.time() + hours * 3600
