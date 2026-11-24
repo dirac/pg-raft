@@ -37,4 +37,5 @@ Three database servers ran in three availability zones of AWS us-west-2, with pg
 Standard synchronous replication, with a primary and two standbys and a commit waiting for one of them, reached 50,519 transactions per second. pg-raft with three nodes reached 49,136 with FUSE and 49,190 with the hooks, 97% of synchronous replication, with about 0.3 ms more per commit. A single PostgreSQL without HA reached 56,271 in one run.
 
 A separate two-hour fault-injection run lost no acknowledged write, and clients reached a new
-primary a median of 1.5 seconds after a leader failure.
+primary a median of 1.5 seconds after a leader failure. The run had leader 39 (crashed, paused or
+PostgreSQL killed) failures.
