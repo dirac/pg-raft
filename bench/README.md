@@ -1058,8 +1058,18 @@ Scale 1000 (`PGBENCH_INIT_ARGS="-I dtGvp"`: the load generated on the server; 1,
 The scale 1000 setups above (without solo) in 5 rounds (`campaign-rep.sh`), to measure the
 run-to-run variation: each round runs std, hook + `fsync`, hook + `sync_rep`, FUSE + `fsync`, FUSE +
 `sync_rep` in that order, each on a fresh cluster with the same settings, at 150, 200 and 300
-clients; ~55 min a round, 2026-11-23 23:11 to 2026-11-24 03:42 UTC, every run OK. tps of
-each round, with the mean (% of std's mean) and the spread (max − min over the mean):
+clients; ~55 min a round, 2026-11-23 23:11 to 2026-11-24 03:42 UTC, every run OK. Mean tps
+over the 5 rounds (% of std's mean):
+
+| Setup | 150 | 200 | 300 |
+|---|---|---|---|
+| std, quorum sync rep | 32,247 | 41,331 | 50,519 |
+| pg-raft hook, `fsync` | 29,401 (91%) | 38,088 (92%) | 49,190 (97%) |
+| pg-raft hook, `sync_rep` | 30,321 (94%) | 38,996 (94%) | 47,217 (93%) |
+| pg-raft FUSE, `fsync` | 29,594 (92%) | 38,425 (93%) | 49,136 (97%) |
+| pg-raft FUSE, `sync_rep` | 29,887 (93%) | 38,625 (93%) | 46,930 (93%) |
+
+tps of each round, with the mean (% of std's mean) and the spread (max − min over the mean):
 
 | Setup | Clients | round 1 | round 2 | round 3 | round 4 | round 5 | mean (% of std) | spread |
 |---|---|---|---|---|---|---|---|---|
@@ -1172,6 +1182,28 @@ each round, with the mean (% of std's mean) and the spread (max − min over the
 | pg-raft FUSE, `sync_rep` | 300 | 3 | 47,812 | 6.255 | 4.161 | 1.959 |
 | pg-raft FUSE, `sync_rep` | 300 | 4 | 46,224 | 6.482 | 5.309 | 2.109 |
 | pg-raft FUSE, `sync_rep` | 300 | 5 | 47,202 | 6.339 | 5.040 | 2.003 |
+
+</details>
+
+<details><summary>Scale 1000, repeated: means over the 5 runs, tps spread, latency and <code>END</code></summary>
+
+| Setup | Clients | runs | mean tps | min | max | spread | latency avg (ms) | stddev (ms) | `END` (ms) |
+|---|---|---|---|---|---|---|---|---|---|
+| std, quorum sync rep | 150 | 5 | 32,247 | 32,025 | 32,378 | 1.1% | 4.647 | 0.727 | 1.112 |
+| std, quorum sync rep | 200 | 5 | 41,331 | 41,020 | 41,514 | 1.2% | 4.833 | 0.770 | 1.187 |
+| std, quorum sync rep | 300 | 5 | 50,519 | 50,075 | 50,754 | 1.3% | 5.925 | 1.408 | 1.688 |
+| pg-raft hook, `fsync` | 150 | 5 | 29,401 | 29,334 | 29,561 | 0.8% | 5.096 | 0.771 | 1.543 |
+| pg-raft hook, `fsync` | 200 | 5 | 38,088 | 37,933 | 38,352 | 1.1% | 5.243 | 0.818 | 1.597 |
+| pg-raft hook, `fsync` | 300 | 5 | 49,190 | 48,931 | 49,374 | 0.9% | 6.083 | 1.313 | 1.993 |
+| pg-raft hook, `sync_rep` | 150 | 5 | 30,321 | 29,603 | 31,042 | 4.7% | 4.943 | 3.643 | 1.382 |
+| pg-raft hook, `sync_rep` | 200 | 5 | 38,996 | 37,607 | 40,163 | 6.6% | 5.124 | 3.531 | 1.439 |
+| pg-raft hook, `sync_rep` | 300 | 5 | 47,217 | 46,379 | 48,441 | 4.4% | 6.341 | 4.786 | 1.973 |
+| pg-raft FUSE, `fsync` | 150 | 5 | 29,594 | 29,521 | 29,658 | 0.5% | 5.063 | 0.788 | 1.523 |
+| pg-raft FUSE, `fsync` | 200 | 5 | 38,425 | 38,353 | 38,487 | 0.3% | 5.198 | 0.787 | 1.564 |
+| pg-raft FUSE, `fsync` | 300 | 5 | 49,136 | 48,840 | 49,363 | 1.1% | 6.095 | 1.277 | 2.000 |
+| pg-raft FUSE, `sync_rep` | 150 | 5 | 29,887 | 29,207 | 30,341 | 3.8% | 5.014 | 4.023 | 1.449 |
+| pg-raft FUSE, `sync_rep` | 200 | 5 | 38,625 | 37,517 | 39,709 | 5.7% | 5.173 | 3.681 | 1.491 |
+| pg-raft FUSE, `sync_rep` | 300 | 5 | 46,930 | 45,896 | 47,812 | 4.1% | 6.378 | 4.989 | 2.043 |
 
 </details>
 
