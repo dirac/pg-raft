@@ -3,7 +3,7 @@ Raft Over the WAL Stream (https://github.com/dirac/pg-raft)
 The leader and the Raft log
 ---------------------------
 
-A pg-raft deployment is one Raft group with one node per server. Each node runs
+A pg-raft deployment is a Raft group with one node per server. Each node runs
 a Raft server and a local PostgreSQL. The Raft leader's PostgreSQL is the
 primary, and every other PostgreSQL is a standby.
 
@@ -17,7 +17,7 @@ primary before a quorum has it.
 
 Every raft node writes the WAL of each committed entry into its own copy of the
 WAL and streams it to its own standby over PostgreSQL's physical replication
-protocol., the raft nodes acts as a wal_sender. A standby never replays WAL that
+protocol, thus acting as the wal_sender. A standby never replays WAL that
 wasn't committed.
 
 FUSE: intercepting the WAL writes and fsyncs
@@ -39,24 +39,24 @@ Raft entries, and in the benchmark below FUSE and the hooks perform the same.
 Controlling the PostgreSQL process
 ----------------------------------
 
-The node starts, promotes and stops its PostgreSQL itself, following its Raft
+Each Raft node starts, promotes and stops its PostgreSQL itself, following its Raft
 role (leader or follower).
 
-PostgreSQL always starts as a standby, streaming from its raft node. A node
+PostgreSQL always starts as a standby, streaming from its Raft node. A node
 without a usable data directory first restores the latest backup.
 
-When the node becomes leader, its standby replays to the end of the committed
-WAL, the node promotes it, and the new timeline is committed through Raft. Only
-then does the node accept clients as the primary. If any step fails, the node
+When a Raft node becomes the leader, its PostgeSQL server in standby mode, replays to the end of the committed
+WAL, at which point the Raft node promotes it to primary, and the new timeline is committed through Raft. Only
+then does the server accept client writes as the primary. If any step fails, the node
 steps down.
 
-When the node loses leadership, it stops its PostgreSQL at once, and every fsync
+When a Raft node loses leadership, it stops its PostgreSQL at once, and every fsync
 still waiting fails. No client of the old primary gets an answer after this
 point.
 
 The old primary rejoins without pg_rewind. Its data directory never runs ahead
 of the committed WAL, because PostgreSQL writes a data page only after the WAL
-covering it has been flushed, and here a flush means committed. Only its raft/wal
+covering it has been flushed, and here a flush means committed. Only its Raft log
 can hold uncommitted WAL, so the node rebuilds pg_wal from the committed copy
 and restarts PostgreSQL as a standby.
 
@@ -78,17 +78,16 @@ and reconnecting after a failover.
 Results: pgbench at scale 1000 across three availability zones
 ---------------------------------------------------------------
 
-Three database servers ran in three availability zones of AWS us-west-2, with
-pgbench on a machine in a fourth AZ, PostgreSQL 18.7, pgbench's TPC-B-like workload
+Benchmarks were run on a 3 node configuration across three AWS availability zones in the us-west-2 region, with
+pgbench running on a server in a fourth AZ. The configuration used PostgreSQL 18.7, pgbench's TPC-B-like workload
 at scale 1000 and 300 clients. The numbers are means of 5 rounds.
 
 Standard synchronous replication, with a primary and two standbys and a commit
 waiting for one of them, reached 50,519 transactions per second. pg-raft with
 three nodes reached 49,136 with FUSE and 49,190 with the hooks, 97% of
-synchronous replication, with about 0.3 ms more per commit. A single PostgreSQL
-without HA reached 56,271 in one run.
+synchronous replication. A single PostgreSQL without HA reached 56,271 in one run.
 
 A separate two-hour fault-injection run lost no acknowledged write, and clients
 reached a new primary a median of 1.5 seconds after a leader failure. The run
-had leader 39 (crashed, paused or PostgreSQL killed) failures.
+had 39 leader failures (crashes, pauses, or PostgreSQL kills).
 
