@@ -1,4 +1,4 @@
-Raft Over the WAL Stream: Notes
+Raft Over the WAL Stream (https://github.com/dirac/pg-raft)
 
 The leader and the Raft log
 ---------------------------
